@@ -9,6 +9,8 @@
 
 A Telegram integration for Claude, Cursor, and other MCP-compatible clients. It exposes Telegram account, chat, message, contact, media, folder, and admin operations through the [Model Context Protocol](https://modelcontextprotocol.io/) using [Telethon](https://docs.telethon.dev/).
 
+This package is published from the `telegram/` directory of [`masterlifting/mcp-store`](https://github.com/masterlifting/mcp-store).
+
 ## 🤖 MCP in Action
 
 Basic Telegram MCP usage in Claude:
@@ -72,8 +74,8 @@ All tool results that include Telegram user-controlled content are sanitized and
 ### 1. Clone and Install
 
 ```bash
-git clone https://github.com/chigwell/telegram-mcp.git
-cd telegram-mcp
+git clone https://github.com/masterlifting/mcp-store.git
+cd mcp-store/telegram
 uv sync
 ```
 
@@ -137,7 +139,7 @@ uv run main.py
 ## MCP Client Configuration
 
 For Claude Desktop or Cursor, point the MCP server at a cloned checkout of
-this project:
+the `telegram/` package:
 
 ```json
 {
@@ -146,7 +148,7 @@ this project:
       "command": "uv",
       "args": [
         "--directory",
-        "/full/path/to/telegram-mcp",
+        "/full/path/to/mcp-store/telegram",
         "run",
         "main.py"
       ],
@@ -167,13 +169,13 @@ server `env` block:
 "TELEGRAM_EXPOSED_TOOLS": "read-only"
 ```
 
-Alternatively, install this repository directly from GitHub into a virtual
-environment using a specific release tag or commit:
+Alternatively, install this package directly from its producer repository into
+a virtual environment using the pinned producer commit:
 
 ```bash
 python -m venv .venv
 . .venv/bin/activate
-pip install "git+https://github.com/chigwell/telegram-mcp.git@<tag-or-commit>"
+pip install "git+https://github.com/masterlifting/mcp-store.git@88f05d18f83c23478a2f75ada9104ac297d7d5db#subdirectory=telegram"
 ```
 
 Then configure your MCP client to run the installed console script:
@@ -197,7 +199,7 @@ Generate a session string without cloning the repo by sourcing this repository
 from GitHub explicitly:
 
 ```bash
-uvx --from "git+https://github.com/chigwell/telegram-mcp.git@<pinned-release-tag-or-commit>" telegram-mcp-generate-session
+uvx --from "git+https://github.com/masterlifting/mcp-store.git@88f05d18f83c23478a2f75ada9104ac297d7d5db#subdirectory=telegram" telegram-mcp-generate-session
 ```
 
 ### Transports
