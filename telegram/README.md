@@ -175,7 +175,7 @@ a virtual environment using the pinned producer commit:
 ```bash
 python -m venv .venv
 . .venv/bin/activate
-pip install "git+https://github.com/masterlifting/mcp-store.git@88f05d18f83c23478a2f75ada9104ac297d7d5db#subdirectory=telegram"
+pip install "git+https://github.com/masterlifting/mcp-store.git@9c3203bf8b57c2c4fad4f64c677b639154b6b707#subdirectory=telegram"
 ```
 
 Then configure your MCP client to run the installed console script:
@@ -199,7 +199,7 @@ Generate a session string without cloning the repo by sourcing this repository
 from GitHub explicitly:
 
 ```bash
-uvx --from "git+https://github.com/masterlifting/mcp-store.git@88f05d18f83c23478a2f75ada9104ac297d7d5db#subdirectory=telegram" telegram-mcp-generate-session
+uvx --from "git+https://github.com/masterlifting/mcp-store.git@9c3203bf8b57c2c4fad4f64c677b639154b6b707#subdirectory=telegram" telegram-mcp-generate-session
 ```
 
 ### Transports
