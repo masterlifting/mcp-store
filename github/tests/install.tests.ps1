@@ -134,7 +134,11 @@ function Invoke-InstallerCase {
     $caseRoot = Join-Path $Root $Case.Name
     $fakeBin = Join-Path $caseRoot 'fake-bin'
     $goPath = Join-Path $caseRoot 'gopath'
-    $goBin = Join-Path $goPath 'bin'
+    $goBin = if ([string]::IsNullOrWhiteSpace($Case.Gobin)) {
+        Join-Path $goPath 'bin'
+    } else {
+        $Case.Gobin
+    }
     $installArgumentPath = Join-Path $caseRoot 'install-argument.txt'
     $serverPath = Join-Path $goBin 'github-mcp-server.exe'
     $fakeGoPath = Join-Path $fakeBin 'go.cmd'
@@ -296,6 +300,11 @@ $cases = @(
     },
     [pscustomobject]@{
         Name = 'existing-go-no-provision'; Gobin = ''; HasGo = $true; HasWinget = $false
+        ProvisionGo = $false; WingetSucceeds = $false; IncludeGoBinInPath = $true; IncludeParentPath = $false
+        HasConflictingServer = $false; ExpectSuccess = $true; ExpectWinget = $false; TokenPresent = $false
+    },
+    [pscustomobject]@{
+        Name = 'configured-gobin'; Gobin = (Join-Path $testRoot 'configured-bin'); HasGo = $true; HasWinget = $false
         ProvisionGo = $false; WingetSucceeds = $false; IncludeGoBinInPath = $true; IncludeParentPath = $false
         HasConflictingServer = $false; ExpectSuccess = $true; ExpectWinget = $false; TokenPresent = $false
     },
