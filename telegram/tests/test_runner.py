@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from telegram_mcp import runner
@@ -17,6 +19,31 @@ class _FakeClient:
 
     async def start(self):
         self.started = True
+
+
+def test_main_uses_standard_asyncio_run_without_event_loop_patching(monkeypatch):
+    baseline_loop = asyncio.new_event_loop()
+    try:
+        standard_run_once = type(baseline_loop)._run_once
+    finally:
+        baseline_loop.close()
+
+    observed = {}
+
+    async def fake_main():
+        loop = asyncio.get_running_loop()
+        observed["task"] = asyncio.current_task()
+        observed["run_once"] = type(loop)._run_once
+
+    monkeypatch.setattr(runner, "_configure_allowed_roots_from_cli", lambda _argv: None)
+    monkeypatch.setattr(runner._runtime, "_apply_exposed_tools_mode", lambda: None)
+    monkeypatch.setattr(runner, "_main", fake_main)
+
+    runner.main()
+
+    assert observed["task"] is not None
+    assert observed["run_once"] is standard_run_once
+    assert not hasattr(runner, "nest_asyncio")
 
 
 @pytest.mark.asyncio

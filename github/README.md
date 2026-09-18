@@ -7,13 +7,19 @@ authentication unchanged.
 ## Prerequisites
 
 - Windows PowerShell 5.1 or PowerShell 7+
-- A supported Go installation with the `go` executable available through PATH
+- `winget` when Go is not already available through PATH
 - Permission to install Go binaries into the configured Go binary directory
 - An MCP-compatible OpenCode installation for consuming the server
 
-The installer does not read, write, or configure credentials. Any
-authentication required by the server remains the responsibility of the
-consuming OpenCode setup.
+If `go` is unavailable, the installer provisions the official `GoLang.Go`
+package with `winget install --id GoLang.Go --exact` and the noninteractive,
+source-agreement, and package-agreement flags. It fails clearly if `winget` is
+unavailable, installation fails, or Go remains inaccessible through PATH.
+
+The installer checks only whether `GITHUB_PERSONAL_ACCESS_TOKEN` is present. It
+never prints, stores, or passes the token to installer subprocesses. A missing
+token is reported as a warning; authentication remains the responsibility of
+the consuming OpenCode setup.
 
 ## Pin evidence
 
@@ -46,15 +52,16 @@ go install github.com/github/github-mcp-server/cmd/github-mcp-server@v1.12.2
 
 It reports the Go binary directory used by the installation and then requires
 `Get-Command github-mcp-server` to resolve `github-mcp-server.exe` from that
-directory through PATH. The installer never changes PATH. If the command is
-missing or resolves to a conflicting executable elsewhere, it fails with
-instructions instead of reporting a false success.
+directory through PATH. If needed, it adds the Go binary directory to the
+installer process PATH only; it never changes persistent user or system PATH.
+It reports that consuming applications must be restarted to see the server.
+If the command resolves to a conflicting executable elsewhere, it fails rather
+than reporting a false success.
 
 ## PATH configuration
 
-If the installer reports that `github-mcp-server` is missing from PATH or a
-conflicting command resolves first, add the reported Go binary directory
-manually:
+If a future PowerShell session reports that `github-mcp-server` is missing from
+PATH, add the reported Go binary directory manually:
 
 1. Open **System Properties** → **Advanced** → **Environment Variables**.
 2. Under **User variables**, select `Path`, choose **Edit**, choose **New**,
