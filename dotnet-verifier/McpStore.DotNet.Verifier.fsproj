@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <RootNamespace>McpStore.DotNet.Verifier</RootNamespace>
+    <AssemblyName>McpStore.DotNet.Verifier</AssemblyName>
+    <OutputType>Exe</OutputType>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <WarningsAsErrors>3390;3391;3392;3393</WarningsAsErrors>
+    <LangVersion>9.0</LangVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="Domain.fs" />
+    <Compile Include="Budgets.fs" />
+    <Compile Include="PathAuthorization.fs" />
+    <Compile Include="Invocation.fs" />
+    <Compile Include="ProcessRunner.fs" />
+    <Compile Include="Parsers.fs" />
+    <Compile Include="Artifacts.fs" />
+    <Compile Include="Verifier.fs" />
+    <Compile Include="Host.fs" />
+  </ItemGroup>
+</Project>
