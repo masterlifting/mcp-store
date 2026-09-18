@@ -7,7 +7,7 @@ OpenCode checkout.
 
 ## Consumer installation
 
-Install this directory into the consumer's `mcp/mcp-store/dotnet-verifier`
+Install this directory into the consumer's `mcp/mcp-store/dotnet`
 checkout at the full producer revision recorded by the consumer descriptor.
 The checkout must be detached at that revision; a branch or moving tag is not
 an equivalent installation.
@@ -15,7 +15,7 @@ an equivalent installation.
 The executable is started with the .NET host injected as an absolute path:
 
 ```text
-dotnet run --project McpStore.DotNet.Verifier.fsproj --configuration Release --no-launch-profile --verbosity quiet -- --dotnet-host <absolute-dotnet-host>
+dotnet run --project Mcp.Verifier.fsproj --configuration Release --no-launch-profile --verbosity quiet -- --dotnet-host <absolute-dotnet-host>
 ```
 
 The host path is intentionally supplied by the consumer. The verifier rejects
