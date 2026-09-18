@@ -79,13 +79,15 @@ def _inline_button_texts(msg):
 
 
 def _link_urls(msg):
-    """Explicit URLs from entities (links hidden behind text), [] if none."""
+    """Sanitized explicit URLs from entities (links hidden behind text), [] if none."""
     out = []
     try:
         for e in getattr(msg, "entities", None) or []:
             u = getattr(e, "url", None)
-            if u:
-                out.append(u)
+            if isinstance(u, str) and u:
+                safe_url = sanitize_user_content(u).replace("\n", "").replace("\t", "")
+                if safe_url != "[empty]":
+                    out.append(safe_url)
     except Exception:
         pass
     return out
@@ -1167,6 +1169,9 @@ async def get_message_context(
             grouped_id = getattr(msg, "grouped_id", None)
             if grouped_id is not None:
                 record["grouped_id"] = grouped_id
+            link_urls = _link_urls(msg)
+            if link_urls:
+                record["link_urls"] = link_urls
 
             # Check if this message is a reply and get the replied message
             reply_quote = get_reply_quote(msg)
@@ -1186,6 +1191,9 @@ async def get_message_context(
                         _r_username = get_sender_username(replied_msg)
                         if _r_username:
                             replied_record["username"] = _r_username
+                        reply_link_urls = _link_urls(replied_msg)
+                        if reply_link_urls:
+                            replied_record["link_urls"] = reply_link_urls
                         record["replied_message"] = replied_record
                 except Exception:
                     record["replied_message"] = None

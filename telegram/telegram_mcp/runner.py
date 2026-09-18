@@ -9,21 +9,48 @@ except UnsafeInstallationError as exc:
 
 from telegram_mcp import runtime as _runtime
 from telegram_mcp.runtime import *
+from telegram_mcp.singleton import (
+    DEFAULT_GRACE_SECONDS,
+    SessionLock,
+    SessionLockError,
+    session_identity,
+)
 import telegram_mcp.tools  # noqa: F401 - registers MCP tools via decorators
 
 
-async def _connect_authorized_client(label, client) -> None:
-    await client.connect()
-    if await client.is_user_authorized():
-        return
+_session_locks: dict[str, SessionLock] = {}
 
-    raise RuntimeError(
-        f"Telegram client '{label}' is not authorized. Interactive phone login "
-        "is disabled for the MCP server because it runs over stdio. Generate a "
-        "session string with `uv run session_string_generator.py`, then set "
-        "TELEGRAM_SESSION_STRING or TELEGRAM_SESSION_STRING_<LABEL> in .env. "
-        "For existing file sessions, run the login outside the MCP server first."
-    )
+
+def _lock_grace_seconds() -> float:
+    raw = os.getenv("TELEGRAM_LOCK_GRACE_SECONDS")
+    if not raw:
+        return DEFAULT_GRACE_SECONDS
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_GRACE_SECONDS
+
+
+async def _connect_authorized_client(label, client) -> None:
+    lock = SessionLock(label, session_identity(client))
+    await asyncio.to_thread(lock.acquire, grace_seconds=_lock_grace_seconds())
+    _session_locks[label] = lock
+    try:
+        await client.connect()
+        if await client.is_user_authorized():
+            return
+
+        raise RuntimeError(
+            f"Telegram client '{label}' is not authorized. Interactive phone login "
+            "is disabled for the MCP server because it runs over stdio. Generate a "
+            "session string with `uv run session_string_generator.py`, then set "
+            "TELEGRAM_SESSION_STRING or TELEGRAM_SESSION_STRING_<LABEL> in .env. "
+            "For existing file sessions, run the login outside the MCP server first."
+        )
+    except BaseException:
+        _session_locks.pop(label, None)
+        lock.release()
+        raise
 
 
 async def _serve(transport: str) -> None:
@@ -85,6 +112,13 @@ async def _main() -> None:
                 "Database lock detected. Please ensure no other instances are running.",
                 file=sys.stderr,
             )
+        elif isinstance(e, SessionLockError):
+            print(
+                "Another instance of this MCP server already holds this Telegram "
+                "session. This instance is exiting instead of connecting a second "
+                "time. Retry once the other instance is gone.",
+                file=sys.stderr,
+            )
         sys.exit(1)
     finally:
         try:
@@ -93,6 +127,9 @@ async def _main() -> None:
             )
         except Exception:
             pass
+        for lock in _session_locks.values():
+            lock.release()
+        _session_locks.clear()
 
 
 def main() -> None:

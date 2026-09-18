@@ -1,3 +1,4 @@
+import asyncio
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -894,3 +895,118 @@ async def test_list_roots_unexpected_error_denies_without_opt_in(tmp_path, monke
     )
     assert status == runtime.ROOTS_STATUS_ERROR
     assert roots == []
+
+
+class _HangingRootsSession:
+    async def list_roots(self):
+        await asyncio.sleep(3600)
+
+
+def _ctx_with_hanging_list_roots():
+    return SimpleNamespace(session=_HangingRootsSession())
+
+
+def test_roots_request_timeout_parsing(monkeypatch):
+    monkeypatch.delenv("TELEGRAM_ROOTS_TIMEOUT_SECONDS", raising=False)
+    assert runtime._roots_request_timeout() == runtime.ROOTS_REQUEST_TIMEOUT_DEFAULT
+    assert runtime._roots_request_timeout("2.5") == 2.5
+    assert runtime._roots_request_timeout("0") is None
+    assert runtime._roots_request_timeout("-1") is None
+    assert runtime._roots_request_timeout("nonsense") == runtime.ROOTS_REQUEST_TIMEOUT_DEFAULT
+
+
+@pytest.mark.parametrize("value", ["NaN", "Infinity", "-Infinity"])
+def test_roots_request_timeout_rejects_non_finite_values(value):
+    assert runtime._roots_request_timeout(value) == runtime.ROOTS_REQUEST_TIMEOUT_DEFAULT
+
+
+@pytest.mark.asyncio
+async def test_list_roots_timeout_falls_back_when_opt_in(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    root.mkdir()
+    monkeypatch.setattr(runtime, "SERVER_ALLOWED_ROOTS", [root.resolve()])
+    monkeypatch.setenv("TELEGRAM_ALLOW_SERVER_ROOTS_FALLBACK", "1")
+    monkeypatch.setenv("TELEGRAM_ROOTS_TIMEOUT_SECONDS", "0.01")
+
+    roots, status = await runtime._get_effective_allowed_roots_with_status(
+        _ctx_with_hanging_list_roots()
+    )
+
+    assert status == runtime.ROOTS_STATUS_SERVER_FALLBACK
+    assert roots == [root.resolve()]
+
+
+@pytest.mark.asyncio
+async def test_list_roots_timeout_denies_without_opt_in(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    root.mkdir()
+    monkeypatch.setattr(runtime, "SERVER_ALLOWED_ROOTS", [root.resolve()])
+    monkeypatch.delenv("TELEGRAM_ALLOW_SERVER_ROOTS_FALLBACK", raising=False)
+    monkeypatch.setenv("TELEGRAM_ROOTS_TIMEOUT_SECONDS", "0.01")
+
+    roots, status = await runtime._get_effective_allowed_roots_with_status(
+        _ctx_with_hanging_list_roots()
+    )
+
+    assert status == runtime.ROOTS_STATUS_TIMEOUT
+    assert roots == []
+    _roots, error = await runtime._ensure_allowed_roots(
+        _ctx_with_hanging_list_roots(), "download_media"
+    )
+    assert "roots/list" in error
+
+
+def test_tool_timeout_parsing(monkeypatch):
+    monkeypatch.delenv("TELEGRAM_TOOL_TIMEOUT_SECONDS", raising=False)
+    assert runtime._tool_timeout_seconds() == 55.0
+    assert runtime._tool_timeout_seconds("3.5") == 3.5
+    assert runtime._tool_timeout_seconds("0") is None
+    assert runtime._tool_timeout_seconds("garbage") == 55.0
+
+
+@pytest.mark.parametrize("value", ["NaN", "Infinity", "-Infinity"])
+def test_tool_timeout_rejects_non_finite_values(value):
+    assert runtime._tool_timeout_seconds(value) == runtime.TOOL_TIMEOUT_SECONDS_DEFAULT
+
+
+@pytest.mark.asyncio
+async def test_tool_timeout_returns_safe_mcp_error(monkeypatch):
+    from mcp.types import CallToolRequest
+
+    async def hanging_handler(_request):
+        await asyncio.Event().wait()
+
+    handlers = runtime.mcp._mcp_server.request_handlers
+    installed_handler = handlers[CallToolRequest]
+    handlers[CallToolRequest] = hanging_handler
+    monkeypatch.setenv("TELEGRAM_TOOL_TIMEOUT_SECONDS", "0.01")
+    try:
+        runtime._install_annotation_hook()
+        response = await handlers[CallToolRequest](None)
+    finally:
+        handlers[CallToolRequest] = installed_handler
+
+    assert response.root.isError is True
+    assert response.root.content[0].text == (
+        "Telegram MCP tool timed out after 0.01s (code: GEN-TIMEOUT)."
+    )
+    assert response.root.content[0].annotations.audience == ["user"]
+
+
+@pytest.mark.asyncio
+async def test_unbounded_tool_timeout_preserves_handler_timeout(monkeypatch):
+    from mcp.types import CallToolRequest
+
+    async def timed_out_handler(_request):
+        raise asyncio.TimeoutError("tool-specific timeout")
+
+    handlers = runtime.mcp._mcp_server.request_handlers
+    installed_handler = handlers[CallToolRequest]
+    handlers[CallToolRequest] = timed_out_handler
+    monkeypatch.setenv("TELEGRAM_TOOL_TIMEOUT_SECONDS", "0")
+    try:
+        runtime._install_annotation_hook()
+        with pytest.raises(asyncio.TimeoutError, match="tool-specific timeout"):
+            await handlers[CallToolRequest](None)
+    finally:
+        handlers[CallToolRequest] = installed_handler

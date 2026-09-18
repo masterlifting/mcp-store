@@ -221,6 +221,10 @@ will use the server: a single long-lived process holds one Telegram
 connection, instead of every client spawning its own Telethon session —
 Telegram throttles and may flag accounts that open many parallel sessions.
 
+Each MCP tool call has a 55-second server-side deadline. Override it with
+`TELEGRAM_TOOL_TIMEOUT_SECONDS`; set it to `0` only for a deliberately
+unbounded operator session.
+
 Register the shared server with clients:
 
 ```bash
@@ -359,6 +363,9 @@ Security behavior:
   `TELEGRAM_ALLOW_SERVER_ROOTS_FALLBACK=1` to fall back to the server CLI roots
   in that case (opt-in; the default stays deny-all). The same opt-in also applies
   when `list_roots` fails unexpectedly and no client paths could be recovered.
+- The server waits up to 10 seconds for a `list_roots` response. Override with
+  `TELEGRAM_ROOTS_TIMEOUT_SECONDS`; `0` disables that deadline. A timeout is
+  fail-closed unless the server-roots fallback is explicitly enabled.
 - Paths are resolved through real paths and must stay inside an allowed root.
 - Traversal, wildcard-like, shell-like, and null-byte path patterns are rejected.
 - Relative paths resolve under the first allowed root.
@@ -523,6 +530,7 @@ Telegram messages, display names, chat titles, and button labels are untrusted c
   interactive phone-code login over stdio.
 - **Invalid API credentials:** verify `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` at [my.telegram.org/apps](https://my.telegram.org/apps).
 - **Database is locked:** prefer string sessions, or make sure no other process is using the same file session.
+- **`AuthKeyDuplicatedError` / duplicate session connection:** the server takes an exclusive per-session lock before connecting. A second launch waits briefly (default 20 seconds, configurable with `TELEGRAM_LOCK_GRACE_SECONDS`) and exits without connecting if the first process remains active. Retry after the other instance exits.
 - **File tools are disabled:** pass allowed roots or configure MCP Roots in your client.
 - **Path rejected:** ensure the path is inside an allowed root and does not use traversal or wildcard patterns.
 - **Auth errors after password changes:** regenerate your session string.

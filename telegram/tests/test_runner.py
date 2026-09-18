@@ -5,11 +5,20 @@ import pytest
 from telegram_mcp import runner
 
 
+class _FakeSession:
+    def __init__(self, identity: str):
+        self._identity = identity
+
+    def save(self):
+        return self._identity
+
+
 class _FakeClient:
-    def __init__(self, *, authorized: bool):
+    def __init__(self, *, authorized: bool, identity: str = "test-identity"):
         self.authorized = authorized
         self.connected = False
         self.started = False
+        self.session = _FakeSession(identity)
 
     async def connect(self):
         self.connected = True
@@ -19,6 +28,23 @@ class _FakeClient:
 
     async def start(self):
         self.started = True
+
+
+@pytest.fixture(autouse=True)
+def _isolate_session_locks(tmp_path, monkeypatch):
+    import telegram_mcp.singleton as singleton_module
+
+    original_init = singleton_module.SessionLock.__init__
+
+    def _init_with_tmp_dir(self, label, identity, *, lock_dir=tmp_path):
+        original_init(self, label, identity, lock_dir=lock_dir)
+
+    monkeypatch.setattr(singleton_module.SessionLock, "__init__", _init_with_tmp_dir)
+    monkeypatch.setattr(runner, "_lock_grace_seconds", lambda: 0.01)
+    yield
+    for lock in runner._session_locks.values():
+        lock.release()
+    runner._session_locks.clear()
 
 
 def test_main_uses_standard_asyncio_run_without_event_loop_patching(monkeypatch):
@@ -65,6 +91,44 @@ async def test_connect_authorized_client_rejects_unauthorized_session():
 
     assert client.connected is True
     assert client.started is False
+
+
+@pytest.mark.asyncio
+async def test_connect_authorized_client_refuses_concurrent_duplicate_session():
+    first = _FakeClient(authorized=True, identity="shared-session")
+    second = _FakeClient(authorized=True, identity="shared-session")
+
+    await runner._connect_authorized_client("default", first)
+
+    with pytest.raises(runner.SessionLockError, match="already connected"):
+        await runner._connect_authorized_client("default", second)
+
+    assert second.connected is False
+
+
+@pytest.mark.asyncio
+async def test_connect_authorized_client_refuses_duplicate_session_across_labels():
+    first = _FakeClient(authorized=True, identity="shared-session")
+    second = _FakeClient(authorized=True, identity="shared-session")
+
+    await runner._connect_authorized_client("default", first)
+
+    with pytest.raises(runner.SessionLockError, match="already connected"):
+        await runner._connect_authorized_client("work", second)
+
+    assert second.connected is False
+
+
+@pytest.mark.asyncio
+async def test_connect_authorized_client_allows_different_sessions():
+    first = _FakeClient(authorized=True, identity="session-a")
+    second = _FakeClient(authorized=True, identity="session-b")
+
+    await runner._connect_authorized_client("default", first)
+    await runner._connect_authorized_client("work", second)
+
+    assert first.connected is True
+    assert second.connected is True
 
 
 class _FakeSettings:

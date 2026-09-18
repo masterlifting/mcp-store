@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 2,
+  "id": "INFRA-001",
+  "title": "Align Telegram package with upstream main",
+  "created": "2026-09-18T11:31:18.7153474\u002B00:00",
+  "kind": "execution",
+  "profile": "general",
+  "profileFingerprint": "general-v1",
+  "contractRevision": 1,
+  "stateRevision": 0,
+  "lifecycle": "open",
+  "evidence": [],
+  "acceptanceCriteria": [
+    {
+      "id": "AC1",
+      "text": "Local Telegram package incorporates approved upstream main changes while preserving portable VCS packaging and standard asyncio startup.",
+      "state": "pending",
+      "evidenceRefs": []
+    },
+    {
+      "id": "AC2",
+      "text": "Session concurrency, transport, dependency, and tool-surface changes are reconciled with explicit security and compatibility decisions.",
+      "state": "pending",
+      "evidenceRefs": []
+    },
+    {
+      "id": "AC3",
+      "text": "Deterministic tests and targeted live MCP startup verification pass without exposing credentials.",
+      "state": "pending",
+      "evidenceRefs": []
+    }
+  ],
+  "workItems": [
+    {
+      "id": "W1",
+      "title": "Classify upstream changes and freeze migration contract",
+      "state": "pending",
+      "result": "",
+      "acceptanceRefs": [
+        "AC1",
+        "AC2",
+        "AC3"
+      ],
+      "children": []
+    },
+    {
+      "id": "W2",
+      "title": "Port upstream changes in reviewed batches",
+      "state": "pending",
+      "result": "",
+      "acceptanceRefs": [
+        "AC1",
+        "AC2",
+        "AC3"
+      ],
+      "children": []
+    },
+    {
+      "id": "W3",
+      "title": "Validate, review, and verify the aligned package",
+      "state": "pending",
+      "result": "",
+      "acceptanceRefs": [
+        "AC1",
+        "AC2",
+        "AC3"
+      ],
+      "children": []
+    }
+  ]
+}
