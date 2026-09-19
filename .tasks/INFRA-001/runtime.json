@@ -6,10 +6,25 @@
   "kind": "execution",
   "profile": "general",
   "profileFingerprint": "general-v1",
+  "contractState": "baselined",
+  "contractFingerprint": "93c18530e1dd2e7e63436239a159516884c0aa579bbbd3efb18c49cd337ec61a",
   "contractRevision": 1,
-  "stateRevision": 0,
+  "stateRevision": 3,
   "lifecycle": "open",
-  "evidence": [],
+  "evidence": [
+    {
+      "id": "E1",
+      "kind": "research",
+      "source": "upstream-drift-refresh",
+      "subject": "",
+      "producerRole": "auditor",
+      "producerId": "",
+      "reference": "ses_f4b6dadc9ffeBaq24TfogWDea6",
+      "summary": "Upstream main remains c95e136 with no changes since the prior baseline; local alignment commit 8256ce5 is the current review target.",
+      "validity": "valid",
+      "supersededReason": ""
+    }
+  ],
   "acceptanceCriteria": [
     {
       "id": "AC1",
@@ -34,12 +49,15 @@
     {
       "id": "W1",
       "title": "Classify upstream changes and freeze migration contract",
-      "state": "pending",
-      "result": "",
+      "state": "done",
+      "result": "Upstream delta refreshed: no new upstream commit; existing local alignment commit 8256ce5 is ready for validation and review.",
       "acceptanceRefs": [
         "AC1",
         "AC2",
         "AC3"
+      ],
+      "evidenceRefs": [
+        "E1"
       ],
       "children": []
     },

@@ -1,2 +1,4 @@
 # Ephemeral Task Runtime lock files; task records remain versioned.
 .tasks/**/runtime.lock
+dotnet/obj/
+dotnet/bin/
