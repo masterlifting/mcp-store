@@ -25,3 +25,14 @@ The server exposes the fixed tools `verify_dotnet_build`,
 `verify_dotnet_test`, and `verification_details` over stdio. The implementation
 has no dependency on OpenCode APIs; OpenCode owns only its runtime descriptor
 and tool-facing contracts.
+
+## Producer tests
+
+The deterministic F#-native implementation suite is an Expecto executable:
+
+```text
+dotnet run --project tests/Mcp.Verifier.Tests/Mcp.Verifier.Tests.fsproj --configuration Release
+```
+
+It targets `net11.0`, references `Mcp.Verifier.fsproj` directly, and owns the
+verifier domain, authorization, process, quota, and MCP transport coverage.
