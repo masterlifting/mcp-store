@@ -352,20 +352,134 @@ try
     assertTrue "missing-sidecar operations do not create a lock" (not (File.Exists(Path.Combine(missingSidecarDirectory, LockFileName))))
     assertTrue "missing-sidecar operations do not create a sidecar" (not (File.Exists(sidecarPath tempRoot missingSidecarId)))
 
-    let occupiedId = "TST-501"
-    let occupiedDirectory = Path.Combine(tempRoot, ".tasks", occupiedId)
-    Directory.CreateDirectory occupiedDirectory |> ignore
-    File.WriteAllText(Path.Combine(occupiedDirectory, "notes.txt"), "preserve\n")
+    // --- Evidence-only task bootstrap ----------------------------------------
+    // A user-supplied issue record is immutable evidence, not runtime state. A
+    // successful bootstrap must leave both its bytes and nested references intact.
+    let bootstrapId = "TST-600"
+    let bootstrapDirectory = Path.Combine(tempRoot, ".tasks", bootstrapId)
+    let bootstrapReferences = Path.Combine(bootstrapDirectory, "references", "nested")
+    Directory.CreateDirectory bootstrapReferences |> ignore
+    let issueBytes = [| 0uy; 1uy; 2uy; 239uy; 255uy |]
+    let issuePath = Path.Combine(bootstrapDirectory, "references", "issue.md")
+    let nestedPath = Path.Combine(bootstrapReferences, "context.txt")
+    File.WriteAllBytes(issuePath, issueBytes)
+    File.WriteAllText(nestedPath, "preserve nested evidence\n")
 
-    expectRejected
-        "create refuses an occupied task directory"
-        "task directory already exists; resume it instead"
-        (createTask tempRoot (createRequest occupiedId "Occupied task" [ "AC1", "x" ]))
+    let unsupportedEvidenceBootstrap =
+        "evidence-only task bootstrap requires Windows directory-handle boundaries"
 
-    assertTrue "occupied create does not create a lock" (not (File.Exists(Path.Combine(occupiedDirectory, LockFileName))))
-    assertTrue "occupied create does not create a sidecar" (not (File.Exists(sidecarPath tempRoot occupiedId)))
+    if OperatingSystem.IsWindows() then
+        expectOk
+            "create from evidence-only directory"
+            (createTask tempRoot (createRequest bootstrapId "Evidence bootstrap" [ "AC1", "x" ]))
+        |> ignore
+    else
+        expectRejected
+            "Unix evidence bootstrap is rejected before mutation"
+            unsupportedEvidenceBootstrap
+            (createTask tempRoot (createRequest bootstrapId "Evidence bootstrap" [ "AC1", "x" ]))
 
-    printfn "OK slice-7 contract/persistence: baseline/revision/fingerprint, patch ID/target, Coordinator non-weakening, drift gating, fail-closed User authority, canonical restore, runtime-only missing-sidecar behavior, and occupied-directory creation rejection"
+    assertEqual "bootstrap preserves issue bytes" issueBytes (File.ReadAllBytes issuePath)
+    assertEqual "bootstrap preserves nested evidence" "preserve nested evidence\n" (File.ReadAllText nestedPath)
+    assertTrue
+        "Unix evidence bootstrap creates no lock or sidecar"
+        (OperatingSystem.IsWindows()
+         || (not (File.Exists(sidecarPath tempRoot bootstrapId))
+             && not (File.Exists(Path.Combine(bootstrapDirectory, LockFileName)))))
+
+    if OperatingSystem.IsWindows() then
+        assertTrue "bootstrap writes runtime sidecar" (File.Exists(sidecarPath tempRoot bootstrapId))
+        expectRejected
+            "duplicate create reports runtime state"
+            SidecarFileName
+            (createTask tempRoot (createRequest bootstrapId "Duplicate bootstrap" [ "AC1", "x" ]))
+
+    let prepareEvidenceOnly id =
+        let directory = Path.Combine(tempRoot, ".tasks", id, "references")
+        Directory.CreateDirectory directory |> ignore
+        File.WriteAllText(Path.Combine(directory, "issue.md"), "immutable issue\n")
+        Path.GetDirectoryName directory
+
+    let expectEvidenceRejected name windowsFragment result =
+        expectRejected name (if OperatingSystem.IsWindows() then windowsFragment else unsupportedEvidenceBootstrap) result
+
+    let runtimeJsonId = "TST-601"
+    let runtimeJsonDirectory = prepareEvidenceOnly runtimeJsonId
+    let runtimeJsonEvidencePath = Path.Combine(runtimeJsonDirectory, "references", "issue.md")
+    let runtimeJsonEvidenceBytes = File.ReadAllBytes runtimeJsonEvidencePath
+    File.WriteAllText(Path.Combine(runtimeJsonDirectory, SidecarFileName), "user runtime state")
+    expectEvidenceRejected
+        "pre-existing runtime.json is rejected"
+        SidecarFileName
+        (createTask tempRoot (createRequest runtimeJsonId "Runtime state" [ "AC1", "x" ]))
+    assertEqual
+        "rejected runtime-state create preserves evidence"
+        runtimeJsonEvidenceBytes
+        (File.ReadAllBytes runtimeJsonEvidencePath)
+
+    let runtimeLockId = "TST-602"
+    let runtimeLockDirectory = prepareEvidenceOnly runtimeLockId
+    File.WriteAllText(Path.Combine(runtimeLockDirectory, LockFileName), "user lock state")
+    expectEvidenceRejected
+        "pre-existing runtime.lock is rejected"
+        LockFileName
+        (createTask tempRoot (createRequest runtimeLockId "Lock state" [ "AC1", "x" ]))
+
+    let historicalId = "TST-603"
+    let historicalDirectory = prepareEvidenceOnly historicalId
+    File.WriteAllText(Path.Combine(historicalDirectory, "TASK.md"), "historical record\n")
+    expectEvidenceRejected
+        "pre-existing TASK.md is rejected"
+        "TASK.md"
+        (createTask tempRoot (createRequest historicalId "Historical state" [ "AC1", "x" ]))
+
+    let unsupportedId = "TST-604"
+    let unsupportedDirectory = prepareEvidenceOnly unsupportedId
+    File.WriteAllText(Path.Combine(unsupportedDirectory, "notes.txt"), "unsupported sidecar\n")
+    expectEvidenceRejected
+        "unsupported pre-existing file is rejected"
+        "unsupported pre-existing entry"
+        (createTask tempRoot (createRequest unsupportedId "Unsupported state" [ "AC1", "x" ]))
+
+    // A directory at the task root is unsupported evidence and must not be
+    // claimed by create.
+    let unsupportedRootId = "TST-605"
+    let unsupportedRootDirectory = Path.Combine(tempRoot, ".tasks", unsupportedRootId, "notes")
+    Directory.CreateDirectory unsupportedRootDirectory |> ignore
+    expectEvidenceRejected
+        "unsupported pre-existing root directory is rejected"
+        "unsupported pre-existing entry"
+        (createTask tempRoot (createRequest unsupportedRootId "Unsupported root state" [ "AC1", "x" ]))
+
+    // Existing evidence directories use the same lock/recheck boundary as new
+    // task directories: exactly one creator commits and evidence remains intact.
+    if OperatingSystem.IsWindows() then
+        let raceId = "TST-606"
+        let raceDirectory = prepareEvidenceOnly raceId
+        let raceIssuePath = Path.Combine(raceDirectory, "references", "issue.md")
+        let raceIssueBytes = File.ReadAllBytes raceIssuePath
+        let racersPerRound = 6
+        use gate = new System.Threading.Barrier(racersPerRound)
+        let results: Result<TaskModel, RuntimeError> array = Array.zeroCreate racersPerRound
+
+        let racers =
+            [ for racer in 0 .. racersPerRound - 1 ->
+                  let thread =
+                      System.Threading.Thread(fun () ->
+                          gate.SignalAndWait()
+                          results.[racer] <- createTask tempRoot (createRequest raceId ($"Evidence racer {racer}") [ "AC1", "x" ]))
+
+                  thread.IsBackground <- true
+                  thread.Start()
+                  thread ]
+
+        racers |> List.iter (fun thread -> thread.Join())
+
+        let winners = results |> Array.choose (function | Ok task -> Some task | Error _ -> None)
+        assertEqual "evidence bootstrap race has one winner" 1 winners.Length
+        assertEqual "evidence bootstrap race preserves bytes" raceIssueBytes (File.ReadAllBytes raceIssuePath)
+
+    printfn "OK slice-7 contract/persistence: baseline/revision/fingerprint, patch ID/target, Coordinator non-weakening, drift gating, fail-closed User authority, canonical restore, runtime-only missing-sidecar behavior, evidence-only bootstrap preservation, disallowed pre-existing state rejection, and concurrent evidence bootstrap"
 finally
     if Directory.Exists tempRoot && tempRoot.Contains("taskcontract-tests-", StringComparison.Ordinal) then
         Directory.Delete(tempRoot, true)
