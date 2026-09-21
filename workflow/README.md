@@ -6,7 +6,7 @@ profile catalog; this directory owns only the deterministic state machine,
 transport implementation, and the Task Runtime distribution.
 
 The distribution scripts are component-local: they emit no verifier artifacts.
-The verifier has its own producer boundary under `dotnet/` and its release is
+The verifier has its own producer boundary under `dotnet/verifier/` and its release is
 not part of the Task Runtime bootstrap.
 
 The release build produces a framework-dependent `net11.0` distribution. The

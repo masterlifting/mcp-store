@@ -18,9 +18,10 @@ let private verifierDllPath () =
     let configuration = (DirectoryInfo AppContext.BaseDirectory).Parent.Name
 
     Path.Combine(
-        repositoryRoot(),
-        "dotnet",
-        "bin",
+         repositoryRoot(),
+         "dotnet",
+         "verifier",
+         "bin",
         configuration,
         "net11.0",
         "Mcp.Verifier.dll"
