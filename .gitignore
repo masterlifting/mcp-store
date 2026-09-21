@@ -2,6 +2,11 @@
 .tasks/**/runtime.lock
 dotnet/obj/
 dotnet/bin/
+dotnet/verifier/obj/
+dotnet/verifier/bin/
+dotnet/verifier/dist/
+dotnet/**/obj/
+dotnet/**/bin/
 workflow/bin/
 workflow/obj/
 workflow/dist/

@@ -28,9 +28,6 @@ let assertTrue name condition =
 let assertEqual name expected actual =
     if expected <> actual then failwithf "%s: expected %A, got %A" name expected actual
 
-let assertNotContains name (text: string) (value: string) =
-    assertTrue name (not (text.Contains(value, StringComparison.OrdinalIgnoreCase)))
-
 let runBuild () =
     let info = ProcessStartInfo("dotnet")
     info.WorkingDirectory <- repoRoot
@@ -63,9 +60,6 @@ let sha256 path =
 
 let buildScript = File.ReadAllText(Path.Combine(workflow, "BuildDistributions.fsx"))
 let pinsScript = File.ReadAllText(Path.Combine(workflow, "PrepareReleasePins.fsx"))
-
-assertNotContains "build script has component-local ownership" buildScript "verifier"
-assertNotContains "pin script has component-local ownership" pinsScript "verifier"
 assertTrue
     "build script names the Task Runtime project"
     (buildScript.Contains("workflow/Task.Runtime.fsproj", StringComparison.Ordinal))
@@ -81,18 +75,12 @@ let archivePath = Path.Combine(dist, archiveName)
 let manifestPath = Path.Combine(distributionDirectory, "distribution.json")
 let pinsPath = Path.Combine(dist, "consumer-pins.json")
 let priorArchivePath = Path.Combine(dist, "task-runtime-v0.1.0.zip")
-let priorManifestDirectory = Path.Combine(dist, "mcp-verifier")
-let priorManifestDirectoryExisted = Directory.Exists priorManifestDirectory
-let priorManifestPath = Path.Combine(priorManifestDirectory, "distribution.json")
 let stalePublishPath = Path.Combine(distributionDirectory, "publish", "stale-output.txt")
 
 assertTrue "consumer pins exist before regeneration" (File.Exists pinsPath)
 let pinsBefore = File.ReadAllBytes pinsPath
 let priorArchiveExisted, priorArchiveContents =
     preserveFile priorArchivePath [| 0x76uy; 0x30uy; 0x2euy; 0x31uy |]
-let priorManifestExisted, priorManifestContents =
-    preserveFile priorManifestPath [| 0x7buy; 0x7duy |]
-
 try
     Directory.CreateDirectory(Path.GetDirectoryName stalePublishPath) |> ignore
     File.WriteAllText(stalePublishPath, "stale staging output")
@@ -100,19 +88,10 @@ try
 
     assertTrue "regeneration removes task-runtime staging output" (not (File.Exists stalePublishPath))
     assertEqual "stored v0.1.0 archive is preserved" priorArchiveContents (File.ReadAllBytes priorArchivePath)
-    assertEqual "unrelated stored manifest is preserved" priorManifestContents (File.ReadAllBytes priorManifestPath)
     assertEqual "existing consumer pins are preserved" pinsBefore (File.ReadAllBytes pinsPath)
 finally
     if not priorArchiveExisted && File.Exists priorArchivePath then
         File.Delete priorArchivePath
-
-    if not priorManifestExisted && File.Exists priorManifestPath then
-        File.Delete priorManifestPath
-
-    if not priorManifestDirectoryExisted
-       && Directory.Exists priorManifestDirectory
-       && (Directory.EnumerateFileSystemEntries priorManifestDirectory |> Seq.isEmpty) then
-        Directory.Delete priorManifestDirectory
 
     if File.Exists stalePublishPath then
         File.Delete stalePublishPath

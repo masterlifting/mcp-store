@@ -185,7 +185,7 @@ let repositoryRoot () =
     let rec walk (directory: DirectoryInfo) =
         if isNull directory then
             fail "repositoryRoot" "could not locate repository root"
-        elif File.Exists(Path.Combine(directory.FullName, "dotnet", "Mcp.Verifier.fsproj"))
+        elif File.Exists(Path.Combine(directory.FullName, "dotnet", "verifier", "Mcp.Verifier.fsproj"))
         then
             directory.FullName
         else
