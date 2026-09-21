@@ -67,6 +67,12 @@ let createRequest id title =
       AcceptanceCriteria = [ "AC1", "Execution completes" ]
       WorkItems = [ spec "W1" "Do the work" ] }
 
+let existingCreateRejectedMessage =
+    if OperatingSystem.IsWindows() then
+        SidecarFileName
+    else
+        "evidence-only task bootstrap requires Windows directory-handle boundaries"
+
 let makeEvidence id kind summary =
     { Id = id
       Kind = kind
@@ -422,7 +428,10 @@ try
     assertEqual "no temporary persistence leftovers" 0 leftovers.Length
 
     // Re-creating an existing task fails closed and never overwrites the sidecar.
-    expectRejected "re-create existing task" "task directory already exists" (createTask tempRoot (createRequest persistedId "Overwrite attempt"))
+    expectRejected
+        "re-create existing task"
+        existingCreateRejectedMessage
+        (createTask tempRoot (createRequest persistedId "Overwrite attempt"))
     assertEqual "re-create did not reset revision" 2 (expectOk "read TST-5 after re-create" (readPersisted tempRoot persistedId)).StateRevision
     assertEqual "re-create did not erase result" (Some "persisted") (expectOk "read TST-5 result after re-create" (readPersisted tempRoot persistedId)).WorkItems.Head.Result
 
@@ -479,9 +488,9 @@ try
                 let message = renderError error
 
                 // The loser either fails to take the lock or re-reads the
-                // committed sidecar after the lock; both fail closed.
+                // committed runtime state after the lock; both fail closed.
                 let rejected =
-                    message.Contains("task directory already exists", StringComparison.Ordinal)
+                    message.Contains(existingCreateRejectedMessage, StringComparison.Ordinal)
                     || message.Contains("could not acquire runtime lock", StringComparison.Ordinal)
 
                 if not rejected then
@@ -495,7 +504,7 @@ try
 
         expectRejected
             (sprintf "post-race re-create %s" raceId)
-            "task directory already exists"
+            existingCreateRejectedMessage
             (createTask tempRoot (createRequest raceId "Late overwrite"))
 
         assertEqual
