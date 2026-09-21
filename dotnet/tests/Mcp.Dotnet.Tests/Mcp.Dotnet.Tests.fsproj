@@ -22,6 +22,6 @@
     <PackageReference Include="Expecto.FsCheck" Version="10.2.3" />
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="../../Mcp.Verifier.fsproj" />
+    <ProjectReference Include="../../Mcp.Dotnet.fsproj" />
   </ItemGroup>
 </Project>

@@ -10,8 +10,8 @@ let root = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, ".."))
 let workflow = Path.Combine(root, "workflow")
 let outputRoot = Path.Combine(workflow, "dist")
 let sdk = "11.0.100-rc.1.26425.128"
-let version = "0.1.1"
-let componentId = "task-runtime"
+let version = "1.0.0"
+let componentId = "workflow"
 let entryDll = "Task.Runtime.dll"
 
 // The publish output is intentionally narrowed to the files consumed by the
@@ -61,6 +61,13 @@ let writeJson path (value: JsonNode) =
     File.WriteAllText(path, value.ToJsonString(JsonSerializerOptions(WriteIndented = true)))
 
 let archiveFiles = publishedFiles @ [ "NOTICE.txt"; "distribution.json" ] |> List.sort
+
+let assertExactFiles description expected actual =
+    let expectedSet = expected |> Set.ofList
+    let actualSet = actual |> Set.ofList
+
+    if actual.Length <> actualSet.Count || actualSet <> expectedSet then
+        failwithf "%s: expected exactly %A, got %A" description expected actual
 
 let createArchive archivePath sourceRoot files =
     use archive = ZipFile.Open(archivePath, ZipArchiveMode.Create)
@@ -113,14 +120,21 @@ let publishTaskRuntime () =
 
     let expectedFiles = publishedFiles |> List.sort
 
-    if actualFiles <> expectedFiles then
-        failwithf "Task Runtime publish output is not the deterministic allowlist: %A" actualFiles
+    assertExactFiles "Task Runtime publish output is not the deterministic allowlist" expectedFiles actualFiles
 
     for relativePath in expectedFiles do
         File.Copy(Path.Combine(publishRoot, relativePath), Path.Combine(destination, relativePath))
 
     Directory.Delete(publishRoot, true)
     File.WriteAllText(Path.Combine(destination, "NOTICE.txt"), "mcp-store Task Runtime MCP distribution\n")
+
+    let stagedFiles =
+        Directory.EnumerateFiles(destination, "*", SearchOption.TopDirectoryOnly)
+        |> Seq.map (fun path -> Path.GetRelativePath(destination, path).Replace('\\', '/'))
+        |> Seq.sort
+        |> Seq.toList
+
+    assertExactFiles "workflow v1 staging contains unexpected files" (publishedFiles @ [ "NOTICE.txt" ] |> List.sort) stagedFiles
 
     let archiveName = $"{componentId}-v{version}.zip"
     let manifest = JsonObject()
@@ -133,11 +147,28 @@ let publishTaskRuntime () =
     manifest["archive"] <- JsonValue.Create archiveName
     let files = JsonArray()
 
-    for file in archiveFiles do
-        files.Add(JsonValue.Create file)
+    for file in publishedFiles |> List.sort do
+        let fileEntry = JsonObject()
+        fileEntry["name"] <- JsonValue.Create file
+        fileEntry["sha256"] <- JsonValue.Create(sha256 (Path.Combine(destination, file)))
+        files.Add(fileEntry)
 
     manifest["files"] <- files
+    let archiveFileNames = JsonArray()
+
+    for file in archiveFiles do
+        archiveFileNames.Add(JsonValue.Create file)
+
+    manifest["archiveFiles"] <- archiveFileNames
     writeJson (Path.Combine(destination, "distribution.json")) manifest
+
+    let archiveSources =
+        Directory.EnumerateFiles(destination, "*", SearchOption.TopDirectoryOnly)
+        |> Seq.map (fun path -> Path.GetRelativePath(destination, path).Replace('\\', '/'))
+        |> Seq.sort
+        |> Seq.toList
+
+    assertExactFiles "workflow v1 archive sources contain unexpected files" archiveFiles archiveSources
     let archivePath = Path.Combine(outputRoot, archiveName)
 
     if File.Exists archivePath then
@@ -149,7 +180,7 @@ let publishTaskRuntime () =
 let distribution = publishTaskRuntime ()
 
 printfn
-    "task-runtime archive=%s sha256=%s manifest=%s"
+    "workflow archive=%s sha256=%s manifest=%s"
     (let (name, _, _) = distribution in name)
     (let (_, hash, _) = distribution in hash)
     (let (_, _, hash) = distribution in hash)

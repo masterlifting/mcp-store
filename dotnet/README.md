@@ -1,14 +1,14 @@
-# .NET verifier MCP distribution
+# .NET MCP distribution
 
 This directory is the standalone producer boundary for the bounded .NET
 verification MCP server. It owns the verifier implementation and publishes the
-`dotnet-verifier` framework-dependent `net11.0` runtime distribution. Consumers
+`dotnet` v1.0.0 framework-dependent `net11.0` runtime distribution. Consumers
 do not build or run this source checkout at runtime.
 
 ## Consumer installation
 
 Provision the release asset named by the consumer descriptor into its pinned
-`dotnet-verifier` install path. Provisioning validates the archive SHA-256 and
+`dotnet` install path. Provisioning validates the archive SHA-256 and
 `distribution.json` manifest SHA-256 before replacing the destination.
 
 The executable is started with the .NET host injected as an absolute path:
@@ -30,21 +30,31 @@ launcher, and tool-facing contracts.
 The deterministic F#-native implementation suite is an Expecto executable:
 
 ```text
-dotnet run --project tests/Mcp.Verifier.Tests/Mcp.Verifier.Tests.fsproj --configuration Release
+dotnet run --project tests/Mcp.Dotnet.Tests/Mcp.Dotnet.Tests.fsproj --configuration Release
 ```
 
 Run the command from this directory. It targets `net11.0`, references
-`Mcp.Verifier.fsproj` directly, and owns the verifier domain, authorization,
+`Mcp.Dotnet.fsproj` directly, and owns the verifier domain, authorization,
 process, quota, and MCP transport coverage.
 
 ## Producer packaging
 
-From the repository root, build and pin the immutable `dotnet-verifier-v0.2.0`
+From the repository root, build and pin the immutable `dotnet-v1.0.0.zip`
 release with:
 
 ```text
-dotnet fsi dotnet/verifier/BuildDistribution.fsx
+dotnet fsi dotnet/BuildDistribution.fsx
+dotnet fsi dotnet/PrepareReleasePins.fsx
+dotnet fsi dotnet/tests/DistributionTests.fsx
 ```
 
-The scripts stage only runtime files under `dotnet/verifier/dist/`, emit the
-`dotnet-verifier` manifest and pin, and preserve older release artifacts.
+The scripts stage only the allowlisted runtime files under
+`dotnet/dist/dotnet/`. `distribution.json` records the exact archive
+allowlist and a lowercase SHA-256 for every runtime file. The generated archive
+contains the runtime files, `NOTICE.txt`, and the manifest; source, project,
+build output, PDB, and apphost files are rejected. The v1 scripts preserve the
+stored `dotnet-verifier-v0.2.0` release outputs under `dotnet/verifier/dist/`.
+
+The manifest uses deterministic arrays: `files` contains `{ "name", "sha256" }`
+objects for the runtime allowlist, while `archiveFiles` contains the complete
+archive entry-name allowlist.

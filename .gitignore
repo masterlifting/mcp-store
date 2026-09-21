@@ -4,6 +4,7 @@ dotnet/obj/
 dotnet/bin/
 dotnet/verifier/obj/
 dotnet/verifier/bin/
+dotnet/dist/
 dotnet/verifier/dist/
 dotnet/**/obj/
 dotnet/**/bin/
