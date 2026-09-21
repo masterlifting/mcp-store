@@ -348,7 +348,7 @@ module private McpHost =
     let private parseToolCall parameters =
         result {
             let! parameters = match parameters with | Some value -> Ok value | None -> invalid "tools/call requires params"
-            let! parameters = objectProperties "tools/call params" parameters [ "name"; "arguments" ] [ "name" ]
+            let! parameters = objectProperties "tools/call params" parameters [ "name"; "arguments"; "_meta" ] [ "name" ]
             let! name = requiredString "tools/call params" "name" parameters
             let! arguments =
                 match property "arguments" parameters with

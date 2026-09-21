@@ -153,6 +153,9 @@ let private exitNotification = """{"jsonrpc":"2.0","method":"exit"}"""
 let private toolCall id name arguments =
     $"""{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"{name}","arguments":{arguments}}}}}"""
 
+let private toolCallWithMeta id name arguments =
+    $"""{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"{name}","arguments":{arguments},"_meta":{{"progressToken":"meta-regression"}}}}}}"""
+
 let private structured (response: JsonNode) = response.["result"].["structuredContent"]
 let private textContent (response: JsonNode) = response.["result"].["content"].[0].["text"].GetValue<string>()
 
@@ -285,9 +288,18 @@ let private hostTests =
 
                     host.Send initializeRequest
                     host.ReadResponse(1, 5000) |> ignore
-                    host.Send initializedNotification
+                     host.Send initializedNotification
 
-                    host.Send(toolCall 5 "verify_dotnet_build" """{"target":"lib.csproj"}""")
+                     host.Send(toolCallWithMeta 4 "verification_details" "{\"runId\":\"missing-run\",\"kind\":\"errors\"}")
+                     let metaResponse = host.ReadResponse(4, 5000)
+                     Expect.equal (metaResponse.["result"].["isError"].GetValue<bool>()) true "optional MCP _meta is ignored"
+                     Expect.equal (structured metaResponse).["error"].["code"].GetValue<string>() "UNKNOWN_RUN_ID" "_meta does not alter tool dispatch"
+
+                     host.Send("""{"jsonrpc":"2.0","id":40,"method":"tools/call","params":{"name":"verification_details","arguments":{"runId":"missing-run","kind":"errors"},"_unexpected":true}}""")
+                     let unknownParameter = host.ReadResponse(40, 5000)
+                     Expect.equal (unknownParameter.["error"].["code"].GetValue<int>()) -32602 "other MCP tool-call metadata remains rejected"
+
+                     host.Send(toolCall 5 "verify_dotnet_build" """{"target":"lib.csproj"}""")
                     let response = host.ReadResponse(5, 120000)
                     let payload = structured response
 

@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net11.0</TargetFramework>
+    <AssemblyName>Task.Runtime</AssemblyName>
+    <RootNamespace>McpStore.TaskRuntime</RootNamespace>
+    <OutputType>Exe</OutputType>
+    <LangVersion>9.0</LangVersion>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <DebugType>None</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="ComputationExpressions.fs" />
+    <Compile Include="TaskRuntime.fs" />
+    <Compile Include="TaskRuntimeAdapter.fs" />
+    <Compile Include="TaskRuntimeMcp.fs" />
+  </ItemGroup>
+</Project>

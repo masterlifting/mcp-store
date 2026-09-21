@@ -1,21 +1,20 @@
 # .NET verifier MCP distribution
 
 This directory is the standalone producer boundary for the bounded .NET
-verification MCP server. It owns the verifier implementation and can be
-installed from an immutable `masterlifting/mcp-store` revision without an
-OpenCode checkout.
+verification MCP server. It owns the verifier implementation and publishes a
+framework-dependent `net11.0` runtime distribution. Consumers do not build or
+run this source checkout at runtime.
 
 ## Consumer installation
 
-Install this directory into the consumer's `mcp/mcp-store/dotnet`
-checkout at the full producer revision recorded by the consumer descriptor.
-The checkout must be detached at that revision; a branch or moving tag is not
-an equivalent installation.
+Provision the release asset named by the consumer descriptor into its pinned
+install path. Provisioning validates the archive SHA-256 and
+`distribution.json` manifest SHA-256 before replacing the destination.
 
 The executable is started with the .NET host injected as an absolute path:
 
 ```text
-dotnet run --project Mcp.Verifier.fsproj --configuration Release --no-launch-profile --verbosity quiet -- --dotnet-host <absolute-dotnet-host>
+dotnet exec Mcp.Verifier.dll --dotnet-host <absolute-dotnet-host>
 ```
 
 The host path is intentionally supplied by the consumer. The verifier rejects
@@ -23,8 +22,8 @@ relative, non-canonical, workspace-local, missing, or reparse-point hosts.
 
 The server exposes the fixed tools `verify_dotnet_build`,
 `verify_dotnet_test`, and `verification_details` over stdio. The implementation
-has no dependency on OpenCode APIs; OpenCode owns only its runtime descriptor
-and tool-facing contracts.
+has no dependency on OpenCode APIs; OpenCode owns only its consumer descriptor,
+launcher, and tool-facing contracts.
 
 ## Producer tests
 
