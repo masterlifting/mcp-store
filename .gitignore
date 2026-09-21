@@ -2,3 +2,6 @@
 .tasks/**/runtime.lock
 dotnet/obj/
 dotnet/bin/
+workflow/bin/
+workflow/obj/
+workflow/dist/
