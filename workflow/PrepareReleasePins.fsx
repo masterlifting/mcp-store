@@ -7,33 +7,37 @@ open System.Text.Json.Nodes
 let root = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, ".."))
 let dist = Path.Combine(root, "workflow", "dist")
 let output = Path.Combine(dist, "consumer-pins.json")
+let componentId = "task-runtime"
+let version = "0.1.1"
+let archiveName = $"{componentId}-v{version}.zip"
 
 let sha256 path =
     use stream = File.OpenRead path
     SHA256.HashData stream |> Convert.ToHexString |> fun value -> value.ToLowerInvariant()
 
-let manifest id = Path.Combine(dist, id, "distribution.json")
-let archive id = Path.Combine(dist, $"{id}-v0.1.0.zip")
-let revision =
-    let info = Diagnostics.ProcessStartInfo("git", "rev-parse HEAD")
-    info.WorkingDirectory <- root
-    info.UseShellExecute <- false
-    info.RedirectStandardOutput <- true
-    use process = Diagnostics.Process.Start info
-    let value = process.StandardOutput.ReadToEnd().Trim()
-    process.WaitForExit()
-    value
+let manifestPath = Path.Combine(dist, componentId, "distribution.json")
+let archivePath = Path.Combine(dist, archiveName)
 
-for id in [ "mcp-verifier"; "task-runtime" ] do
-    if not (File.Exists(archive id)) || not (File.Exists(manifest id)) then
-        failwithf "run BuildDistributions.fsx before preparing pins: %s" id
+if not (File.Exists archivePath) || not (File.Exists manifestPath) then
+    failwith "run BuildDistributions.fsx before preparing task-runtime pins"
+
+let manifest: JsonObject = JsonNode.Parse(File.ReadAllText manifestPath).AsObject()
+
+let requiredManifestValue (name: string) =
+    match manifest[name] with
+    | null -> failwithf "manifest is missing '%s'" name
+    | value -> value.GetValue<string>()
+
+if requiredManifestValue "id" <> componentId
+   || requiredManifestValue "version" <> version
+   || requiredManifestValue "archive" <> archiveName then
+    failwith "task-runtime manifest identity does not match the release pin"
 
 let pins = JsonObject()
-for id in [ "mcp-verifier"; "task-runtime" ] do
-    let value = JsonObject()
-    value["assetName"] <- JsonValue.Create(Path.GetFileName(archive id))
-    value["archiveSha256"] <- JsonValue.Create(sha256 (archive id))
-    value["manifestSha256"] <- JsonValue.Create(sha256 (manifest id))
-    pins[id] <- value
+let value = JsonObject()
+value["assetName"] <- JsonValue.Create archiveName
+value["archiveSha256"] <- JsonValue.Create(sha256 archivePath)
+value["manifestSha256"] <- JsonValue.Create(sha256 manifestPath)
+pins[componentId] <- value
 
 File.WriteAllText(output, pins.ToJsonString(JsonSerializerOptions(WriteIndented = true)))
