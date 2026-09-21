@@ -6,12 +6,12 @@ open System.Security.Cryptography
 open System.Text.Json
 open System.Text.Json.Nodes
 
-let root = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", ".."))
-let verifier = Path.Combine(root, "dotnet", "verifier")
-let outputRoot = Path.Combine(verifier, "dist")
+let root = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, ".."))
+let dotnet = Path.Combine(root, "dotnet")
+let outputRoot = Path.Combine(dotnet, "dist")
 let sdk = "11.0.100-rc.1.26425.128"
-let version = "0.2.0"
-let componentId = "dotnet-verifier"
+let version = "1.0.0"
+let componentId = "dotnet"
 let entryDll = "Mcp.Verifier.dll"
 
 // The allowlist is the runtime contract. Source, project, build, and debug
@@ -61,6 +61,13 @@ let writeJson path (value: JsonNode) =
 
 let archiveFiles = publishedFiles @ [ "NOTICE.txt"; "distribution.json" ] |> List.sort
 
+let assertExactFiles description expected actual =
+    let expectedSet = expected |> Set.ofList
+    let actualSet = actual |> Set.ofList
+
+    if actual.Length <> actualSet.Count || actualSet <> expectedSet then
+        failwithf "%s: expected exactly %A, got %A" description expected actual
+
 let createArchive archivePath sourceRoot files =
     use archive = ZipFile.Open(archivePath, ZipArchiveMode.Create)
 
@@ -78,7 +85,7 @@ let publish () =
     let publishRoot = Path.Combine(destination, "publish")
 
     // Only this release's staging and generated files are replaceable. Stored
-    // archives and manifests, including v0.1.0, remain available for inspection.
+    // archives and manifests, including the v0.x release, remain available for inspection.
     if Directory.Exists publishRoot then
         Directory.Delete(publishRoot, true)
 
@@ -88,22 +95,23 @@ let publish () =
         if File.Exists path then
             File.Delete path
 
-    run
-        [ "publish"
-          "dotnet/verifier/Mcp.Verifier.fsproj"
-          "--configuration"
-          "Release"
-          "--framework"
-          "net11.0"
-          "--self-contained"
-          "false"
-          "-p:UseAppHost=false"
-          "-p:DebugType=None"
-          "-p:DebugSymbols=false"
-          "-p:GenerateDocumentationFile=false"
-          "-p:SatelliteResourceLanguages=none"
-          "--output"
-          publishRoot ]
+    run [
+        "publish"
+        "dotnet/Mcp.Dotnet.fsproj"
+        "--configuration"
+        "Release"
+        "--framework"
+        "net11.0"
+        "--self-contained"
+        "false"
+        "-p:UseAppHost=false"
+        "-p:DebugType=None"
+        "-p:DebugSymbols=false"
+        "-p:GenerateDocumentationFile=false"
+        "-p:SatelliteResourceLanguages=none"
+        "--output"
+        publishRoot
+    ]
 
     let actualFiles =
         Directory.EnumerateFiles(publishRoot, "*", SearchOption.AllDirectories)
@@ -113,14 +121,21 @@ let publish () =
 
     let expectedFiles = publishedFiles |> List.sort
 
-    if actualFiles <> expectedFiles then
-        failwithf "verifier publish output is not the deterministic allowlist: %A" actualFiles
+    assertExactFiles "verifier publish output is not the deterministic allowlist" expectedFiles actualFiles
 
     for relativePath in expectedFiles do
         File.Copy(Path.Combine(publishRoot, relativePath), Path.Combine(destination, relativePath))
 
     Directory.Delete(publishRoot, true)
-    File.WriteAllText(Path.Combine(destination, "NOTICE.txt"), "mcp-store dotnet-verifier MCP distribution\n")
+    File.WriteAllText(Path.Combine(destination, "NOTICE.txt"), "mcp-store dotnet MCP distribution\n")
+
+    let stagedFiles =
+        Directory.EnumerateFiles(destination, "*", SearchOption.TopDirectoryOnly)
+        |> Seq.map (fun path -> Path.GetRelativePath(destination, path).Replace('\\', '/'))
+        |> Seq.sort
+        |> Seq.toList
+
+    assertExactFiles "dotnet v1 staging contains unexpected files" (publishedFiles @ [ "NOTICE.txt" ] |> List.sort) stagedFiles
 
     let archiveName = $"{componentId}-v{version}.zip"
     let manifest = JsonObject()
@@ -133,11 +148,28 @@ let publish () =
     manifest["archive"] <- JsonValue.Create archiveName
     let files = JsonArray()
 
-    for file in archiveFiles do
-        files.Add(JsonValue.Create file)
+    for file in publishedFiles |> List.sort do
+        let fileEntry = JsonObject()
+        fileEntry["name"] <- JsonValue.Create file
+        fileEntry["sha256"] <- JsonValue.Create(sha256 (Path.Combine(destination, file)))
+        files.Add(fileEntry)
 
     manifest["files"] <- files
+    let archiveFileNames = JsonArray()
+
+    for file in archiveFiles do
+        archiveFileNames.Add(JsonValue.Create file)
+
+    manifest["archiveFiles"] <- archiveFileNames
     writeJson (Path.Combine(destination, "distribution.json")) manifest
+
+    let archiveSources =
+        Directory.EnumerateFiles(destination, "*", SearchOption.TopDirectoryOnly)
+        |> Seq.map (fun path -> Path.GetRelativePath(destination, path).Replace('\\', '/'))
+        |> Seq.sort
+        |> Seq.toList
+
+    assertExactFiles "dotnet v1 archive sources contain unexpected files" archiveFiles archiveSources
     let archivePath = Path.Combine(outputRoot, archiveName)
 
     if File.Exists archivePath then
@@ -149,7 +181,7 @@ let publish () =
 let distribution = publish ()
 
 printfn
-    "dotnet-verifier archive=%s sha256=%s manifest=%s"
+    "dotnet archive=%s sha256=%s manifest=%s"
     (let (name, _, _) = distribution in name)
     (let (_, hash, _) = distribution in hash)
     (let (_, _, hash) = distribution in hash)

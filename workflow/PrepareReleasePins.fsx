@@ -7,8 +7,8 @@ open System.Text.Json.Nodes
 let root = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, ".."))
 let dist = Path.Combine(root, "workflow", "dist")
 let output = Path.Combine(dist, "consumer-pins.json")
-let componentId = "task-runtime"
-let version = "0.1.1"
+let componentId = "workflow"
+let version = "1.0.0"
 let archiveName = $"{componentId}-v{version}.zip"
 
 let sha256 path =
@@ -19,7 +19,7 @@ let manifestPath = Path.Combine(dist, componentId, "distribution.json")
 let archivePath = Path.Combine(dist, archiveName)
 
 if not (File.Exists archivePath) || not (File.Exists manifestPath) then
-    failwith "run BuildDistributions.fsx before preparing task-runtime pins"
+    failwith "run BuildDistributions.fsx before preparing workflow v1 pins"
 
 let manifest: JsonObject = JsonNode.Parse(File.ReadAllText manifestPath).AsObject()
 
@@ -31,7 +31,7 @@ let requiredManifestValue (name: string) =
 if requiredManifestValue "id" <> componentId
    || requiredManifestValue "version" <> version
    || requiredManifestValue "archive" <> archiveName then
-    failwith "task-runtime manifest identity does not match the release pin"
+    failwith "workflow v1 manifest identity does not match the release pin"
 
 let pins = JsonObject()
 let value = JsonObject()

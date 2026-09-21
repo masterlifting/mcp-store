@@ -4,11 +4,11 @@ open System.Security.Cryptography
 open System.Text.Json
 open System.Text.Json.Nodes
 
-let root = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", ".."))
-let dist = Path.Combine(root, "dotnet", "verifier", "dist")
+let root = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, ".."))
+let dist = Path.Combine(root, "dotnet", "dist")
 let output = Path.Combine(dist, "consumer-pins.json")
-let componentId = "dotnet-verifier"
-let version = "0.2.0"
+let componentId = "dotnet"
+let version = "1.0.0"
 let archiveName = $"{componentId}-v{version}.zip"
 
 let sha256 path =
@@ -19,7 +19,7 @@ let manifestPath = Path.Combine(dist, componentId, "distribution.json")
 let archivePath = Path.Combine(dist, archiveName)
 
 if not (File.Exists archivePath) || not (File.Exists manifestPath) then
-    failwith "run dotnet/verifier/BuildDistribution.fsx before preparing dotnet-verifier pins"
+    failwith "run dotnet/BuildDistribution.fsx before preparing dotnet v1 pins"
 
 let manifest: JsonObject = JsonNode.Parse(File.ReadAllText manifestPath).AsObject()
 
@@ -31,7 +31,7 @@ let requiredManifestValue (name: string) =
 if requiredManifestValue "id" <> componentId
    || requiredManifestValue "version" <> version
    || requiredManifestValue "archive" <> archiveName then
-    failwith "dotnet-verifier manifest identity does not match the release pin"
+    failwith "dotnet v1 manifest identity does not match the release pin"
 
 let pins = JsonObject()
 let value = JsonObject()
@@ -42,4 +42,4 @@ pins[componentId] <- value
 
 File.WriteAllText(output, pins.ToJsonString(JsonSerializerOptions(WriteIndented = true)))
 
-printfn "dotnet-verifier asset=%s archiveSha256=%s manifestSha256=%s" archiveName (sha256 archivePath) (sha256 manifestPath)
+printfn "dotnet asset=%s archiveSha256=%s manifestSha256=%s" archiveName (sha256 archivePath) (sha256 manifestPath)
