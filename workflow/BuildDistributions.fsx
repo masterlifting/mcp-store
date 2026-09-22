@@ -10,7 +10,7 @@ let root = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, ".."))
 let workflow = Path.Combine(root, "workflow")
 let outputRoot = Path.Combine(workflow, "dist")
 let sdk = "11.0.100-rc.1.26425.128"
-let version = "1.0.0"
+let version = "1.0.1"
 let componentId = "workflow"
 let entryDll = "Task.Runtime.dll"
 
@@ -149,7 +149,7 @@ let publishTaskRuntime () =
 
     for file in publishedFiles |> List.sort do
         let fileEntry = JsonObject()
-        fileEntry["name"] <- JsonValue.Create file
+        fileEntry["path"] <- JsonValue.Create file
         fileEntry["sha256"] <- JsonValue.Create(sha256 (Path.Combine(destination, file)))
         files.Add(fileEntry)
 

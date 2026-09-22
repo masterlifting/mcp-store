@@ -10,7 +10,7 @@ let root = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, ".."))
 let dotnet = Path.Combine(root, "dotnet")
 let outputRoot = Path.Combine(dotnet, "dist")
 let sdk = "11.0.100-rc.1.26425.128"
-let version = "1.0.0"
+let version = "1.0.1"
 let componentId = "dotnet"
 let entryDll = "Mcp.Verifier.dll"
 
@@ -150,7 +150,7 @@ let publish () =
 
     for file in publishedFiles |> List.sort do
         let fileEntry = JsonObject()
-        fileEntry["name"] <- JsonValue.Create file
+        fileEntry["path"] <- JsonValue.Create file
         fileEntry["sha256"] <- JsonValue.Create(sha256 (Path.Combine(destination, file)))
         files.Add(fileEntry)
 

@@ -8,7 +8,7 @@ let root = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, ".."))
 let dist = Path.Combine(root, "dotnet", "dist")
 let output = Path.Combine(dist, "consumer-pins.json")
 let componentId = "dotnet"
-let version = "1.0.0"
+let version = "1.0.1"
 let archiveName = $"{componentId}-v{version}.zip"
 
 let sha256 path =
