@@ -1,5 +1,4 @@
-.tasks/**/runtime.lock
-.tasks
+.tasks/
 dotnet/dist/
 workflow/dist/
 */bin/
