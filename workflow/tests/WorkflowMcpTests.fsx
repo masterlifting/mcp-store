@@ -1,4 +1,4 @@
-// Deterministic coverage for the platform-internal Task Runtime MCP boundary:
+// Deterministic coverage for the platform-internal Workflow MCP boundary:
 // the native stdio handshake and tool surface, transport parity with the retained library and
 // CLI paths, structured results, bounded failures, workspace validation,
 // expected-revision CAS, and the absence of authority/receipt/effect ingress.
@@ -7,8 +7,8 @@
 // adding a project/package system.
 
 #load "../ComputationExpressions.fs"
-#load "../TaskRuntime.fs"
-#load "../TaskRuntimeAdapter.fs"
+#load "../Workflow.fs"
+#load "../WorkflowAdapter.fs"
 
 open System
 open System.Diagnostics
@@ -16,8 +16,8 @@ open System.IO
 open System.Security.Cryptography
 open System.Text.Json
 open System.Text.Json.Nodes
-open TaskRuntime
-open TaskRuntimeAdapter
+open Workflow
+open WorkflowAdapter
 
 let repoRoot = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", ".."))
 let scriptDirectory = Path.Combine(repoRoot, "workflow", "tests")
@@ -28,7 +28,7 @@ let scriptDirectory = Path.Combine(repoRoot, "workflow", "tests")
 let requiredSdk = "11.0.100-rc.1.26425.128"
 
 let releaseEntryDll =
-    Path.Combine(repoRoot, "workflow", "bin", "Release", "net11.0", "Task.Runtime.dll")
+    Path.Combine(repoRoot, "workflow", "bin", "Release", "net11.0", "Mcp.Workflow.dll")
 
 let resolveDotnetHost () =
     let names = if OperatingSystem.IsWindows() then [ "dotnet.exe" ] else [ "dotnet" ]
@@ -293,7 +293,7 @@ let applyArgs root revision command =
           "command", command ]
 
 let tempRoot =
-    Path.Combine(Path.GetTempPath(), "opencode", $"taskruntime-mcp-tests-{Guid.NewGuid():N}")
+    Path.Combine(Path.GetTempPath(), "opencode", $"workflow-mcp-tests-{Guid.NewGuid():N}")
 
 Directory.CreateDirectory tempRoot |> ignore
 let fileRoot = Path.Combine(tempRoot, "not-a-directory.txt")
@@ -313,12 +313,12 @@ try
             (jobj
                 [ "protocolVersion", jstr "2024-11-05"
                   "capabilities", jobj []
-                  "clientInfo", jobj [ "name", jstr "task-runtime-tests"; "version", jstr "1" ] ])
+                  "clientInfo", jobj [ "name", jstr "workflow-tests"; "version", jstr "1" ] ])
 
     assertEqual "initialize id" 1 (initialized.["id"].GetValue<int>())
     let initResult = resultOf "initialize" initialized
     assertEqual "initialize protocolVersion" "2024-11-05" (nodeString initResult.["protocolVersion"])
-    assertEqual "initialize server name" "opencode-task-runtime" (nodeString initResult.["serverInfo"].["name"])
+    assertEqual "initialize server name" "mcp-store-workflow" (nodeString initResult.["serverInfo"].["name"])
     assertEqual
         "initialize tools listChanged"
         false
@@ -354,7 +354,7 @@ try
     let createdStructured = expectToolOk "task_create" created
     let createdTask = createdStructured.["task"]
     assertEqual "created id" "MCP-1" (nodeString createdTask.["id"])
-    assertEqual "created schemaVersion" 3 (createdTask.["schemaVersion"].GetValue<int>())
+    assertEqual "created schemaVersion" 1 (createdTask.["schemaVersion"].GetValue<int>())
     assertEqual "created stateRevision" 0 (createdTask.["stateRevision"].GetValue<int>())
 
     let fetched = callToolWithMeta mcp "task_get" 5 "task_get" (getArgs tempRoot)
@@ -391,7 +391,7 @@ try
                     [ "type", jstr "add-evidence"
                       "id", jstr "E1"
                       "kind", jstr "observation"
-                      "source", jstr "task-runtime-mcp-tests"
+                      "source", jstr "workflow-mcp-tests"
                       "summary", jstr "first bounded apply" ]))
 
     let appliedStructured = expectToolOk "task_apply success" applied
@@ -410,7 +410,7 @@ try
                     [ "type", jstr "add-evidence"
                       "id", jstr "E2"
                       "kind", jstr "observation"
-                      "source", jstr "task-runtime-mcp-tests"
+                      "source", jstr "workflow-mcp-tests"
                       "summary", jstr "stale apply" ]))
 
     let conflictError = expectToolError "task_apply conflict" "CONFLICT" conflicted
@@ -534,7 +534,7 @@ try
             (jobj
                 [ "protocolVersion", jstr "1999-01-01"
                   "capabilities", jobj []
-                  "clientInfo", jobj [ "name", jstr "task-runtime-tests"; "version", jstr "1" ] ])
+                  "clientInfo", jobj [ "name", jstr "workflow-tests"; "version", jstr "1" ] ])
 
     assertEqual "bad version code" -32602 (badVersion.["error"].["code"].GetValue<int>())
 
@@ -573,5 +573,5 @@ finally
 
         mcp.Dispose()
 
-    if Directory.Exists tempRoot && tempRoot.Contains("taskruntime-mcp-tests-", StringComparison.Ordinal) then
+    if Directory.Exists tempRoot && tempRoot.Contains("workflow-mcp-tests-", StringComparison.Ordinal) then
         Directory.Delete(tempRoot, true)

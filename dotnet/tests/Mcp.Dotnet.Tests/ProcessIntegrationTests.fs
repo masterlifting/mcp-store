@@ -1,20 +1,27 @@
-module Mcp.Verifier.Tests.ProcessIntegrationTests
+module Mcp.Dotnet.Tests.ProcessIntegrationTests
 
 open System
 open System.IO
 open System.Threading
 open System.Threading.Tasks
 open Expecto
-open Mcp.Verifier
-open Mcp.Verifier.Tests.Support
+open Mcp.Dotnet
+open Mcp.Dotnet.Tests.Support
 
 // Real process integration is sequenced to keep the short-timeout case deterministic
 // and to avoid many concurrent dotnet builds competing for machine resources.
+let private artifactBaseFor (workspace: TempWorkspace) =
+    Path.Combine(
+        Path.GetTempPath(),
+        "mcp-dotnet-integration-tests",
+        Path.GetFileName(workspace.Root)
+    )
+
 let private serviceFor (workspace: TempWorkspace) =
-    new VerifierService(
+    new DotnetService(
         workspace.Root,
         dotnetHost = dotnetHost (),
-        artifactRoot = Path.Combine(workspace.Root, ".mcp-store", "dotnet-verification"),
+        artifactRoot = artifactBaseFor workspace,
         retention = TimeSpan.FromHours 1.0
     )
 
@@ -211,7 +218,7 @@ let tests =
                 task {
                     use workspace = new TempWorkspace()
                     workspace.CreateClassLibrary("lib", validClassSource) |> ignore
-                    let artifactRoot = Path.Combine(workspace.Root, "artifacts")
+                    let artifactRoot = artifactBaseFor workspace
 
                     let quotas =
                         { Budgets.DefaultArtifactQuotas with
@@ -248,7 +255,7 @@ let tests =
                     let! result = service.VerifyBuild(buildOptions (Some "lib.csproj"))
                     result |> expectOk "successful build" |> ignore
 
-                    let artifactRoot = Path.Combine(workspace.Root, ".mcp-store", "dotnet-verification")
+                    let artifactRoot = artifactBaseFor workspace
 
                     let binlogs =
                         Directory.EnumerateFiles(artifactRoot, "*.binlog", SearchOption.AllDirectories)

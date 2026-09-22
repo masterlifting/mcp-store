@@ -1,4 +1,4 @@
-module Mcp.Verifier.Tests.SecurityTests
+module Mcp.Dotnet.Tests.SecurityTests
 
 open System
 open System.IO
@@ -6,8 +6,8 @@ open System.Text.RegularExpressions
 open System.Threading
 open System.Threading.Tasks
 open Expecto
-open Mcp.Verifier
-open Mcp.Verifier.Tests.Support
+open Mcp.Dotnet
+open Mcp.Dotnet.Tests.Support
 
 let private classLibraryProject =
     "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net11.0</TargetFramework></PropertyGroup></Project>"
@@ -147,51 +147,61 @@ let private targetTests =
 
 let private artifactRootTests =
     testList "artifact root authorization" [
-        testCase "relative artifact root inside the workspace is created"
+        testCase "relative artifact root is rejected"
         <| fun _ ->
             use workspace = new TempWorkspace()
-            let root = PathAuthorization.validateArtifactRoot workspace.Root ".mcp-store/dotnet-verification" |> expectOk "artifact root"
-            Expect.isTrue (Directory.Exists root) "artifact directory created"
-            Expect.isTrue (root.StartsWith(workspace.Root, StringComparison.OrdinalIgnoreCase)) "contained artifact root"
 
-        testCase "artifact root outside the workspace is rejected"
-        <| fun _ ->
-            use workspace = new TempWorkspace()
-            let outside = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"))
-
-            PathAuthorization.validateArtifactRoot workspace.Root outside
-            |> expectErrorMatching "outside artifact root" isUnauthorizedPath
+            PathAuthorization.validateArtifactRoot workspace.Root ".mcp-store/dotnet-state"
+            |> expectErrorMatching "relative artifact root" isInvalidInput
             |> ignore
 
-        testCase "reparse artifact ancestors are rejected"
+        testCase "absolute artifact root outside the workspace is accepted without eager creation"
         <| fun _ ->
             use workspace = new TempWorkspace()
-            Directory.CreateDirectory(Path.Combine(workspace.Root, "artreal")) |> ignore
-            workspace.CreateJunction("artlink", "artreal") |> ignore
+            use artifactWorkspace = new TempWorkspace()
+            let requested = Path.Combine(artifactWorkspace.Root, "state")
 
-            PathAuthorization.validateArtifactRoot workspace.Root "artlink/artifacts"
+            let actual =
+                PathAuthorization.validateArtifactRoot workspace.Root requested
+                |> expectOk "external artifact root"
+
+            Expect.equal actual (Path.GetFullPath requested) "canonical external artifact root"
+            Expect.isFalse (Directory.Exists requested) "validation remains lazy"
+
+        testCase "external reparse artifact ancestors are rejected"
+        <| fun _ ->
+            use workspace = new TempWorkspace()
+            use artifactWorkspace = new TempWorkspace()
+            Directory.CreateDirectory(Path.Combine(artifactWorkspace.Root, "artreal")) |> ignore
+            artifactWorkspace.CreateJunction("artlink", "artreal") |> ignore
+            let requested = Path.Combine(artifactWorkspace.Root, "artlink", "artifacts")
+
+            PathAuthorization.validateArtifactRoot workspace.Root requested
             |> expectErrorMatching "reparse artifact root" isUnauthorizedPath
             |> ignore
 
-        testCase "a missing artifact root below a reparse point is rejected before creation"
+        testCase "a missing external artifact root below a reparse point is rejected before creation"
         <| fun _ ->
             use workspace = new TempWorkspace()
-            Directory.CreateDirectory(Path.Combine(workspace.Root, "real")) |> ignore
-            workspace.CreateJunction("jlink", "real") |> ignore
+            use artifactWorkspace = new TempWorkspace()
+            Directory.CreateDirectory(Path.Combine(artifactWorkspace.Root, "real")) |> ignore
+            artifactWorkspace.CreateJunction("jlink", "real") |> ignore
+            let requested = Path.Combine(artifactWorkspace.Root, "jlink", "new", "artifacts")
 
-            PathAuthorization.validateArtifactRoot workspace.Root "jlink/new/artifacts"
+            PathAuthorization.validateArtifactRoot workspace.Root requested
             |> expectErrorMatching "reparse pre-creation" isUnauthorizedPath
             |> ignore
 
             Expect.isFalse
-                (Directory.Exists(Path.Combine(workspace.Root, "real", "new")))
+                (Directory.Exists(Path.Combine(artifactWorkspace.Root, "real", "new")))
                 "no directory was materialized through the junction"
 
         testCase "artifact root with an invalid character returns typed invalid input"
         <| fun _ ->
             use workspace = new TempWorkspace()
+            let invalid = Path.Combine(Path.GetTempPath(), "bad\u0000root")
 
-            PathAuthorization.validateArtifactRoot workspace.Root "bad\u0000root"
+            PathAuthorization.validateArtifactRoot workspace.Root invalid
             |> expectErrorMatching "nul artifact root" isInvalidInput
             |> ignore
     ]

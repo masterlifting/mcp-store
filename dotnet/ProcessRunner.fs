@@ -1,4 +1,4 @@
-namespace Mcp.Verifier
+namespace Mcp.Dotnet
 
 open System
 open System.Diagnostics

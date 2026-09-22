@@ -9,19 +9,19 @@ open System.Text.Json.Nodes
 let root = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, ".."))
 let workflow = Path.Combine(root, "workflow")
 let outputRoot = Path.Combine(workflow, "dist")
-let sdk = "11.0.100-rc.1.26425.128"
+let targetFramework = "net11.0"
 let version = "1.0.1"
 let componentId = "workflow"
-let entryDll = "Task.Runtime.dll"
+let entryDll = "Mcp.Workflow.dll"
 
 // The publish output is intentionally narrowed to the files consumed by the
-// framework-dependent Task Runtime launcher. Keeping this list component local
+// framework-dependent Workflow launcher. Keeping this list component local
 // prevents a future producer from silently acquiring ownership here.
 let publishedFiles =
     [ "FSharp.Core.dll"
-      "Task.Runtime.deps.json"
-      "Task.Runtime.dll"
-      "Task.Runtime.runtimeconfig.json" ]
+      "Mcp.Workflow.deps.json"
+      "Mcp.Workflow.dll"
+      "Mcp.Workflow.runtimeconfig.json" ]
 
 let run arguments =
     let info = ProcessStartInfo("dotnet")
@@ -80,13 +80,15 @@ let createArchive archivePath sourceRoot files =
         use target = entry.Open()
         source.CopyTo target
 
-let publishTaskRuntime () =
+let publishWorkflow () =
     let destination = Path.Combine(outputRoot, componentId)
+
+
+    if Directory.Exists destination then
+        Directory.Delete(destination, true)
     Directory.CreateDirectory destination |> ignore
     let publishRoot = Path.Combine(destination, "publish")
 
-    // Only remove this run's staging and generated files; stored releases live
-    // alongside them and must remain available for release inspection.
     if Directory.Exists publishRoot then
         Directory.Delete(publishRoot, true)
 
@@ -98,7 +100,7 @@ let publishTaskRuntime () =
 
     run
         [ "publish"
-          "workflow/Task.Runtime.fsproj"
+          "workflow/Mcp.Workflow.fsproj"
           "--configuration"
           "Release"
           "--framework"
@@ -120,13 +122,13 @@ let publishTaskRuntime () =
 
     let expectedFiles = publishedFiles |> List.sort
 
-    assertExactFiles "Task Runtime publish output is not the deterministic allowlist" expectedFiles actualFiles
+    assertExactFiles "Workflow publish output is not the deterministic allowlist" expectedFiles actualFiles
 
     for relativePath in expectedFiles do
         File.Copy(Path.Combine(publishRoot, relativePath), Path.Combine(destination, relativePath))
 
     Directory.Delete(publishRoot, true)
-    File.WriteAllText(Path.Combine(destination, "NOTICE.txt"), "mcp-store Task Runtime MCP distribution\n")
+    File.WriteAllText(Path.Combine(destination, "NOTICE.txt"), "mcp-store Workflow MCP distribution\n")
 
     let stagedFiles =
         Directory.EnumerateFiles(destination, "*", SearchOption.TopDirectoryOnly)
@@ -142,7 +144,7 @@ let publishTaskRuntime () =
     manifest["id"] <- JsonValue.Create componentId
     manifest["version"] <- JsonValue.Create version
     manifest["revision"] <- JsonValue.Create revision
-    manifest["sdk"] <- JsonValue.Create sdk
+    manifest["targetFramework"] <- JsonValue.Create targetFramework
     manifest["entryDll"] <- JsonValue.Create entryDll
     manifest["archive"] <- JsonValue.Create archiveName
     let files = JsonArray()
@@ -177,7 +179,7 @@ let publishTaskRuntime () =
     createArchive archivePath destination archiveFiles
     archiveName, sha256 archivePath, sha256 (Path.Combine(destination, "distribution.json"))
 
-let distribution = publishTaskRuntime ()
+let distribution = publishWorkflow ()
 
 printfn
     "workflow archive=%s sha256=%s manifest=%s"

@@ -2,6 +2,7 @@
 
 import secrets
 import struct
+from typing import Literal, Optional
 
 from telethon.tl.tlobject import TLObject, TLRequest
 
@@ -499,7 +500,7 @@ def _extract_created_topic_id(result) -> Optional[int]:
 @mcp.tool(annotations=ToolAnnotations(title="List Chats", openWorldHint=True, readOnlyHint=True))
 @with_account(readonly=True)
 async def list_chats(
-    chat_type: str = None,
+    chat_type: Optional[Literal["user", "group", "channel"]] = None,
     limit: int = 20,
     unread_only: bool = False,
     unmuted_only: bool = False,

@@ -1,4 +1,4 @@
-// Deterministic coverage for the schema-v2 Task Runtime: general + execution,
+// Deterministic coverage for the schema-v2 Workflow: general + execution,
 // general + research, typed Evidence, evidence-backed Acceptance-Criterion
 // verification, supersession invalidation, and the recursive Work Tree
 // (dotted IDs, dependencies/readiness, ancestor activation, child-gated parent
@@ -8,13 +8,13 @@
 // only that root is removed.
 
 #load "../ComputationExpressions.fs"
-#load "../TaskRuntime.fs"
+#load "../Workflow.fs"
 
 open System
 open System.Diagnostics
 open System.IO
 open System.Text.Json.Nodes
-open TaskRuntime
+open Workflow
 
 let assertEqual name expected actual =
     if actual <> expected then failwithf "%s: expected %A, got %A" name expected actual
@@ -102,7 +102,7 @@ let readPersisted root id =
     File.ReadAllText(sidecarPath root id) |> deserialize
 
 let tempRoot =
-    Path.Combine(Path.GetTempPath(), "opencode", $"taskruntime-tests-{Guid.NewGuid():N}")
+    Path.Combine(Path.GetTempPath(), "opencode", $"workflow-tests-{Guid.NewGuid():N}")
 
 Directory.CreateDirectory tempRoot |> ignore
 
@@ -239,14 +239,14 @@ try
     assertEqual "rejected transition did not bump revision" 2 (expectOk "get after rejected transition" (getTask tempRoot "TST-2")).StateRevision
 
     // --- Scenario 3: malformed / unknown wire input rejection ---------------
-    // Schema 3 is the sole canonical persisted shape: contract fields, guards,
+    // Schema 1 is the sole canonical persisted shape: contract fields, guards,
     // key provenance, decisions, questions, work-item dependsOn/evidenceRefs, and
     // completion history are all present even when empty.
     let generalFingerprint = profiles.[GeneralProfileId].Fingerprint
 
     let baselineJson =
         sprintf
-            """{"schemaVersion":3,"id":"TST-9","title":"Wire fixture","created":"2026-09-10T00:00:00.0000000+00:00","kind":"execution","profile":"general","profileFingerprint":"%s","objective":"","scope":"","nonGoals":"","contractState":"draft","contractFingerprint":"","contractRevision":1,"stateRevision":0,"lifecycle":"open","evidence":[],"acceptanceCriteria":[{"id":"AC1","text":"Execution completes","state":"pending","evidenceRefs":[]}],"guards":[],"profileGuardKeys":{},"decisions":[],"questions":[],"workItems":[{"id":"W1","title":"Do the work","state":"pending","result":"","acceptanceRefs":["AC1"],"dependsOn":[],"evidenceRefs":[],"children":[]}],"completionHistory":[]}"""
+            """{"schemaVersion":1,"id":"TST-9","title":"Wire fixture","created":"2026-09-10T00:00:00.0000000+00:00","kind":"execution","profile":"general","profileFingerprint":"%s","objective":"","scope":"","nonGoals":"","contractState":"draft","contractFingerprint":"","contractRevision":1,"stateRevision":0,"lifecycle":"open","evidence":[],"acceptanceCriteria":[{"id":"AC1","text":"Execution completes","state":"pending","evidenceRefs":[]}],"guards":[],"profileGuardKeys":{},"decisions":[],"questions":[],"workItems":[{"id":"W1","title":"Do the work","state":"pending","result":"","acceptanceRefs":["AC1"],"dependsOn":[],"evidenceRefs":[],"children":[]}],"completionHistory":[]}"""
             generalFingerprint
 
     let mutateJson (mutate: JsonObject -> unit) =
@@ -263,7 +263,7 @@ try
     let duplicateProperty = baselineJson.Replace("\"id\":\"TST-9\"", "\"id\":\"TST-9\",\"id\":\"TST-9\"")
     let missingProperty = mutateJson (fun node -> node.Remove "lifecycle" |> ignore)
     let wrongIntegerType = mutateJson (fun node -> node.["stateRevision"] <- JsonValue.Create "zero")
-    let unsupportedSchema = mutateJson (fun node -> node.["schemaVersion"] <- JsonValue.Create 1)
+    let unsupportedSchema = mutateJson (fun node -> node.["schemaVersion"] <- JsonValue.Create 99)
     let unknownKind = mutateJson (fun node -> node.["kind"] <- JsonValue.Create "hybrid")
     let unknownProfile = mutateJson (fun node -> node.["profile"] <- JsonValue.Create "unregistered")
     let fingerprintMismatch = mutateJson (fun node -> node.["profileFingerprint"] <- JsonValue.Create "general-v2")
@@ -300,8 +300,8 @@ try
         mutateJson (fun node ->
             node.["workItems"].AsArray().[0].AsObject().["children"].AsArray().Add(JsonNode.Parse """{"id":"W2","title":"Child","state":"pending","result":"","acceptanceRefs":[],"dependsOn":[],"evidenceRefs":[],"children":[]}"""))
 
-    // Strict schema-v3 rejections: v2 and legacy fingerprints are no longer
-    // accepted, and every required v3 field must be present.
+    // Strict schema-v1 rejections: v2 and legacy fingerprints are no longer
+    // accepted, and every required v1 field must be present.
     let schemaV2 = mutateJson (fun node -> node.["schemaVersion"] <- JsonValue.Create 2)
 
     let legacyGeneralFingerprint =
@@ -339,7 +339,7 @@ try
     expectRejectedDeserialize "duplicate JSON property" "duplicate JSON property 'id'" duplicateProperty
     expectRejectedDeserialize "missing property" "task is missing property 'lifecycle'" missingProperty
     expectRejectedDeserialize "wrong integer type" "property 'stateRevision' must be an integer" wrongIntegerType
-    expectRejectedDeserialize "unsupported schema version" "unsupported schemaVersion 1" unsupportedSchema
+    expectRejectedDeserialize "unsupported schema version" "unsupported schemaVersion 99" unsupportedSchema
     expectRejectedDeserialize "unknown kind" "kind must be 'execution' or 'research'" unknownKind
     expectRejectedDeserialize "unknown profile" "unknown profile 'unregistered'" unknownProfile
     expectRejectedDeserialize "fingerprint mismatch" "general profile fingerprint does not match" fingerprintMismatch
@@ -414,7 +414,7 @@ try
 
     // The persisted wire document keeps the frozen schema and profile identity.
     let raw = JsonNode.Parse(File.ReadAllText(sidecarPath tempRoot persistedId)).AsObject()
-    assertEqual "persisted schema version" 3 (raw.["schemaVersion"].GetValue<int>())
+    assertEqual "persisted schema version" 1 (raw.["schemaVersion"].GetValue<int>())
     assertEqual "persisted kind" "execution" (raw.["kind"].GetValue<string>())
     assertEqual "persisted profile" "general" (raw.["profile"].GetValue<string>())
     assertEqual "persisted fingerprint" generalFingerprint (raw.["profileFingerprint"].GetValue<string>())
@@ -615,7 +615,7 @@ try
     assertEqual "research round trip evidence" [] researchRoundTrip.Evidence
 
     let researchRaw = JsonNode.Parse(File.ReadAllText(sidecarPath tempRoot researchId)).AsObject()
-    assertEqual "research persisted schema" 3 (researchRaw.["schemaVersion"].GetValue<int>())
+    assertEqual "research persisted schema" 1 (researchRaw.["schemaVersion"].GetValue<int>())
     assertEqual "research persisted kind" "research" (researchRaw.["kind"].GetValue<string>())
     assertEqual "research persisted profile" "general" (researchRaw.["profile"].GetValue<string>())
 
@@ -2575,7 +2575,7 @@ try
     assertEqual "persisted question state" "resolved" (persistedRaw.["questions"].AsArray().[0].AsObject().["state"].GetValue<string>())
     assertEqual "persisted question resolution" "D1" (persistedRaw.["questions"].AsArray().[0].AsObject().["resolution"].GetValue<string>())
 
-    // Schema 3 writes the complete canonical shape: empty Decisions/Questions
+    // Schema 1 writes the complete canonical shape: empty Decisions/Questions
     // and guards/provenance are present rather than omitted.
     let shallowTask = "TST-207"
     expectOk "create shallow task" (createTask tempRoot (createRequest shallowTask "Shallow task")) |> ignore
@@ -3237,5 +3237,5 @@ try
 
     printfn "OK task runtime recursive Work Tree, dependencies/readiness, ancestor activation, completion gating, Wait/Block/Resume, research, evidence DTO, AddEvidence, verify scope, supersession cascade, Guards (DTO/scope/checkpoints/independence/dispositions), Decisions/Open Questions (strict DTO/graph/targeting, TaskWide and WorkItem blocking, resolution), completion evidence, CanCompleteTask, CAS, persistence, Coordinator-only invocation authority (User/ProfilePolicy/confirmationRef sidecar rejection, exact target-bound Guard dispositions, Coordinator disposition creation/reuse, CLI fail-closed), WorkItem ownership/inheritance, terminal handoff persistence/history, and targeted reopen (AC/WorkItem/Guard, fail-closed targets, aborted User-only)"
 finally
-    if Directory.Exists tempRoot && tempRoot.Contains("taskruntime-tests-", StringComparison.Ordinal) then
+    if Directory.Exists tempRoot && tempRoot.Contains("workflow-tests-", StringComparison.Ordinal) then
         Directory.Delete(tempRoot, true)

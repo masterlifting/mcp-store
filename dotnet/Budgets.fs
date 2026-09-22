@@ -1,4 +1,4 @@
-namespace Mcp.Verifier
+namespace Mcp.Dotnet
 
 open System
 
@@ -46,7 +46,7 @@ module Budgets =
             Error(InvalidInput "aggregate artifact quota is smaller than the run quota")
         | None -> Ok quotas
 
-    let validate budgets : Result<VerifierBudgets, VerificationError> =
+    let validate budgets : Result<DotnetBudgets, VerificationError> =
         let positive name value =
             if value > 0 then
                 Ok()

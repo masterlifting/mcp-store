@@ -1,21 +1,21 @@
-// Deterministic repeated-operation measurement for the retained Task Runtime
+// Deterministic repeated-operation measurement for the retained Workflow
 // library/CLI boundary. The workload is fixed: get, apply, validate, repeated
 // over one task. CLI execution is deliberately fixed to the four existing entry
 // scripts; no caller-selected executable or command is accepted.
 
 #load "../ComputationExpressions.fs"
-#load "../TaskRuntime.fs"
-#load "../TaskRuntimeAdapter.fs"
+#load "../Workflow.fs"
+#load "../WorkflowAdapter.fs"
 
 open System
 open System.Diagnostics
 open System.Globalization
 open System.IO
-open TaskRuntime
-open TaskRuntimeAdapter
+open Workflow
+open WorkflowAdapter
 
 let usage () =
-    eprintfn "usage: TaskRuntimeMeasurement.fsx [--iterations <n>] [--rounds <n>]"
+    eprintfn "usage: WorkflowMeasurement.fsx [--iterations <n>] [--rounds <n>]"
     exit 2
 
 let parsePositive (name: string) (value: string) =
@@ -46,7 +46,7 @@ let expectOk name result =
     | Error error -> failwithf "%s: %s" name (renderError error)
 
 let taskId = "BENCH-1"
-let taskTitle = "Task Runtime boundary measurement"
+let taskTitle = "Workflow boundary measurement"
 
 let request =
     { Id = taskId
@@ -107,7 +107,7 @@ let runFixedCli script arguments =
     output.Trim()
 
 let rootFor mode round =
-    let root = Path.Combine(Path.GetTempPath(), "opencode", $"taskruntime-measurement-{mode}-{round}-{Guid.NewGuid():N}")
+    let root = Path.Combine(Path.GetTempPath(), "opencode", $"workflow-measurement-{mode}-{round}-{Guid.NewGuid():N}")
     Directory.CreateDirectory root |> ignore
     root
 
@@ -128,7 +128,7 @@ let createCliTask root =
 let evidenceFor iteration : Evidence =
     { Id = $"E{iteration}"
       Kind = EvidenceKind.Observation
-      Source = EvidenceSource "task-runtime-measurement"
+      Source = EvidenceSource "workflow-measurement"
       Subject = None
       ProducerRole = None
       ProducerId = None
@@ -183,7 +183,7 @@ let runCliRound round =
                       "add-evidence"
                       evidence.Id
                       "observation"
-                      "task-runtime-measurement"
+                      "workflow-measurement"
                       evidence.Summary ]
                 |> deserialize
                 |> expectOk "CLI apply"
@@ -225,9 +225,9 @@ let verdict, recommendation =
         "MCP candidate justified for subtask 6; retain this workload when measuring protocol overhead."
     else
         "NEGATIVE",
-        "Retain the library/scripts/CLI boundary; do not deliver MCP solely for repeated Task Runtime calls."
+        "Retain the library/scripts/CLI boundary; do not deliver MCP solely for repeated Workflow calls."
 
-printfn "MEASUREMENT task-runtime-boundary"
+printfn "MEASUREMENT workflow-boundary"
 printfn "workload: get + apply(add-evidence) + validate x %d iterations" iterations
 printfn "rounds: %d" rounds
 printfn "operations-per-path: %d" (iterations * 3)

@@ -1,10 +1,10 @@
-module Mcp.Verifier.Tests.Support
+module Mcp.Dotnet.Tests.Support
 
 open System
 open System.Diagnostics
 open System.IO
 open System.Text
-open Mcp.Verifier
+open Mcp.Dotnet
 
 // Shared fixtures and assertions for the deterministic producer test suite.
 // Fixtures stay under one GUID temp root per workspace and clean up only that root.
@@ -90,7 +90,7 @@ let createDirectoryLink (link: string) (target: string) =
 
 type TempWorkspace() =
     let root =
-        Path.Combine(Path.GetTempPath(), "mcp-verifier-tests", Guid.NewGuid().ToString("N"))
+        Path.Combine(Path.GetTempPath(), "mcp-dotnet-tests", Guid.NewGuid().ToString("N"))
 
     do Directory.CreateDirectory root |> ignore
 

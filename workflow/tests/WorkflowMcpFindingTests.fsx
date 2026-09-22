@@ -22,7 +22,7 @@ let repoRoot = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", ".."))
 let requiredSdk = "11.0.100-rc.1.26425.128"
 
 let releaseEntryDll =
-    Path.Combine(repoRoot, "workflow", "bin", "Release", "net11.0", "Task.Runtime.dll")
+    Path.Combine(repoRoot, "workflow", "bin", "Release", "net11.0", "Mcp.Workflow.dll")
 
 let resolveDotnetHost () =
     let names = if OperatingSystem.IsWindows() then [ "dotnet.exe" ] else [ "dotnet" ]
@@ -203,7 +203,7 @@ let expectProtocolError name code (response: JsonNode) =
 // --- workspace fixtures -----------------------------------------------------
 
 let suiteRoot =
-    Path.Combine(Path.GetTempPath(), "opencode", $"taskruntime-findings-{Guid.NewGuid():N}")
+    Path.Combine(Path.GetTempPath(), "opencode", $"workflow-findings-{Guid.NewGuid():N}")
 
 let workspaceRoot = Path.Combine(suiteRoot, "workspace")
 let outsideRoot = Path.Combine(suiteRoot, "outside")
@@ -266,7 +266,7 @@ let evidenceCommand id =
         [ "type", jstr "add-evidence"
           "id", jstr id
           "kind", jstr "observation"
-          "source", jstr "task-runtime-finding-tests"
+          "source", jstr "workflow-finding-tests"
           "summary", jstr "finding evidence" ]
 
 let mcp = startMcp workspaceRoot
@@ -455,5 +455,5 @@ finally
 
     [ traversalLink; trustedLink ] |> List.iter removeLink
 
-    if Directory.Exists suiteRoot && suiteRoot.Contains("taskruntime-findings-", StringComparison.Ordinal) then
+    if Directory.Exists suiteRoot && suiteRoot.Contains("workflow-findings-", StringComparison.Ordinal) then
         Directory.Delete(suiteRoot, true)

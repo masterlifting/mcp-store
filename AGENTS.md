@@ -1,23 +1,25 @@
 # Repository Guidance
 
-## Layout
+## Owned MCP producers
 
-- `telegram/` is the Python Telegram MCP server; its entrypoint is `telegram/main.py` and package code is in `telegram/telegram_mcp/`.
-- `github/` is a Windows PowerShell installer for the official GitHub MCP server. Work from the relevant package directory: the root has no shared build manifest.
+- `dotnet/` owns the deterministic .NET build/test MCP producer.
+- `workflow/` owns the deterministic workflow/task-state MCP producer.
+- `telegram/` owns the Telegram MCP package.
 
-## Telegram package
+The official GitHub MCP is an external dependency and is not produced or installed by this repository.
 
-- Requires Python 3.10+ and uses `uv` (`telegram/pyproject.toml`, `telegram/uv.lock`).
-- From `telegram/`, run `uv sync`, then use `uv run pytest` for tests. Coverage: `uv run pytest --cov --cov-report=term-missing --cov-report=xml`.
-- Checks: `uv run black --check .`, `uv run flake8 .`, and `uv run pre-commit run --all-files`.
-- Add or update deterministic tests for behavior changes; do not depend on live Telegram credentials.
+## Boundaries
 
-## GitHub installer
+- Producer code, package metadata, manifests, release tooling, and producer tests live here.
+- OpenCode agents, skills, orchestration, capability selection, consumer launchers, and installed runtime layout do not live here.
+- No migration/backward-compatibility aliases are maintained for retired Dotnet/Workflow product identities or persisted schemas.
 
-- Run from `github/` with PowerShell. The entrypoint is `github/install.ps1`; its test harness is `github/tests/install.tests.ps1`.
-- The installer may install Go through `winget`; do not run it without explicit confirmation for that external installation.
+## Validation
+
+- Dotnet: `dotnet build dotnet/Mcp.Dotnet.fsproj -c Release` and the Expecto project under `dotnet/tests/Mcp.Dotnet.Tests/`.
+- Workflow: `dotnet build workflow/Mcp.Workflow.fsproj -c Release` plus the F# script tests under `workflow/tests/`.
+- Telegram: from `telegram/`, use `uv run pytest`; deterministic tests must not require live credentials.
 
 ## Security
 
-- Never read, print, commit, or transmit `.env`, Telegram session files, tokens, credentials, or private keys. Use `.env.example` and dummy values for local validation.
-- The Telegram HTTP endpoint is unauthenticated; bind it to localhost unless an explicit security decision authorizes otherwise.
+Never read, print, commit, or transmit `.env`, Telegram session files, tokens, credentials, or private keys. Keep filesystem/path authorization fail-closed.

@@ -1,7 +1,9 @@
-namespace Mcp.Verifier
+namespace Mcp.Dotnet
 
 open System
 open System.IO
+open System.Security.Cryptography
+open System.Text
 open System.Threading
 open System.Threading.Tasks
 
@@ -45,11 +47,11 @@ module private DetailSource =
                         (stderr |> Seq.map (fun line -> $"stderr: {line}"))
             }
 
-type VerifierService(
+type DotnetService(
     workspaceRoot: string,
     ?dotnetHost: string,
     ?artifactRoot: string,
-    ?budgets: VerifierBudgets,
+    ?budgets: DotnetBudgets,
     ?retention: TimeSpan
 ) =
     let rootResult = PathAuthorization.validateWorkspace workspaceRoot
@@ -68,12 +70,23 @@ type VerifierService(
         | Error error -> invalidArg (nameof budgets) (VerificationError.message error)
 
     let requestedArtifactRoot =
-        artifactRoot |> Option.defaultValue (Path.Combine(root, ".opencode", "dotnet-verification"))
+        artifactRoot
+        |> Option.defaultWith (fun () ->
+            Path.Combine(Path.GetTempPath(), "mcp-dotnet-state"))
 
-    let rootForArtifacts =
+    let artifactBase =
         match PathAuthorization.validateArtifactRoot root requestedArtifactRoot with
         | Ok value -> value
         | Error error -> invalidArg (nameof artifactRoot) (VerificationError.message error)
+
+    let workspaceIdentity =
+        let canonical =
+            if OperatingSystem.IsWindows() then root.ToUpperInvariant() else root
+        SHA256.HashData(Encoding.UTF8.GetBytes canonical)
+        |> Convert.ToHexString
+        |> fun value -> value.ToLowerInvariant()
+
+    let rootForArtifacts = Path.Combine(artifactBase, workspaceIdentity)
 
     let registry =
         new ArtifactRegistry(

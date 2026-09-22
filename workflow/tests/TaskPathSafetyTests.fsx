@@ -7,12 +7,12 @@
 // temp root and only that root is removed.
 
 #load "../ComputationExpressions.fs"
-#load "../TaskRuntime.fs"
+#load "../Workflow.fs"
 
 open System
 open System.Diagnostics
 open System.IO
-open TaskRuntime
+open Workflow
 
 let expectRejected (name: string) (fragment: string) result =
     match result with

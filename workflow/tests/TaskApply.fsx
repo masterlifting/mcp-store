@@ -1,10 +1,10 @@
 #load "../ComputationExpressions.fs"
-#load "../TaskRuntime.fs"
-#load "../TaskRuntimeAdapter.fs"
+#load "../Workflow.fs"
+#load "../WorkflowAdapter.fs"
 
 open System
-open TaskRuntime
-open TaskRuntimeAdapter
+open Workflow
+open WorkflowAdapter
 
 let usage () =
     eprintfn "usage: TaskApply.fsx <project-root> <TASK-ID> <expected-revision> <command> [command arguments]"

@@ -1,4 +1,4 @@
-namespace Mcp.Verifier
+namespace Mcp.Dotnet
 
 open System
 open System.Collections.Concurrent
@@ -25,7 +25,10 @@ type ArtifactRegistry(artifactRoot: string, retention: TimeSpan, ?quotas: Artifa
         if File.Exists path then FileInfo(path).Length else 0L
 
     let sumFiles directory =
-        Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories) |> Seq.sumBy fileLength
+        if Directory.Exists directory then
+            Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories) |> Seq.sumBy fileLength
+        else
+            0L
 
     let quotaFailure (handle: RunHandle) =
         try
@@ -79,7 +82,6 @@ type ArtifactRegistry(artifactRoot: string, retention: TimeSpan, ?quotas: Artifa
         | Ok _ -> ()
         | Error error -> invalidArg (nameof quotas) (VerificationError.message error)
 
-        Directory.CreateDirectory(artifactRoot) |> ignore
 
     member _.Start(operation) : Result<RunHandle, VerificationError> =
         lock gate (fun () ->
@@ -88,6 +90,7 @@ type ArtifactRegistry(artifactRoot: string, retention: TimeSpan, ?quotas: Artifa
                 if sumFiles artifactRoot >= effectiveQuotas.MaxAggregateBytes then
                     Error(ArtifactQuotaExceeded "aggregate artifact quota is already exhausted")
                 else
+                    Directory.CreateDirectory artifactRoot |> ignore
                     let mutable created = None
                     let mutable attempt = 0
 
@@ -171,7 +174,13 @@ type ArtifactRegistry(artifactRoot: string, retention: TimeSpan, ?quotas: Artifa
             for pair in entries do
                 let mutable removed = Unchecked.defaultof<RegistryEntry>
                 if entries.TryRemove(pair.Key, &removed) then
-                    try Directory.Delete(removed.Handle.Paths.Directory, true) with _ -> ())
+                    try Directory.Delete(removed.Handle.Paths.Directory, true) with _ -> ()
+
+            try
+                if Directory.Exists artifactRoot
+                   && (Directory.EnumerateFileSystemEntries artifactRoot |> Seq.isEmpty) then
+                    Directory.Delete artifactRoot
+            with _ -> ())
 
     member _.Count = entries.Count
 

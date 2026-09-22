@@ -8,12 +8,12 @@
 // only that root is removed.
 
 #load "../ComputationExpressions.fs"
-#load "../TaskRuntime.fs"
+#load "../Workflow.fs"
 
 open System
 open System.IO
 open System.Text.Json.Nodes
-open TaskRuntime
+open Workflow
 
 let assertEqual name expected actual =
     if actual <> expected then failwithf "%s: expected %A, got %A" name expected actual
@@ -300,7 +300,7 @@ try
     // A complete v3 document is the migration target shape.
     let legacyV3Json =
         sprintf
-            """{"schemaVersion":3,"id":"TST-103","title":"Legacy task","created":"2026-09-10T00:00:00.0000000+00:00","kind":"execution","profile":"general","profileFingerprint":"%s","objective":"","scope":"","nonGoals":"","contractState":"draft","contractFingerprint":"","contractRevision":1,"stateRevision":0,"lifecycle":"open","evidence":[],"acceptanceCriteria":[{"id":"AC1","text":"Execution completes","state":"pending","evidenceRefs":[]}],"guards":[],"profileGuardKeys":{},"decisions":[],"questions":[],"workItems":[{"id":"W1","title":"Do the work","state":"pending","result":"","acceptanceRefs":["AC1"],"dependsOn":[],"evidenceRefs":[],"children":[]}],"completionHistory":[]}"""
+            """{"schemaVersion":1,"id":"TST-103","title":"Legacy task","created":"2026-09-10T00:00:00.0000000+00:00","kind":"execution","profile":"general","profileFingerprint":"%s","objective":"","scope":"","nonGoals":"","contractState":"draft","contractFingerprint":"","contractRevision":1,"stateRevision":0,"lifecycle":"open","evidence":[],"acceptanceCriteria":[{"id":"AC1","text":"Execution completes","state":"pending","evidenceRefs":[]}],"guards":[],"profileGuardKeys":{},"decisions":[],"questions":[],"workItems":[{"id":"W1","title":"Do the work","state":"pending","result":"","acceptanceRefs":["AC1"],"dependsOn":[],"evidenceRefs":[],"children":[]}],"completionHistory":[]}"""
             (expectOk "resolve builtin profiles" (resolveProfiles tempRoot)).[GeneralProfileId].Fingerprint
 
     expectOk "v3 legacy fixture parses" (deserialize legacyV3Json) |> ignore
@@ -422,7 +422,7 @@ try
     File.WriteAllText(Path.Combine(runtimeLockDirectory, LockFileName), "user lock state")
     expectEvidenceRejected
         "pre-existing runtime.lock is rejected"
-        LockFileName
+        "runtime lock already exists"
         (createTask tempRoot (createRequest runtimeLockId "Lock state" [ "AC1", "x" ]))
 
     let historicalId = "TST-603"

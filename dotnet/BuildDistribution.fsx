@@ -9,18 +9,18 @@ open System.Text.Json.Nodes
 let root = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, ".."))
 let dotnet = Path.Combine(root, "dotnet")
 let outputRoot = Path.Combine(dotnet, "dist")
-let sdk = "11.0.100-rc.1.26425.128"
+let targetFramework = "net11.0"
 let version = "1.0.1"
 let componentId = "dotnet"
-let entryDll = "Mcp.Verifier.dll"
+let entryDll = "Mcp.Dotnet.dll"
 
 // The allowlist is the runtime contract. Source, project, build, and debug
 // files produced by publish are intentionally excluded from the archive.
 let publishedFiles =
     [ "FSharp.Core.dll"
-      "Mcp.Verifier.deps.json"
-      "Mcp.Verifier.dll"
-      "Mcp.Verifier.runtimeconfig.json" ]
+      "Mcp.Dotnet.deps.json"
+      "Mcp.Dotnet.dll"
+      "Mcp.Dotnet.runtimeconfig.json" ]
 
 let run arguments =
     let info = ProcessStartInfo("dotnet")
@@ -81,11 +81,13 @@ let createArchive archivePath sourceRoot files =
 
 let publish () =
     let destination = Path.Combine(outputRoot, componentId)
+
+
+    if Directory.Exists destination then
+        Directory.Delete(destination, true)
     Directory.CreateDirectory destination |> ignore
     let publishRoot = Path.Combine(destination, "publish")
 
-    // Only this release's staging and generated files are replaceable. Stored
-    // archives and manifests, including the v0.x release, remain available for inspection.
     if Directory.Exists publishRoot then
         Directory.Delete(publishRoot, true)
 
@@ -121,7 +123,7 @@ let publish () =
 
     let expectedFiles = publishedFiles |> List.sort
 
-    assertExactFiles "verifier publish output is not the deterministic allowlist" expectedFiles actualFiles
+    assertExactFiles "dotnet publish output is not the deterministic allowlist" expectedFiles actualFiles
 
     for relativePath in expectedFiles do
         File.Copy(Path.Combine(publishRoot, relativePath), Path.Combine(destination, relativePath))
@@ -143,7 +145,7 @@ let publish () =
     manifest["id"] <- JsonValue.Create componentId
     manifest["version"] <- JsonValue.Create version
     manifest["revision"] <- JsonValue.Create revision
-    manifest["sdk"] <- JsonValue.Create sdk
+    manifest["targetFramework"] <- JsonValue.Create targetFramework
     manifest["entryDll"] <- JsonValue.Create entryDll
     manifest["archive"] <- JsonValue.Create archiveName
     let files = JsonArray()

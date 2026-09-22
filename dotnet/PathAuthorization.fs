@@ -1,4 +1,4 @@
-namespace Mcp.Verifier
+namespace Mcp.Dotnet
 
 open System
 open System.IO
@@ -99,23 +99,23 @@ module PathAuthorization =
                     return! Error(InvalidInput "artifact root must be non-empty")
                 elif artifactRoot.IndexOf('\u0000') >= 0 then
                     return! Error(InvalidInput "artifact root contains an invalid character")
+                elif not (Path.IsPathFullyQualified artifactRoot) then
+                    return! Error(InvalidInput "artifact root must be an absolute path")
 
-                let candidate =
-                    if Path.IsPathRooted artifactRoot then
-                        artifactRoot
+                let normalized = normalize artifactRoot
+
+                if within root normalized then
+                    return! Error(UnauthorizedPath "artifact root must be outside the trusted workspace")
+
+                let rec validateExistingAncestors (current: DirectoryInfo) =
+                    if isNull current then
+                        Ok ()
+                    elif current.Exists && current.Attributes.HasFlag FileAttributes.ReparsePoint then
+                        Error(UnauthorizedPath "artifact root or an existing ancestor is a reparse point")
                     else
-                        Path.Combine(root, artifactRoot)
+                        validateExistingAncestors current.Parent
 
-                let normalized = normalize candidate
-
-                if not (within root normalized) then
-                    return! Error(UnauthorizedPath "artifact root is outside the trusted workspace")
-
-                // Check existing hops before creation. Creating first would allow a
-                // missing path below a junction to be materialized outside the root.
-                do! validateAncestors root normalized
-                do! ensureDirectory normalized
-                do! validateAncestors root normalized
+                do! validateExistingAncestors (DirectoryInfo normalized)
                 return normalized
             }
         with error ->

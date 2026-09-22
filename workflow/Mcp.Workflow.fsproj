@@ -1,8 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFramework>net11.0</TargetFramework>
-    <AssemblyName>Task.Runtime</AssemblyName>
-    <RootNamespace>McpStore.TaskRuntime</RootNamespace>
+    <AssemblyName>Mcp.Workflow</AssemblyName>
+    <RootNamespace>Mcp.Workflow</RootNamespace>
     <OutputType>Exe</OutputType>
     <LangVersion>9.0</LangVersion>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
@@ -13,8 +13,8 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="ComputationExpressions.fs" />
-    <Compile Include="TaskRuntime.fs" />
-    <Compile Include="TaskRuntimeAdapter.fs" />
-    <Compile Include="TaskRuntimeMcp.fs" />
+    <Compile Include="Workflow.fs" />
+    <Compile Include="WorkflowAdapter.fs" />
+    <Compile Include="WorkflowMcp.fs" />
   </ItemGroup>
 </Project>

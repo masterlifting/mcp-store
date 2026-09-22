@@ -1,4 +1,4 @@
-module Mcp.Verifier.Tests.McpHostTests
+module Mcp.Dotnet.Tests.McpHostTests
 
 open System
 open System.Collections.Concurrent
@@ -9,12 +9,12 @@ open System.Text.Json
 open System.Text.Json.Nodes
 open System.Threading.Tasks
 open Expecto
-open Mcp.Verifier
-open Mcp.Verifier.Tests.Support
+open Mcp.Dotnet
+open Mcp.Dotnet.Tests.Support
 
 // The host is exercised as a real stdio subprocess so stdout protocol cleanliness,
 // tool listing, semantic status, and cancellation are verified at the transport boundary.
-let private verifierDllPath () =
+let private dotnetMcpDllPath () =
     let configuration = (DirectoryInfo AppContext.BaseDirectory).Parent.Name
 
     Path.Combine(
@@ -23,13 +23,13 @@ let private verifierDllPath () =
         "bin",
         configuration,
         "net11.0",
-        "Mcp.Verifier.dll"
+        "Mcp.Dotnet.dll"
     )
 
 // Runs the host to completion to assert bounded startup rejection for missing or
 // invalid injected hosts; the MCP path never reaches stdio in these cases.
 let private runHostToCompletion (arguments: string list) (workingDirectory: string) =
-    let dllPath = verifierDllPath ()
+    let dllPath = dotnetMcpDllPath ()
 
     let startInfo = ProcessStartInfo()
     startInfo.FileName <- "dotnet"
@@ -46,16 +46,17 @@ let private runHostToCompletion (arguments: string list) (workingDirectory: stri
 
     if not (child.WaitForExit 30000) then
         child.Kill true
-        fail "runHostToCompletion" "verifier host did not exit after a rejected startup"
+        fail "runHostToCompletion" "dotnet MCP host did not exit after a rejected startup"
 
     child.ExitCode, stdout, stderr
 
-type private McpHostProcess(workingDirectory: string, ?injectedHost: string) =
-    let dllPath = verifierDllPath ()
+type private McpHostProcess(workingDirectory: string, ?injectedHost: string, ?artifactRoot: string) =
+    let dllPath = dotnetMcpDllPath ()
+    let artifactBase = defaultArg artifactRoot (Path.Combine(Path.GetTempPath(), "mcp-dotnet-host-tests", Guid.NewGuid().ToString("N")))
 
     do
         if not (File.Exists dllPath) then
-            fail "McpHostProcess" $"verifier host not found at {dllPath}"
+            fail "McpHostProcess" $"dotnet MCP host not found at {dllPath}"
 
     let startInfo = ProcessStartInfo()
     do
@@ -63,6 +64,8 @@ type private McpHostProcess(workingDirectory: string, ?injectedHost: string) =
         startInfo.ArgumentList.Add dllPath
         startInfo.ArgumentList.Add "--dotnet-host"
         startInfo.ArgumentList.Add(defaultArg injectedHost (dotnetHost ()))
+        startInfo.ArgumentList.Add "--artifact-root"
+        startInfo.ArgumentList.Add artifactBase
         startInfo.WorkingDirectory <- workingDirectory
         startInfo.UseShellExecute <- false
         startInfo.CreateNoWindow <- true
@@ -77,7 +80,7 @@ type private McpHostProcess(workingDirectory: string, ?injectedHost: string) =
 
     do
         if not (hostProcess.Start()) then
-            fail "McpHostProcess" "verifier host process could not be started"
+            fail "McpHostProcess" "dotnet MCP host process could not be started"
 
     let stdoutReader =
         Task.Run(fun () ->
@@ -118,12 +121,13 @@ type private McpHostProcess(workingDirectory: string, ?injectedHost: string) =
 
             node
 
+    member _.ArtifactRoot = artifactBase
     member _.Received = allLines |> Seq.toArray
     member _.StandardError = stderrText.ToString()
 
     member _.WaitForExit(timeoutMs: int) =
         if not (hostProcess.WaitForExit timeoutMs) then
-            fail "McpHostProcess" $"verifier host did not exit within {timeoutMs}ms"
+            fail "McpHostProcess" $"dotnet MCP host did not exit within {timeoutMs}ms"
 
         hostProcess.ExitCode
 
@@ -139,6 +143,9 @@ type private McpHostProcess(workingDirectory: string, ?injectedHost: string) =
             stderrReader.Wait 2000 |> ignore
             hostProcess.Dispose()
             pending.Dispose()
+            try
+                if Directory.Exists artifactBase then Directory.Delete(artifactBase, true)
+            with _ -> ()
 
 let private initializeRequest =
     """{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"verifier-tests","version":"1"}}}"""
@@ -168,14 +175,14 @@ let private stop (host: McpHostProcess) =
 let private hostTests =
     testSequenced
         (testList "MCP stdio host" [
-            testCase "the host requires exactly one injected --dotnet-host"
+            testCase "the host requires an injected --dotnet-host and --artifact-root"
             <| fun _ ->
                 use workspace = new TempWorkspace()
                 workspace.CreateClassLibrary("lib", validClassSource) |> ignore
                 let exitCode, stdout, stderr = runHostToCompletion [] workspace.Root
 
                 Expect.equal exitCode 1 "startup rejected"
-                Expect.isTrue (stderr.Contains("requires exactly one injected --dotnet-host")) "actionable startup diagnostic"
+                Expect.isTrue (stderr.Contains("requires --dotnet-host <absolute path> and --artifact-root <absolute path>")) "actionable startup diagnostic"
                 Expect.isFalse (stdout.Contains("\"jsonrpc\"")) "no protocol traffic on rejected startup"
 
             testCase "a workspace-local injected host is rejected at startup"
@@ -187,7 +194,7 @@ let private hostTests =
                     runHostToCompletion [ "--dotnet-host"; decoy ] workspace.Root
 
                 Expect.equal exitCode 1 "startup rejected"
-                Expect.isTrue (stderr.Contains("dotnet verifier startup failed")) "bounded startup failure"
+                Expect.isTrue (stderr.Contains("dotnet MCP startup failed")) "bounded startup failure"
                 Expect.isFalse (stdout.Contains("\"jsonrpc\"")) "no protocol traffic on rejected startup"
 
             testCaseTask "the child build uses the injected host rather than PATH" (fun () ->
@@ -196,11 +203,30 @@ let private hostTests =
                     workspace.CreateClassLibrary("lib", validClassSource) |> ignore
 
                     let outsideRoot =
-                        Path.Combine(Path.GetTempPath(), "mcp-verifier-host", Guid.NewGuid().ToString("N"))
+                        Path.Combine(Path.GetTempPath(), "mcp-dotnet-host", Guid.NewGuid().ToString("N"))
 
                     Directory.CreateDirectory outsideRoot |> ignore
                     let fake = Path.Combine(outsideRoot, "not-dotnet.exe")
-                    File.WriteAllText(fake, "not a portable executable")
+                    // Use a real executable so Process.Start never triggers a Windows
+                    // invalid-image UI. The executable is intentionally not dotnet.
+                    let harmlessSource =
+                        if OperatingSystem.IsWindows() then
+                            Path.Combine(
+                                Environment.GetFolderPath(Environment.SpecialFolder.System),
+                                "whoami.exe"
+                            )
+                        else
+                            [ "/usr/bin/false"; "/bin/false" ]
+                            |> List.tryFind File.Exists
+                            |> Option.defaultWith (fun () -> failwith "no harmless non-dotnet executable is available")
+
+                    if not (File.Exists harmlessSource) then
+                        failwith $"harmless non-dotnet executable does not exist: {harmlessSource}"
+
+                    File.Copy(harmlessSource, fake)
+
+                    if not (OperatingSystem.IsWindows()) then
+                        File.SetUnixFileMode(fake, File.GetUnixFileMode(harmlessSource))
 
                     try
                         use host = new McpHostProcess(workspace.Root, injectedHost = fake)
@@ -208,15 +234,19 @@ let private hostTests =
                         host.ReadResponse(1, 5000) |> ignore
                         host.Send initializedNotification
 
-                        host.Send(toolCall 20 "verify_dotnet_build" """{"target":"lib.csproj"}""")
+                        host.Send(toolCall 20 "build" """{"target":"lib.csproj"}""")
                         let response = host.ReadResponse(20, 120000)
                         let payload = structured response
 
-                        Expect.equal (response.["result"].["isError"].GetValue<bool>()) true "child launch failed"
+                        // A normal dotnet host would successfully build this project. The
+                        // harmless injected executable starts successfully but exits non-zero,
+                        // proving that execution used the injected host rather than PATH dotnet.
+                        Expect.equal (response.["result"].["isError"].GetValue<bool>()) false "tool transport succeeded"
+                        Expect.equal (payload.["ok"].GetValue<bool>()) true "process result returned"
                         Expect.equal
-                            (payload.["error"].["code"].GetValue<string>())
-                            "PROCESS_START_FAILURE"
-                            "the injected host, not PATH dotnet, was launched"
+                            (payload.["status"].GetValue<string>())
+                            "failed"
+                            "the injected non-dotnet host was executed"
 
                         stop host
                     finally
@@ -234,7 +264,7 @@ let private hostTests =
 
                     host.Send initializeRequest
                     let initialized = host.ReadResponse(1, 5000)
-                    Expect.equal (initialized.["result"].["serverInfo"].["name"].GetValue<string>()) "mcp-store-dotnet-verifier" "server name"
+                    Expect.equal (initialized.["result"].["serverInfo"].["name"].GetValue<string>()) "mcp-store-dotnet" "server name"
 
                     host.Send initializedNotification
                     host.Send toolsListRequest
@@ -246,7 +276,7 @@ let private hostTests =
 
                     Expect.equal
                         names
-                        [ "verify_dotnet_build"; "verify_dotnet_test"; "verification_details" ]
+                        [ "build"; "test"; "details" ]
                         "exactly three capability-scoped tools"
 
                     stop host
@@ -272,7 +302,7 @@ let private hostTests =
                     Expect.equal (unknownTool.["result"].["isError"].GetValue<bool>()) true "unknown tool is an error"
                     Expect.equal unknownToolCode "INVALID_INPUT" "unknown tool code"
 
-                    host.Send(toolCall 4 "verification_details" """{"runId":"missing-run","kind":"errors"}""")
+                    host.Send(toolCall 4 "details" """{"runId":"missing-run","kind":"errors"}""")
                     let unknownRun = host.ReadResponse(4, 5000)
                     let unknownRunCode = (structured unknownRun).["error"].["code"].GetValue<string>()
                     Expect.equal unknownRunCode "UNKNOWN_RUN_ID" "unknown run id code"
@@ -290,16 +320,16 @@ let private hostTests =
                     host.ReadResponse(1, 5000) |> ignore
                     host.Send initializedNotification
 
-                    host.Send(toolCallWithMeta 4 "verification_details" "{\"runId\":\"missing-run\",\"kind\":\"errors\"}")
+                    host.Send(toolCallWithMeta 4 "details" "{\"runId\":\"missing-run\",\"kind\":\"errors\"}")
                     let metaResponse = host.ReadResponse(4, 5000)
                     Expect.equal (metaResponse.["result"].["isError"].GetValue<bool>()) true "optional MCP _meta is ignored"
                     Expect.equal ((structured metaResponse).["error"].["code"].GetValue<string>()) "UNKNOWN_RUN_ID" "_meta does not alter tool dispatch"
 
-                    host.Send("""{"jsonrpc":"2.0","id":40,"method":"tools/call","params":{"name":"verification_details","arguments":{"runId":"missing-run","kind":"errors"},"_unexpected":true}}""")
+                    host.Send("""{"jsonrpc":"2.0","id":40,"method":"tools/call","params":{"name":"details","arguments":{"runId":"missing-run","kind":"errors"},"_unexpected":true}}""")
                     let unknownParameter = host.ReadResponse(40, 5000)
                     Expect.equal (unknownParameter.["error"].["code"].GetValue<int>()) -32602 "other MCP tool-call metadata remains rejected"
 
-                    host.Send(toolCall 5 "verify_dotnet_build" """{"target":"lib.csproj"}""")
+                    host.Send(toolCall 5 "build" """{"target":"lib.csproj"}""")
                     let response = host.ReadResponse(5, 120000)
                     let payload = structured response
 
@@ -326,7 +356,7 @@ let private hostTests =
                     host.ReadResponse(1, 5000) |> ignore
                     host.Send initializedNotification
 
-                    host.Send(toolCall 10 "verify_dotnet_build" """{"target":"lib.csproj","timeoutMs":1800000}""")
+                    host.Send(toolCall 10 "build" """{"target":"lib.csproj","timeoutMs":1800000}""")
 
                     host.Send
                         """{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":10}}"""
@@ -349,7 +379,7 @@ let private hostTests =
                     host.ReadResponse(1, 5000) |> ignore
                     host.Send initializedNotification
 
-                    host.Send(toolCall 6 "verify_dotnet_test" $"{{\"target\":\"{target}\"}}")
+                    host.Send(toolCall 6 "test" $"{{\"target\":\"{target}\"}}")
                     let response = host.ReadResponse(6, 300000)
                     let payload = structured response
 
@@ -361,7 +391,7 @@ let private hostTests =
 
                     let trxArtifacts =
                         Directory.EnumerateFiles(
-                            Path.Combine(workspace.Root, ".opencode", "dotnet-verification"),
+                            host.ArtifactRoot,
                             "*.trx",
                             SearchOption.AllDirectories
                         )
@@ -380,7 +410,7 @@ let private hostTests =
                     Expect.isTrue ((failedTests.[0].GetValue<string>()).Contains "Fails") "failing test named"
 
                     let runId = payload.["runId"].GetValue<string>()
-                    host.Send(toolCall 7 "verification_details" $"{{\"runId\":\"{runId}\",\"kind\":\"failed-tests\"}}")
+                    host.Send(toolCall 7 "details" $"{{\"runId\":\"{runId}\",\"kind\":\"failed-tests\"}}")
                     let detailsResponse = host.ReadResponse(7, 30000)
                     let details = structured detailsResponse
                     Expect.equal (details.["ok"].GetValue<bool>()) true "details ok"
@@ -399,11 +429,11 @@ let private hostTests =
                     host.ReadResponse(1, 5000) |> ignore
                     host.Send initializedNotification
 
-                    host.Send(toolCall 8 "verify_dotnet_build" """{"target":"lib.csproj"}""")
+                    host.Send(toolCall 8 "build" """{"target":"lib.csproj"}""")
                     let response = host.ReadResponse(8, 120000)
                     let runId = (structured response).["runId"].GetValue<string>()
 
-                    host.Send(toolCall 9 "verification_details" $"{{\"runId\":\"{runId}\",\"kind\":\"failed-tests\"}}")
+                    host.Send(toolCall 9 "details" $"{{\"runId\":\"{runId}\",\"kind\":\"failed-tests\"}}")
                     let detailsResponse = host.ReadResponse(9, 30000)
                     let payload = structured detailsResponse
 
@@ -424,7 +454,7 @@ let private hostTests =
                     host.ReadResponse(1, 5000) |> ignore
                     host.Send initializedNotification
 
-                    host.Send(toolCall 11 "verify_dotnet_build" """{"target":"lib.csproj"}""")
+                    host.Send(toolCall 11 "build" """{"target":"lib.csproj"}""")
                     let buildResponse = host.ReadResponse(11, 120000)
                     let payload = structured buildResponse
                     Expect.equal (payload.["status"].GetValue<string>()) "failed" "many-error build failed"
@@ -433,7 +463,7 @@ let private hostTests =
                     host.Send(
                         toolCall
                             12
-                            "verification_details"
+                            "details"
                             $"{{\"runId\":\"{runId}\",\"kind\":\"errors\",\"offset\":0,\"limit\":128}}"
                     )
 

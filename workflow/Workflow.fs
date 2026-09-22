@@ -1,7 +1,8 @@
-module TaskRuntime
+module Workflow
 
 open System
 open System.IO
+open System.Diagnostics
 open System.Runtime.InteropServices
 open System.Security.Cryptography
 open System.Text
@@ -10,10 +11,10 @@ open System.Text.RegularExpressions
 open Common.CE
 open Microsoft.Win32.SafeHandles
 
-// Schema 3 is the sole canonical persisted Task Runtime representation. Older
+// Schema 1 is the sole canonical persisted Workflow representation. Older
 // sidecars are migrated out-of-band and are never accepted by the runtime.
 [<Literal>]
-let SchemaVersion = 3
+let SchemaVersion = 1
 
 [<Literal>]
 let GeneralProfileId = "general"
@@ -5751,35 +5752,6 @@ module private DirectoryBoundary =
         with error ->
             Error(PersistenceFailure $"could not open directory boundary: {error.Message}")
 
-    let openExistingFileNoFollow (path: string) : Result<FileStream, RuntimeError> =
-        try
-            if OperatingSystem.IsWindows() then
-                let nativeHandle =
-                    createFile(
-                        path,
-                        (GenericRead ||| GenericWrite),
-                        0u,
-                        IntPtr.Zero,
-                        OpenExisting,
-                        OpenReparsePoint,
-                        IntPtr.Zero
-                    )
-
-                if nativeHandle = IntPtr(InvalidHandle) then
-                    Error(PersistenceFailure $"could not open runtime lock: {path}")
-                else
-                    let safeHandle = new SafeFileHandle(nativeHandle, true)
-
-                    if PathSafety.isReparseLeaf path then
-                        safeHandle.Dispose()
-                        Error(PersistenceFailure "runtime lock is a reparse point")
-                    else
-                        Ok(new FileStream(safeHandle, FileAccess.ReadWrite, 4096, false))
-            else
-                Error(PersistenceFailure "no-follow file handles are unsupported on this platform")
-        with error ->
-            Error(PersistenceFailure $"could not open runtime lock: {error.Message}")
-
 let private sidecarPath root requestedTaskId =
     match taskId requestedTaskId with
     | Error error -> Error error
@@ -5793,63 +5765,122 @@ let private sidecarPath root requestedTaskId =
             return sidecar, safeTaskDirectory
         }
 
-let private withLock (path: string) action =
-    let lockPath = Path.Combine(Path.GetDirectoryName path, LockFileName)
-    let mutable lockWasCreated = false
+type private LockOwner =
+    { Token: string
+      ProcessId: int
+      ProcessStartUtcTicks: int64
+      CreatedUtcTicks: int64 }
 
-    let removeCreatedLock () =
-        // The CreateNew result is the ownership proof. Never delete an
-        // existing lock merely because the action failed.
-        if lockWasCreated then
-            try
-                if File.Exists lockPath && not (PathSafety.isReparseLeaf lockPath) then
-                    File.Delete lockPath
-            with _ ->
-                ()
+let private lockOwnerNow () =
+    use currentProcess = Process.GetCurrentProcess()
+    { Token = Guid.NewGuid().ToString("N")
+      ProcessId = currentProcess.Id
+      ProcessStartUtcTicks = currentProcess.StartTime.ToUniversalTime().Ticks
+      CreatedUtcTicks = DateTimeOffset.UtcNow.UtcDateTime.Ticks }
 
+let private serializeLockOwner owner =
+    $"{owner.Token}|{owner.ProcessId}|{owner.ProcessStartUtcTicks}|{owner.CreatedUtcTicks}"
+
+let private tryParseLockOwner (text: string) =
+    match text.Split('|') with
+    | [| token; pidText; startText; createdText |] ->
+        match Int32.TryParse pidText, Int64.TryParse startText, Int64.TryParse createdText with
+        | (true, pid), (true, startTicks), (true, createdTicks) when not (String.IsNullOrWhiteSpace token) ->
+            Some
+                { Token = token
+                  ProcessId = pid
+                  ProcessStartUtcTicks = startTicks
+                  CreatedUtcTicks = createdTicks }
+        | _ -> None
+    | _ -> None
+
+let private tryReadLockOwner lockPath =
+    try File.ReadAllText lockPath |> tryParseLockOwner
+    with _ -> None
+
+let private lockOwnerIsActive owner =
+    try
+        use ownerProcess = Process.GetProcessById owner.ProcessId
+        not ownerProcess.HasExited
+        && ownerProcess.StartTime.ToUniversalTime().Ticks = owner.ProcessStartUtcTicks
+    with _ -> false
+
+let private tryDeleteStaleLock lockPath expected =
     try
         if PathSafety.isReparseLeaf lockPath then
-            Error(PersistenceFailure "could not acquire runtime lock: lock file is a reparse point")
+            Error(PersistenceFailure "could not recover runtime lock: lock file is a reparse point")
+        elif lockOwnerIsActive expected then
+            Error(PersistenceFailure "could not acquire runtime lock: runtime lock is held by an active Workflow process")
         else
-            let lockWasCreated, lockStream =
-                try
-                    let stream = new FileStream(lockPath, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None)
-                    lockWasCreated <- true
-                    true, stream
-                with :? IOException ->
-                    if PathSafety.isReparseLeaf lockPath then
-                        raise (IOException "lock file is a reparse point")
-
-                    if OperatingSystem.IsWindows() then
-                        match DirectoryBoundary.openExistingFileNoFollow lockPath with
-                        | Ok stream -> false, stream
-                        | Error(PersistenceFailure message) -> raise (IOException message)
-                        | Error error -> raise (IOException(errorMessage error))
-                    else
-                        // Established Unix creation remains pathname-based. The
-                        // evidence bootstrap is rejected before this path is
-                        // reached when the task directory already exists.
-                        false, new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None)
-
-            let outcome =
-                use lockStream = lockStream
-                action lockWasCreated
-
-            match outcome with
-            | Error _ -> removeCreatedLock ()
-            | Ok _ -> ()
-
-            outcome
+            use stream = new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None)
+            use reader = new StreamReader(stream, Encoding.UTF8, true, 1024, true)
+            stream.Position <- 0L
+            let currentText = reader.ReadToEnd()
+            match tryParseLockOwner currentText with
+            | Some current when current.Token = expected.Token ->
+                stream.Dispose()
+                File.Delete lockPath
+                Ok()
+            | Some _ -> Error(PersistenceFailure "runtime lock ownership changed during stale-lock recovery")
+            | None -> Error(PersistenceFailure "runtime lock metadata is invalid")
     with
-    | :? UnauthorizedAccessException as error ->
-        removeCreatedLock ()
-        Error(PersistenceFailure $"could not acquire runtime lock: {error.Message}")
-    | :? IOException as error ->
-        removeCreatedLock ()
-        Error(PersistenceFailure $"could not acquire runtime lock: {error.Message}")
-    | _ ->
-        removeCreatedLock ()
-        reraise ()
+    | :? FileNotFoundException -> Ok()
+    | :? IOException -> Error(PersistenceFailure "could not acquire runtime lock: runtime lock is held by another Workflow process")
+    | error -> Error(PersistenceFailure $"could not recover runtime lock: {error.Message}")
+
+let private withLock (path: string) action =
+    let lockPath = Path.Combine(Path.GetDirectoryName path, LockFileName)
+
+    let createLock () =
+        let owner = lockOwnerNow ()
+        try
+            if PathSafety.isReparseLeaf lockPath then
+                Error(PersistenceFailure "could not acquire runtime lock: lock file is a reparse point")
+            else
+                let stream = new FileStream(lockPath, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.Read)
+                let bytes = Encoding.UTF8.GetBytes(serializeLockOwner owner)
+                stream.Write(bytes, 0, bytes.Length)
+                stream.Flush true
+                Ok(owner, stream)
+        with
+        | :? IOException -> Error(PersistenceFailure "runtime lock already exists")
+        | error -> Error(PersistenceFailure $"could not acquire runtime lock: {error.Message}")
+
+    let acquire () =
+        match createLock () with
+        | Ok acquired -> Ok acquired
+        | Error(PersistenceFailure message) when message = "runtime lock already exists" ->
+            match tryReadLockOwner lockPath with
+            | Some existing ->
+                match tryDeleteStaleLock lockPath existing with
+                | Ok() -> createLock ()
+                | Error error -> Error error
+            | None -> Error(PersistenceFailure "could not acquire runtime lock: runtime lock already exists and its ownership cannot be established safely")
+        | Error error -> Error error
+
+    match acquire () with
+    | Error error -> Error error
+    | Ok(owner, stream) ->
+        let actionResult =
+            try action true
+            with error -> Error(PersistenceFailure $"runtime operation failed while holding lock: {error.Message}")
+
+        stream.Dispose()
+
+        let cleanupResult =
+            try
+                match tryReadLockOwner lockPath with
+                | Some current when current.Token = owner.Token ->
+                    File.Delete lockPath
+                    Ok()
+                | Some _ -> Error(PersistenceFailure "runtime lock ownership changed before release")
+                | None -> Error(PersistenceFailure "runtime lock metadata disappeared before release")
+            with error -> Error(PersistenceFailure $"could not release runtime lock: {error.Message}")
+
+        match actionResult, cleanupResult with
+        | Error error, _ -> Error error
+        | Ok _, Error error -> Error error
+        | Ok value, Ok() -> Ok value
 
 let private withWindowsCreationBoundaries root taskDirectory action =
     let fullRoot = Path.GetFullPath root
@@ -5922,25 +5953,11 @@ let private withExistingSidecar (path: string) action =
     if not (File.Exists path) then
         Error(NotFound $"runtime sidecar does not exist: {path}")
     else
-        let lockPath = Path.Combine(Path.GetDirectoryName path, LockFileName)
-        let outcome =
-            withLock path (fun _ ->
-                if not (File.Exists path) then
-                    Error(NotFound $"runtime sidecar does not exist: {path}")
-                else
-                    let result = action ()
-                    if File.Exists path then result else Error(NotFound $"runtime sidecar does not exist: {path}"))
-
-        if not (File.Exists path) then
-            try
-                if File.Exists lockPath && not (PathSafety.isReparseLeaf lockPath) then
-                    File.Delete lockPath
-
+        withLock path (fun _ ->
+            if not (File.Exists path) then
                 Error(NotFound $"runtime sidecar does not exist: {path}")
-            with error ->
-                Error(PersistenceFailure $"could not remove orphan runtime lock: {error.Message}")
-        else
-            outcome
+            else
+                action ())
 
 let private atomicWrite (path: string) (content: string) =
     let directory = Path.GetDirectoryName path

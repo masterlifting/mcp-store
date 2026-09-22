@@ -1,10 +1,10 @@
-module Mcp.Verifier.Tests.InvocationTests
+module Mcp.Dotnet.Tests.InvocationTests
 
 open System
 open System.IO
 open Expecto
-open Mcp.Verifier
-open Mcp.Verifier.Tests.Support
+open Mcp.Dotnet
+open Mcp.Dotnet.Tests.Support
 
 let private pathsFor (workspace: TempWorkspace) =
     let directory = Path.Combine(workspace.Root, "artifacts", "run")
@@ -291,7 +291,7 @@ let private trustedHostTests =
 
             Invocation.build
                 workspace.Root
-                (Path.Combine(Path.GetTempPath(), "mcp-verifier-host", "missing-dotnet.exe"))
+                (Path.Combine(Path.GetTempPath(), "mcp-dotnet-host", "missing-dotnet.exe"))
                 Budgets.Defaults
                 defaultBuildOptions
                 (pathsFor workspace)
@@ -316,7 +316,7 @@ let private trustedHostTests =
             use workspace = new TempWorkspace()
             workspace.CreateClassLibrary("lib", validClassSource) |> ignore
             let host = dotnetHost ()
-            let outsideRoot = Path.Combine(Path.GetTempPath(), "mcp-verifier-host", Guid.NewGuid().ToString("N"))
+            let outsideRoot = Path.Combine(Path.GetTempPath(), "mcp-dotnet-host", Guid.NewGuid().ToString("N"))
             Directory.CreateDirectory outsideRoot |> ignore
             let link = Path.Combine(outsideRoot, "host-link")
 
