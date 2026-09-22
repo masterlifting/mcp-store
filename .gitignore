@@ -1,13 +1,6 @@
-# Ephemeral Task Runtime lock files; task records remain versioned.
 .tasks/**/runtime.lock
-dotnet/obj/
-dotnet/bin/
-dotnet/verifier/obj/
-dotnet/verifier/bin/
+.tasks
 dotnet/dist/
-dotnet/verifier/dist/
-dotnet/**/obj/
-dotnet/**/bin/
-workflow/bin/
-workflow/obj/
 workflow/dist/
+*/bin/
+*/obj/
