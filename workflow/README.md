@@ -9,7 +9,11 @@ The distribution scripts are component-local: they emit no verifier artifacts.
 The .NET MCP has its own producer boundary under `dotnet/` and its release is
 not part of the Task Runtime bootstrap.
 
-The v1 release build produces the immutable `workflow-v1.0.0.zip` framework-
+The v1 release build produces the corrected immutable `workflow-v1.0.1.zip`
+framework-dependent `net11.0` distribution. The v1.0.0 archive remains an
+immutable historical release with the original manifest-schema failure. The
+consumer must invoke the pinned entry DLL with `dotnet exec`; it must not run
+source scripts or restore/build the producer at runtime.
 dependent `net11.0` distribution. The consumer must invoke the pinned entry DLL with `dotnet exec`; it must not run
 source scripts or restore/build the producer at runtime.
 
@@ -18,14 +22,14 @@ dotnet build workflow/Task.Runtime.fsproj -c Release
 dotnet run --project workflow/Task.Runtime.fsproj -c Release --no-build
 ```
 
-For the immutable `workflow-v1.0.0.zip` asset, run
+For the corrected immutable `workflow-v1.0.1.zip` asset, run
 `dotnet fsi workflow/BuildDistributions.fsx`, then
 `dotnet fsi workflow/PrepareReleasePins.fsx`, and verify with
 `dotnet fsi workflow/tests/DistributionTests.fsx`. The build stages only
 `workflow/Task.Runtime.fsproj` under `workflow/dist/workflow/` and emits:
 
 ```text
-workflow/dist/workflow-v1.0.0.zip
+workflow/dist/workflow-v1.0.1.zip
 workflow/dist/workflow/distribution.json
 workflow/dist/consumer-pins.json
 ```
@@ -36,8 +40,10 @@ the exact archive allowlist and a lowercase SHA-256 for every runtime file. The
 archive is allowlisted to the runtime DLL, its framework-dependent metadata,
 `NOTICE.txt`, and `distribution.json`; source, project, build output, PDB, and
 apphost files are rejected. Regeneration removes only the workflow v1 staging
-directory and preserves the stored `task-runtime-v0.1.1` release outputs.
+directory and preserves the stored `workflow-v1.0.0.zip` historical release.
 
-The manifest uses deterministic arrays: `files` contains `{ "name", "sha256" }`
-objects for the runtime allowlist, while `archiveFiles` contains the complete
-archive entry-name allowlist.
+The manifest uses deterministic arrays: `files` contains `{ "path", "sha256" }`
+objects for the runtime allowlist. `path` is an exact slash-separated,
+repository-relative archive path matching the OpenCode v1 consumer contract;
+paths are unique case-insensitively and each payload hash is lowercase SHA-256.
+`archiveFiles` contains the complete archive entry-name allowlist.

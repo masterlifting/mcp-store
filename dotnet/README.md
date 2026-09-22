@@ -2,8 +2,10 @@
 
 This directory is the standalone producer boundary for the bounded .NET
 verification MCP server. It owns the verifier implementation and publishes the
-`dotnet` v1.0.0 framework-dependent `net11.0` runtime distribution. Consumers
-do not build or run this source checkout at runtime.
+`dotnet` v1.0.1 framework-dependent `net11.0` runtime distribution. The
+v1.0.0 archive remains an immutable historical release with the original
+manifest-schema failure. Consumers do not build or run this source checkout at
+runtime.
 
 ## Consumer installation
 
@@ -39,7 +41,7 @@ process, quota, and MCP transport coverage.
 
 ## Producer packaging
 
-From the repository root, build and pin the immutable `dotnet-v1.0.0.zip`
+From the repository root, build and pin the corrected immutable `dotnet-v1.0.1.zip`
 release with:
 
 ```text
@@ -55,6 +57,8 @@ contains the runtime files, `NOTICE.txt`, and the manifest; source, project,
 build output, PDB, and apphost files are rejected. The v1 scripts preserve the
 stored `dotnet-verifier-v0.2.0` release outputs under `dotnet/verifier/dist/`.
 
-The manifest uses deterministic arrays: `files` contains `{ "name", "sha256" }`
-objects for the runtime allowlist, while `archiveFiles` contains the complete
-archive entry-name allowlist.
+The manifest uses deterministic arrays: `files` contains `{ "path", "sha256" }`
+objects for the runtime allowlist. `path` is an exact slash-separated,
+repository-relative archive path matching the OpenCode v1 consumer contract;
+paths are unique case-insensitively and each payload hash is lowercase SHA-256.
+`archiveFiles` contains the complete archive entry-name allowlist.
