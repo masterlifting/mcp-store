@@ -2,13 +2,17 @@
 
 import secrets
 import struct
-from typing import Literal, Optional
+from typing import Annotated, Literal, Optional
 
+from pydantic import Field
 from telethon.tl.tlobject import TLObject, TLRequest
 
 from telegram_mcp.runtime import *
 
 MAX_FORUM_TOPICS_PAGE_SIZE = 100
+
+ForumTopicLimit = Annotated[int, Field(ge=1, le=MAX_FORUM_TOPICS_PAGE_SIZE)]
+NonNegativeTopicOffset = Annotated[int, Field(ge=0)]
 
 
 class GetForumTopicsRequest(TLRequest):
@@ -264,8 +268,8 @@ async def subscribe_public_channel(channel: Union[int, str], account: str = None
 @with_account(readonly=True)
 async def list_topics(
     chat_id: int,
-    limit: int = MAX_FORUM_TOPICS_PAGE_SIZE,
-    offset_topic: int = 0,
+    limit: ForumTopicLimit = MAX_FORUM_TOPICS_PAGE_SIZE,
+    offset_topic: NonNegativeTopicOffset = 0,
     search_query: str = None,
     account: str = None,
 ) -> str:

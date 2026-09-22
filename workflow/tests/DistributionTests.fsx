@@ -1,5 +1,5 @@
 // Deterministic contract coverage for the component-local workflow v1 producer.
-// The test regenerates v1.0.1 output and proves the stored v1.0.0 output is untouched.
+// The test regenerates v1.0.2 output and proves the stored v1.0.0 output is untouched.
 
 open System
 open System.Diagnostics
@@ -12,7 +12,7 @@ let repoRoot = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", ".."))
 let workflow = Path.Combine(repoRoot, "workflow")
 let dist = Path.Combine(workflow, "dist")
 let componentId = "workflow"
-let version = "1.0.1"
+let version = "1.0.2"
 let archiveName = $"{componentId}-v{version}.zip"
 let publishedFiles =
     [ "FSharp.Core.dll"
@@ -83,8 +83,8 @@ assertTrue
     "build script names the Workflow project"
     (buildScript.Contains("workflow/Mcp.Workflow.fsproj", StringComparison.Ordinal))
 assertTrue
-    "build script names the corrected v1.0.1 release"
-    (buildScript.Contains("let version = \"1.0.1\"", StringComparison.Ordinal))
+    "build script names the corrected v1.0.2 release"
+    (buildScript.Contains("let version = \"1.0.2\"", StringComparison.Ordinal))
 assertTrue
     "build script uses the canonical workflow identity"
     (buildScript.Contains("let componentId = \"workflow\"", StringComparison.Ordinal))
@@ -98,8 +98,8 @@ assertTrue
     "build script does not emit the incompatible name field"
     (not (buildScript.Contains("fileEntry[\"name\"]", StringComparison.Ordinal)))
 assertTrue
-    "pin script names the corrected v1.0.1 release"
-    (pinsScript.Contains("let version = \"1.0.1\"", StringComparison.Ordinal))
+    "pin script names the corrected v1.0.2 release"
+    (pinsScript.Contains("let version = \"1.0.2\"", StringComparison.Ordinal))
 assertTrue
     "pin script constructs the v1 archive"
     (pinsScript.Contains("let archiveName = $\"{componentId}-v{version}.zip\"", StringComparison.Ordinal))

@@ -1,10 +1,19 @@
 """Messages MCP tools."""
 
+from typing import Annotated
+
+from pydantic import Field
+
 from telegram_mcp.tools.chats import GetForumTopicsByIDRequest
 from telegram_mcp.runtime import *
 
 MAX_FROZEN_RANGE_MESSAGES = 1000
 MAX_TOPIC_PAGE_SIZE = 100
+
+PositiveMessageId = Annotated[int, Field(gt=0)]
+NonNegativeMessageId = Annotated[int, Field(ge=0)]
+PositivePage = Annotated[int, Field(gt=0)]
+TopicPageSize = Annotated[int, Field(ge=1, le=MAX_TOPIC_PAGE_SIZE)]
 
 
 def get_media_label(msg) -> str:
@@ -366,8 +375,8 @@ async def _get_chat_read_watermark(cl, entity):
 @with_account(readonly=True)
 async def get_messages_in_range(
     chat_id: int,
-    after_message_id: int,
-    through_message_id: int,
+    after_message_id: NonNegativeMessageId,
+    through_message_id: PositiveMessageId,
     account: str = None,
 ) -> str:
     """Retrieve every message in the frozen interval ``(after_message_id, through_message_id]``."""
@@ -421,9 +430,9 @@ async def get_messages_in_range(
 @with_account(readonly=True)
 async def get_topic_messages_in_range(
     chat_id: int,
-    topic_id: int,
-    after_message_id: int,
-    through_message_id: int,
+    topic_id: PositiveMessageId,
+    after_message_id: NonNegativeMessageId,
+    through_message_id: PositiveMessageId,
     account: str = None,
 ) -> str:
     """Retrieve every message in one topic's frozen ID interval."""
@@ -512,9 +521,9 @@ async def get_messages(
 @with_account(readonly=True)
 async def get_topic_messages(
     chat_id: int,
-    topic_id: int,
-    page: int = 1,
-    page_size: int = 20,
+    topic_id: PositiveMessageId,
+    page: PositivePage = 1,
+    page_size: TopicPageSize = 20,
     account: str = None,
 ) -> str:
     """Get paginated messages from a forum topic."""
@@ -1617,7 +1626,7 @@ async def mark_as_read(chat_id: int, account: str = None) -> str:
     )
 )
 @with_account(readonly=False)
-async def mark_read_through(chat_id: int, through_message_id: int, account: str = None) -> str:
+async def mark_read_through(chat_id: int, through_message_id: PositiveMessageId, account: str = None) -> str:
     """Mark messages in a chat as read through the supplied message ID."""
     chat_validation_error = _validate_canonical_chat_id(chat_id)
     if chat_validation_error:
@@ -1673,7 +1682,7 @@ async def mark_read_through(chat_id: int, through_message_id: int, account: str 
     )
 )
 @with_account(readonly=False)
-async def mark_topic_as_read(chat_id: int, topic_id: int, account: str = None) -> str:
+async def mark_topic_as_read(chat_id: int, topic_id: PositiveMessageId, account: str = None) -> str:
     """Mark all messages in one forum topic as read."""
     chat_validation_error = _validate_canonical_chat_id(chat_id)
     if chat_validation_error:
@@ -1737,7 +1746,10 @@ async def mark_topic_as_read(chat_id: int, topic_id: int, account: str = None) -
 )
 @with_account(readonly=False)
 async def mark_topic_read_through(
-    chat_id: int, topic_id: int, through_message_id: int, account: str = None
+    chat_id: int,
+    topic_id: PositiveMessageId,
+    through_message_id: PositiveMessageId,
+    account: str = None,
 ) -> str:
     """Mark a forum topic as read through the supplied message ID."""
     chat_validation_error = _validate_canonical_chat_id(chat_id)

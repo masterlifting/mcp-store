@@ -148,7 +148,7 @@ type private McpHostProcess(workingDirectory: string, ?injectedHost: string, ?ar
             with _ -> ()
 
 let private initializeRequest =
-    """{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"verifier-tests","version":"1"}}}"""
+    """{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"dotnet-tests","version":"1"}}}"""
 
 let private initializedNotification =
     """{"jsonrpc":"2.0","method":"notifications/initialized"}"""
@@ -254,6 +254,28 @@ let private hostTests =
                             Directory.Delete(outsideRoot, true)
                         with _ ->
                             ()
+                })
+
+            testCaseTask "host startup is independent of workspace global.json SDK selection" (fun () ->
+                task {
+                    for sdkVersion in [ "8.0.100"; "99.0.100" ] do
+                        use workspace = new TempWorkspace()
+
+                        let globalJson =
+                            sprintf "{\"sdk\":{\"version\":\"%s\",\"rollForward\":\"disable\"}}" sdkVersion
+
+                        workspace.Write("global.json", globalJson) |> ignore
+
+                        use host = new McpHostProcess(workspace.Root)
+                        host.Send initializeRequest
+                        let initialized = host.ReadResponse(1, 5000)
+
+                        Expect.equal
+                            (initialized.["result"].["serverInfo"].["name"].GetValue<string>())
+                            "mcp-store-dotnet"
+                            $"server starts with workspace SDK selection {sdkVersion}"
+
+                        stop host
                 })
 
             testCaseTask "handshake and tool list are protocol-clean" (fun () ->

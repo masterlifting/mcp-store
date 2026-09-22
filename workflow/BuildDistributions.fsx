@@ -10,7 +10,7 @@ let root = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, ".."))
 let workflow = Path.Combine(root, "workflow")
 let outputRoot = Path.Combine(workflow, "dist")
 let targetFramework = "net11.0"
-let version = "1.0.1"
+let version = "1.0.2"
 let componentId = "workflow"
 let entryDll = "Mcp.Workflow.dll"
 

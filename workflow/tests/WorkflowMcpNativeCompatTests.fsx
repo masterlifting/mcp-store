@@ -14,10 +14,8 @@ open System.Text.Json.Nodes
 let repoRoot = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", ".."))
 
 // The frozen framework-dependent distribution has no apphost. Consumer
-// semantics resolve the pinned dotnet host and invoke
-// `dotnet exec <entry DLL>`.
-let requiredSdk = "11.0.100-rc.1.26425.128"
-
+// semantics resolve an explicit dotnet host and invoke
+// `dotnet exec <entry DLL>`; workspace SDK selection is not a host prerequisite.
 let releaseEntryDll =
     Path.Combine(repoRoot, "workflow", "bin", "Release", "net11.0", "Mcp.Workflow.dll")
 
@@ -40,32 +38,7 @@ let resolveDotnetHost () =
     | Some host -> Path.GetFullPath host
     | None -> failwithf "the required .NET host '%s' is not on PATH" names.Head
 
-let assertRequiredSdk (host: string) =
-    let startInfo = ProcessStartInfo()
-    startInfo.FileName <- host
-    startInfo.ArgumentList.Add "--version"
-    startInfo.RedirectStandardOutput <- true
-    startInfo.RedirectStandardError <- true
-    startInfo.UseShellExecute <- false
-    startInfo.CreateNoWindow <- true
-    startInfo.WorkingDirectory <- repoRoot
-    use child = Process.Start startInfo
-    let stdout = child.StandardOutput.ReadToEnd()
-    let stderr = child.StandardError.ReadToEnd()
-    child.WaitForExit()
-
-    if child.ExitCode <> 0 then
-        failwithf "could not query the .NET SDK version from '%s': %s" host (stderr.Trim())
-
-    let selected = stdout.Trim()
-
-    if selected <> requiredSdk then
-        failwithf "the required SDK is '%s' but '%s' reports '%s'" requiredSdk host selected
-
-let dotnetHost =
-    let host = resolveDotnetHost ()
-    assertRequiredSdk host
-    host
+let dotnetHost = resolveDotnetHost ()
 
 let requireReleaseEntry () =
     if not (File.Exists releaseEntryDll) then

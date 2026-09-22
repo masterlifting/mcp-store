@@ -1,4 +1,4 @@
-// Deterministic coverage for the schema-v2 Workflow: general + execution,
+// Deterministic coverage for the schema-v1 Workflow: general + execution,
 // general + research, typed Evidence, evidence-backed Acceptance-Criterion
 // verification, supersession invalidation, and the recursive Work Tree
 // (dotted IDs, dependencies/readiness, ancestor activation, child-gated parent
@@ -3235,7 +3235,7 @@ try
                   DecisionRef = None
                   Targets = [ ReopenTarget.AcceptanceCriterionTarget "AC1" ] }))
 
-    printfn "OK task runtime recursive Work Tree, dependencies/readiness, ancestor activation, completion gating, Wait/Block/Resume, research, evidence DTO, AddEvidence, verify scope, supersession cascade, Guards (DTO/scope/checkpoints/independence/dispositions), Decisions/Open Questions (strict DTO/graph/targeting, TaskWide and WorkItem blocking, resolution), completion evidence, CanCompleteTask, CAS, persistence, Coordinator-only invocation authority (User/ProfilePolicy/confirmationRef sidecar rejection, exact target-bound Guard dispositions, Coordinator disposition creation/reuse, CLI fail-closed), WorkItem ownership/inheritance, terminal handoff persistence/history, and targeted reopen (AC/WorkItem/Guard, fail-closed targets, aborted User-only)"
+    printfn "OK Workflow recursive Work Tree, dependencies/readiness, ancestor activation, completion gating, Wait/Block/Resume, research, evidence DTO, AddEvidence, verify scope, supersession cascade, Guards (DTO/scope/checkpoints/independence/dispositions), Decisions/Open Questions (strict DTO/graph/targeting, TaskWide and WorkItem blocking, resolution), completion evidence, CanCompleteTask, CAS, persistence, Coordinator-only invocation authority (User/ProfilePolicy/confirmationRef sidecar rejection, exact target-bound Guard dispositions, Coordinator disposition creation/reuse, CLI fail-closed), WorkItem ownership/inheritance, terminal handoff persistence/history, and targeted reopen (AC/WorkItem/Guard, fail-closed targets, aborted User-only)"
 finally
     if Directory.Exists tempRoot && tempRoot.Contains("workflow-tests-", StringComparison.Ordinal) then
         Directory.Delete(tempRoot, true)
