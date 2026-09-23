@@ -1,4 +1,4 @@
-// Deterministic coverage for the schema-v2 Task Runtime: general + execution,
+// Deterministic coverage for the strict schema-v1 Workflow: general + execution,
 // general + research, typed Evidence, evidence-backed Acceptance-Criterion
 // verification, supersession invalidation, and the recursive Work Tree
 // (dotted IDs, dependencies/readiness, ancestor activation, child-gated parent
@@ -8,13 +8,13 @@
 // only that root is removed.
 
 #load "../ComputationExpressions.fs"
-#load "../TaskRuntime.fs"
+#load "../Workflow.fs"
 
 open System
 open System.Diagnostics
 open System.IO
 open System.Text.Json.Nodes
-open TaskRuntime
+open Workflow
 
 let assertEqual name expected actual =
     if actual <> expected then failwithf "%s: expected %A, got %A" name expected actual
@@ -67,11 +67,7 @@ let createRequest id title =
       AcceptanceCriteria = [ "AC1", "Execution completes" ]
       WorkItems = [ spec "W1" "Do the work" ] }
 
-let existingCreateRejectedMessage =
-    if OperatingSystem.IsWindows() then
-        SidecarFileName
-    else
-        "evidence-only task bootstrap requires Windows directory-handle boundaries"
+let existingCreateRejectedMessage = SidecarFileName
 
 let makeEvidence id kind summary =
     { Id = id
@@ -239,14 +235,14 @@ try
     assertEqual "rejected transition did not bump revision" 2 (expectOk "get after rejected transition" (getTask tempRoot "TST-2")).StateRevision
 
     // --- Scenario 3: malformed / unknown wire input rejection ---------------
-    // Schema 3 is the sole canonical persisted shape: contract fields, guards,
+    // Schema 1 is the sole canonical persisted shape: contract fields, guards,
     // key provenance, decisions, questions, work-item dependsOn/evidenceRefs, and
     // completion history are all present even when empty.
     let generalFingerprint = profiles.[GeneralProfileId].Fingerprint
 
     let baselineJson =
         sprintf
-            """{"schemaVersion":3,"id":"TST-9","title":"Wire fixture","created":"2026-09-10T00:00:00.0000000+00:00","kind":"execution","profile":"general","profileFingerprint":"%s","objective":"","scope":"","nonGoals":"","contractState":"draft","contractFingerprint":"","contractRevision":1,"stateRevision":0,"lifecycle":"open","evidence":[],"acceptanceCriteria":[{"id":"AC1","text":"Execution completes","state":"pending","evidenceRefs":[]}],"guards":[],"profileGuardKeys":{},"decisions":[],"questions":[],"workItems":[{"id":"W1","title":"Do the work","state":"pending","result":"","acceptanceRefs":["AC1"],"dependsOn":[],"evidenceRefs":[],"children":[]}],"completionHistory":[]}"""
+             """{"schemaVersion":1,"id":"TST-9","title":"Wire fixture","created":"2026-09-10T00:00:00.0000000+00:00","kind":"execution","profile":"general","profileFingerprint":"%s","objective":"","scope":"","nonGoals":"","contractState":"draft","contractFingerprint":"","contractRevision":1,"stateRevision":0,"lifecycle":"open","evidence":[],"acceptanceCriteria":[{"id":"AC1","text":"Execution completes","state":"pending","evidenceRefs":[]}],"guards":[],"profileGuardKeys":{},"decisions":[],"questions":[],"workItems":[{"id":"W1","title":"Do the work","state":"pending","result":"","acceptanceRefs":["AC1"],"dependsOn":[],"evidenceRefs":[],"children":[]}],"completionHistory":[]}"""
             generalFingerprint
 
     let mutateJson (mutate: JsonObject -> unit) =
@@ -263,7 +259,7 @@ try
     let duplicateProperty = baselineJson.Replace("\"id\":\"TST-9\"", "\"id\":\"TST-9\",\"id\":\"TST-9\"")
     let missingProperty = mutateJson (fun node -> node.Remove "lifecycle" |> ignore)
     let wrongIntegerType = mutateJson (fun node -> node.["stateRevision"] <- JsonValue.Create "zero")
-    let unsupportedSchema = mutateJson (fun node -> node.["schemaVersion"] <- JsonValue.Create 1)
+    let unsupportedSchema = mutateJson (fun node -> node.["schemaVersion"] <- JsonValue.Create 3)
     let unknownKind = mutateJson (fun node -> node.["kind"] <- JsonValue.Create "hybrid")
     let unknownProfile = mutateJson (fun node -> node.["profile"] <- JsonValue.Create "unregistered")
     let fingerprintMismatch = mutateJson (fun node -> node.["profileFingerprint"] <- JsonValue.Create "general-v2")
@@ -300,7 +296,7 @@ try
         mutateJson (fun node ->
             node.["workItems"].AsArray().[0].AsObject().["children"].AsArray().Add(JsonNode.Parse """{"id":"W2","title":"Child","state":"pending","result":"","acceptanceRefs":[],"dependsOn":[],"evidenceRefs":[],"children":[]}"""))
 
-    // Strict schema-v3 rejections: v2 and legacy fingerprints are no longer
+    // Strict schema-v1 rejections: non-v1 and legacy fingerprints are no longer
     // accepted, and every required v3 field must be present.
     let schemaV2 = mutateJson (fun node -> node.["schemaVersion"] <- JsonValue.Create 2)
 
@@ -339,7 +335,7 @@ try
     expectRejectedDeserialize "duplicate JSON property" "duplicate JSON property 'id'" duplicateProperty
     expectRejectedDeserialize "missing property" "task is missing property 'lifecycle'" missingProperty
     expectRejectedDeserialize "wrong integer type" "property 'stateRevision' must be an integer" wrongIntegerType
-    expectRejectedDeserialize "unsupported schema version" "unsupported schemaVersion 1" unsupportedSchema
+    expectRejectedDeserialize "unsupported schema version" "unsupported schemaVersion 3" unsupportedSchema
     expectRejectedDeserialize "unknown kind" "kind must be 'execution' or 'research'" unknownKind
     expectRejectedDeserialize "unknown profile" "unknown profile 'unregistered'" unknownProfile
     expectRejectedDeserialize "fingerprint mismatch" "general profile fingerprint does not match" fingerprintMismatch
@@ -414,7 +410,7 @@ try
 
     // The persisted wire document keeps the frozen schema and profile identity.
     let raw = JsonNode.Parse(File.ReadAllText(sidecarPath tempRoot persistedId)).AsObject()
-    assertEqual "persisted schema version" 3 (raw.["schemaVersion"].GetValue<int>())
+    assertEqual "persisted schema version" 1 (raw.["schemaVersion"].GetValue<int>())
     assertEqual "persisted kind" "execution" (raw.["kind"].GetValue<string>())
     assertEqual "persisted profile" "general" (raw.["profile"].GetValue<string>())
     assertEqual "persisted fingerprint" generalFingerprint (raw.["profileFingerprint"].GetValue<string>())
@@ -487,13 +483,7 @@ try
             | Error error ->
                 let message = renderError error
 
-                // The loser either fails to take the lock or re-reads the
-                // committed runtime state after the lock; both fail closed.
-                let rejected =
-                    message.Contains(existingCreateRejectedMessage, StringComparison.Ordinal)
-                    || message.Contains("could not acquire runtime lock", StringComparison.Ordinal)
-
-                if not rejected then
+                if not (message.Contains(existingCreateRejectedMessage, StringComparison.Ordinal)) then
                     failwithf "concurrent create %s: racer %d unexpected error %s" raceId racer message
 
         let committed = expectOk (sprintf "get raced task %s" raceId) (getTask tempRoot raceId)
@@ -519,7 +509,7 @@ try
     expectRejected "missing sidecar on get" "runtime sidecar does not exist" (getTask tempRoot absentId)
     expectRejected "missing sidecar on validate" "runtime sidecar does not exist" (validateTask tempRoot absentId)
     expectRejected "missing sidecar on apply" "runtime sidecar does not exist" (applyTask tempRoot absentId 0 (StartWorkItem "W1"))
-    assertTrue "missing sidecar does not create a lock" (not (File.Exists(Path.Combine(absentDirectory, LockFileName))))
+    assertTrue "missing sidecar does not create a lock" (not (File.Exists(Path.Combine(absentDirectory, "runtime.lock"))))
     assertTrue "missing sidecar does not create a sidecar" (not (File.Exists(sidecarPath tempRoot absentId)))
 
     let noDirectoryId = "TST-404"
@@ -530,73 +520,6 @@ try
     let missingRoot = Path.Combine(tempRoot, "missing-root")
     expectRejected "missing project root on get" "project root does not exist" (getTask missingRoot "TST-1")
     expectRejected "missing project root on create" "project root does not exist" (createTask missingRoot (createRequest "TST-6" "No root"))
-
-    // --- Scenario 4c: F-003 sidecar deletion race leaves no orphan lock ------
-    // A sidecar can disappear between the pre-check and the lock-held recheck.
-    // Each round restores a canonical sidecar and no lock, races a deleter
-    // against applyTask, and asserts that whenever the runtime observed the
-    // sidecar vanish it did not leave a lock behind without a sidecar.
-    let sidecarRaceId = "TST-406"
-    let sidecarRaceCreated =
-        expectOk "create sidecar-race task" (createTask tempRoot (createRequest sidecarRaceId "Sidecar race task"))
-
-    let sidecarRaceSidecar = sidecarPath tempRoot sidecarRaceId
-    let sidecarRaceLock = Path.Combine(Path.GetDirectoryName sidecarRaceSidecar, LockFileName)
-    let canonicalSidecar = File.ReadAllBytes sidecarRaceSidecar
-    let canonicalRevision = sidecarRaceCreated.StateRevision
-    let mutable observedRaces = 0
-    let mutable lockHeldRaces = 0
-    let mutable orphanLocks = 0
-
-    for round in 1 .. 150 do
-        if File.Exists sidecarRaceLock then File.Delete sidecarRaceLock
-
-        File.WriteAllBytes(sidecarRaceSidecar, canonicalSidecar)
-
-        let evidenceId = $"E{2000 + round}"
-
-        let writer =
-            System.Threading.Tasks.Task.Run(fun () ->
-                applyTask tempRoot sidecarRaceId canonicalRevision (AddEvidence(makeEvidence evidenceId EvidenceKind.Observation "sidecar race")))
-
-        // Wait (briefly) until the runtime holds the lock, then delete the
-        // sidecar while the lock-held recheck/action is in flight.
-        let mutable lockSeen = false
-        let deadline = DateTime.UtcNow.AddMilliseconds 50.0
-
-        while not lockSeen && not writer.IsCompleted && DateTime.UtcNow < deadline do
-            if File.Exists sidecarRaceLock then lockSeen <- true
-            else System.Threading.Thread.SpinWait 20
-
-        for _ in 1 .. 5 do
-            try
-                if File.Exists sidecarRaceSidecar then File.Delete sidecarRaceSidecar
-            with _ -> ()
-
-        let result =
-            try
-                writer.GetAwaiter().GetResult()
-            with error ->
-                Error(PersistenceFailure error.Message)
-
-        match result with
-        | Error error when (renderError error).Contains("runtime sidecar does not exist", StringComparison.Ordinal) ->
-            observedRaces <- observedRaces + 1
-
-            if lockSeen then
-                lockHeldRaces <- lockHeldRaces + 1
-
-            if File.Exists sidecarRaceLock then
-                orphanLocks <- orphanLocks + 1
-        | _ -> ()
-
-        File.WriteAllBytes(sidecarRaceSidecar, canonicalSidecar)
-
-        if File.Exists sidecarRaceLock then File.Delete sidecarRaceLock
-
-    assertEqual "sidecar deletion race left no orphan lock" 0 orphanLocks
-    assertTrue "sidecar deletion race was exercised" (observedRaces > 0)
-    assertTrue "sidecar deletion race exercised the lock-held window" (lockHeldRaces > 0)
 
     // --- Scenario 5: general + research creation and persistence -------------
     let researchId = "TST-6"
@@ -615,7 +538,7 @@ try
     assertEqual "research round trip evidence" [] researchRoundTrip.Evidence
 
     let researchRaw = JsonNode.Parse(File.ReadAllText(sidecarPath tempRoot researchId)).AsObject()
-    assertEqual "research persisted schema" 3 (researchRaw.["schemaVersion"].GetValue<int>())
+    assertEqual "research persisted schema" 1 (researchRaw.["schemaVersion"].GetValue<int>())
     assertEqual "research persisted kind" "research" (researchRaw.["kind"].GetValue<string>())
     assertEqual "research persisted profile" "general" (researchRaw.["profile"].GetValue<string>())
 

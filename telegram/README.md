@@ -41,9 +41,14 @@ Message sent successfully:
 - [Troubleshooting](#troubleshooting)
 - [License](#license)
 
+## Producer identity
+
+Within this repository's clean-slate producer set, this producer is `Telegram`.
+Its Python package is `telegram-mcp` and its MCP server identity is `telegram`.
+
 ## What It Can Do
 
-The server currently includes 80+ MCP tools grouped into these areas:
+The server currently includes 122 MCP tools grouped into these areas:
 
 - **Accounts:** list configured accounts and route tool calls by account label.
 - **Chats and groups:** list chats, inspect metadata, create groups/channels, join or leave chats, invite users, manage admins, bans, default permissions, slow mode, topics, invite links, common chats, read receipts, and message links.

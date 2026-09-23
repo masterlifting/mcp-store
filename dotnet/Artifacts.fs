@@ -1,4 +1,4 @@
-namespace Mcp.Verifier
+namespace Mcp.Dotnet
 
 open System
 open System.Collections.Concurrent
@@ -20,12 +20,47 @@ type ArtifactRegistry(artifactRoot: string, retention: TimeSpan, ?quotas: Artifa
     let entries = ConcurrentDictionary<string, RegistryEntry>(StringComparer.Ordinal)
     let gate = obj ()
     let effectiveQuotas = quotas |> Option.defaultValue Budgets.DefaultArtifactQuotas
+    let artifactRoot = Path.GetFullPath artifactRoot
+    let pathComparison = if OperatingSystem.IsWindows() then StringComparison.OrdinalIgnoreCase else StringComparison.Ordinal
+
+    let pathIsWithin (root: string) (candidate: string) =
+        let prefix =
+            if root.EndsWith(string Path.DirectorySeparatorChar, StringComparison.Ordinal)
+               || root.EndsWith(string Path.AltDirectorySeparatorChar, StringComparison.Ordinal) then
+                root
+            else
+                root + string Path.DirectorySeparatorChar
+
+        candidate.Equals(root, pathComparison) || candidate.StartsWith(prefix, pathComparison)
+
+    let isReparse (path: string) =
+        try
+            (File.GetAttributes path).HasFlag FileAttributes.ReparsePoint
+        with
+        | :? FileNotFoundException
+        | :? DirectoryNotFoundException -> false
+        | _ -> true
 
     let fileLength path =
         if File.Exists path then FileInfo(path).Length else 0L
 
-    let sumFiles directory =
-        Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories) |> Seq.sumBy fileLength
+    let rec sumFiles directory =
+        if isReparse directory then
+            raise (IOException "artifact root contains a reparse point")
+
+        let files =
+            Directory.EnumerateFiles(directory, "*", SearchOption.TopDirectoryOnly)
+            |> Seq.sumBy (fun path ->
+                if isReparse path then
+                    raise (IOException "artifact root contains a reparse point")
+
+                fileLength path)
+
+        let directories =
+            Directory.EnumerateDirectories(directory, "*", SearchOption.TopDirectoryOnly)
+            |> Seq.sumBy sumFiles
+
+        files + directories
 
     let quotaFailure (handle: RunHandle) =
         try
@@ -95,19 +130,29 @@ type ArtifactRegistry(artifactRoot: string, retention: TimeSpan, ?quotas: Artifa
                         attempt <- attempt + 1
                         let runIdText = randomToken 32
                         let directoryName = randomToken 18
-                        let directory = Path.Combine(artifactRoot, directoryName)
+                        let directory = Path.GetFullPath(Path.Combine(artifactRoot, directoryName))
 
                         try
-                            Directory.CreateDirectory directory |> ignore
-                            let runId = RunId.create runIdText
-                            let handle = { RunId = runId; Paths = createPaths directory }
-                            let entry =
-                                { Handle = handle
-                                  Completed = None
-                                  CreatedAt = DateTimeOffset.UtcNow
-                                  CompletedAt = None }
+                            if not (pathIsWithin artifactRoot directory) then
+                                ()
+                            else
+                                Directory.CreateDirectory directory |> ignore
 
-                            if entries.TryAdd(runIdText, entry) then created <- Some handle else Directory.Delete(directory, true)
+                                if not (isReparse directory) then
+                                    let runId = RunId.create runIdText
+                                    let handle = { RunId = runId; Paths = createPaths directory }
+                                    let entry =
+                                        { Handle = handle
+                                          Completed = None
+                                          CreatedAt = DateTimeOffset.UtcNow
+                                          CompletedAt = None }
+
+                                    if entries.TryAdd(runIdText, entry) then
+                                        created <- Some handle
+                                    else
+                                        Directory.Delete(directory, true)
+                                else
+                                    Directory.Delete(directory, true)
                         with _ -> ()
 
                     match created with

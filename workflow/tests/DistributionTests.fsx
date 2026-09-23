@@ -16,9 +16,9 @@ let version = "1.0.1"
 let archiveName = $"{componentId}-v{version}.zip"
 let publishedFiles =
     [ "FSharp.Core.dll"
-      "Task.Runtime.deps.json"
-      "Task.Runtime.dll"
-      "Task.Runtime.runtimeconfig.json" ]
+      "Mcp.Workflow.deps.json"
+      "Mcp.Workflow.dll"
+      "Mcp.Workflow.runtimeconfig.json" ]
 let archiveFiles = publishedFiles @ [ "NOTICE.txt"; "distribution.json" ] |> List.sort
 
 let assertTrue name condition =
@@ -80,8 +80,8 @@ let sha256Stream (stream: Stream) =
 let buildScript = File.ReadAllText(Path.Combine(workflow, "BuildDistributions.fsx"))
 let pinsScript = File.ReadAllText(Path.Combine(workflow, "PrepareReleasePins.fsx"))
 assertTrue
-    "build script names the Task Runtime project"
-    (buildScript.Contains("workflow/Task.Runtime.fsproj", StringComparison.Ordinal))
+    "build script names the Workflow project"
+    (buildScript.Contains("workflow/Mcp.Workflow.fsproj", StringComparison.Ordinal))
 assertTrue
     "build script names the corrected v1.0.1 release"
     (buildScript.Contains("let version = \"1.0.1\"", StringComparison.Ordinal))
@@ -118,7 +118,7 @@ try
     runBuild ()
     runScript (Path.Combine(workflow, "PrepareReleasePins.fsx")) |> ignore
 
-    assertTrue "regeneration removes task-runtime staging output" (not (File.Exists stalePublishPath))
+    assertTrue "regeneration removes workflow staging output" (not (File.Exists stalePublishPath))
 finally
     if File.Exists stalePublishPath then
         File.Delete stalePublishPath
@@ -143,7 +143,7 @@ let manifest = JsonNode.Parse(File.ReadAllText manifestPath).AsObject()
 assertEqual "manifest id" componentId (manifest["id"].GetValue<string>())
 assertEqual "manifest version" version (manifest["version"].GetValue<string>())
 assertEqual "manifest archive" archiveName (manifest["archive"].GetValue<string>())
-assertEqual "manifest entry DLL" "Task.Runtime.dll" (manifest["entryDll"].GetValue<string>())
+assertEqual "manifest entry DLL" "Mcp.Workflow.dll" (manifest["entryDll"].GetValue<string>())
 
 let manifestEntries =
     manifest["files"].AsArray()

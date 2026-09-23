@@ -1,4 +1,4 @@
-namespace Mcp.Verifier
+namespace Mcp.Dotnet
 
 open System
 open System.IO
@@ -103,9 +103,9 @@ module AuthorizedInvocation =
 
 module Invocation =
     let private targetArgument root target =
-        target
-        |> Option.map (fun path -> Path.GetRelativePath(root, path))
-        |> Option.toList
+        match target with
+        | Some path -> [ Path.GetFullPath path ]
+        | None -> [ root ]
 
     let private validateConfiguration configuration =
         match configuration with

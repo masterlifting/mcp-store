@@ -1,8 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFramework>net11.0</TargetFramework>
-    <RootNamespace>Mcp.Verifier</RootNamespace>
-    <AssemblyName>Mcp.Verifier</AssemblyName>
+    <RootNamespace>Mcp.Dotnet</RootNamespace>
+    <AssemblyName>Mcp.Dotnet</AssemblyName>
     <OutputType>Exe</OutputType>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>

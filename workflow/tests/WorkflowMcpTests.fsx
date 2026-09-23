@@ -1,4 +1,4 @@
-// Deterministic coverage for the platform-internal Task Runtime MCP boundary:
+// Deterministic coverage for the platform-internal Workflow MCP boundary:
 // the native stdio handshake and tool surface, transport parity with the retained library and
 // CLI paths, structured results, bounded failures, workspace validation,
 // expected-revision CAS, and the absence of authority/receipt/effect ingress.
@@ -7,8 +7,8 @@
 // adding a project/package system.
 
 #load "../ComputationExpressions.fs"
-#load "../TaskRuntime.fs"
-#load "../TaskRuntimeAdapter.fs"
+#load "../Workflow.fs"
+#load "../WorkflowAdapter.fs"
 
 open System
 open System.Diagnostics
@@ -16,8 +16,8 @@ open System.IO
 open System.Security.Cryptography
 open System.Text.Json
 open System.Text.Json.Nodes
-open TaskRuntime
-open TaskRuntimeAdapter
+open Workflow
+open WorkflowAdapter
 
 let repoRoot = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", ".."))
 let scriptDirectory = Path.Combine(repoRoot, "workflow", "tests")
@@ -28,7 +28,7 @@ let scriptDirectory = Path.Combine(repoRoot, "workflow", "tests")
 let requiredSdk = "11.0.100-rc.1.26425.128"
 
 let releaseEntryDll =
-    Path.Combine(repoRoot, "workflow", "bin", "Release", "net11.0", "Task.Runtime.dll")
+    Path.Combine(repoRoot, "workflow", "bin", "Release", "net11.0", "Mcp.Workflow.dll")
 
 let resolveDotnetHost () =
     let names = if OperatingSystem.IsWindows() then [ "dotnet.exe" ] else [ "dotnet" ]
@@ -318,7 +318,7 @@ try
     assertEqual "initialize id" 1 (initialized.["id"].GetValue<int>())
     let initResult = resultOf "initialize" initialized
     assertEqual "initialize protocolVersion" "2024-11-05" (nodeString initResult.["protocolVersion"])
-    assertEqual "initialize server name" "opencode-task-runtime" (nodeString initResult.["serverInfo"].["name"])
+    assertEqual "initialize server name" "opencode-workflow" (nodeString initResult.["serverInfo"].["name"])
     assertEqual
         "initialize tools listChanged"
         false
@@ -345,6 +345,14 @@ try
     for forbidden in [ "authority"; "provenance"; "receipt"; "confirmationRef" ] do
         assertTrue $"task_apply schema excludes {forbidden}" (not (Set.contains forbidden applyProperties))
 
+    assertTrue
+        "task_apply schema enumerates command variants"
+        (not (isJsonNull applyTool.["inputSchema"].["properties"].["command"].["oneOf"]))
+
+    let createTool = tools |> Seq.find (fun tool -> nodeString tool.["name"] = "task_create")
+    assertEqual "task_create schema requires acceptance criteria" true (createTool.["inputSchema"].["properties"].["acceptanceCriteria"].["minItems"].GetValue<int>() > 0)
+    assertEqual "task_create schema requires work items" true (createTool.["inputSchema"].["properties"].["workItems"].["minItems"].GetValue<int>() > 0)
+
     let ping = send mcp "ping" 3 "ping" (jobj [])
     assertEqual "ping id" 3 (ping.["id"].GetValue<int>())
     assertEqual "ping result is empty object" 0 ((resultOf "ping" ping).AsObject().Count)
@@ -354,7 +362,7 @@ try
     let createdStructured = expectToolOk "task_create" created
     let createdTask = createdStructured.["task"]
     assertEqual "created id" "MCP-1" (nodeString createdTask.["id"])
-    assertEqual "created schemaVersion" 3 (createdTask.["schemaVersion"].GetValue<int>())
+    assertEqual "created schemaVersion" 1 (createdTask.["schemaVersion"].GetValue<int>())
     assertEqual "created stateRevision" 0 (createdTask.["stateRevision"].GetValue<int>())
 
     let fetched = callToolWithMeta mcp "task_get" 5 "task_get" (getArgs tempRoot)

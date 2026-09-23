@@ -1,10 +1,10 @@
-module Mcp.Verifier.Tests.DomainTests
+module Mcp.Dotnet.Tests.DomainTests
 
 open System
 open System.IO
 open Expecto
-open Mcp.Verifier
-open Mcp.Verifier.Tests.Support
+open Mcp.Dotnet
+open Mcp.Dotnet.Tests.Support
 
 let private emptyPaths =
     { Directory = ""

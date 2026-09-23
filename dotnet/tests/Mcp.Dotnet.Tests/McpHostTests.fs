@@ -1,4 +1,4 @@
-module Mcp.Verifier.Tests.McpHostTests
+module Mcp.Dotnet.Tests.McpHostTests
 
 open System
 open System.Collections.Concurrent
@@ -9,8 +9,8 @@ open System.Text.Json
 open System.Text.Json.Nodes
 open System.Threading.Tasks
 open Expecto
-open Mcp.Verifier
-open Mcp.Verifier.Tests.Support
+open Mcp.Dotnet
+open Mcp.Dotnet.Tests.Support
 
 // The host is exercised as a real stdio subprocess so stdout protocol cleanliness,
 // tool listing, semantic status, and cancellation are verified at the transport boundary.
@@ -23,7 +23,7 @@ let private verifierDllPath () =
         "bin",
         configuration,
         "net11.0",
-        "Mcp.Verifier.dll"
+        "Mcp.Dotnet.dll"
     )
 
 // Runs the host to completion to assert bounded startup rejection for missing or
@@ -50,7 +50,7 @@ let private runHostToCompletion (arguments: string list) (workingDirectory: stri
 
     child.ExitCode, stdout, stderr
 
-type private McpHostProcess(workingDirectory: string, ?injectedHost: string) =
+type private McpHostProcess(workingDirectory: string, ?injectedHost: string, ?artifactRoot: string) =
     let dllPath = verifierDllPath ()
 
     do
@@ -63,6 +63,13 @@ type private McpHostProcess(workingDirectory: string, ?injectedHost: string) =
         startInfo.ArgumentList.Add dllPath
         startInfo.ArgumentList.Add "--dotnet-host"
         startInfo.ArgumentList.Add(defaultArg injectedHost (dotnetHost ()))
+
+        match artifactRoot with
+        | Some root ->
+            startInfo.ArgumentList.Add "--artifact-root"
+            startInfo.ArgumentList.Add root
+        | None -> ()
+
         startInfo.WorkingDirectory <- workingDirectory
         startInfo.UseShellExecute <- false
         startInfo.CreateNoWindow <- true
@@ -190,6 +197,39 @@ let private hostTests =
                 Expect.isTrue (stderr.Contains("dotnet verifier startup failed")) "bounded startup failure"
                 Expect.isFalse (stdout.Contains("\"jsonrpc\"")) "no protocol traffic on rejected startup"
 
+            testCaseTask "an explicit external artifact root is accepted by the deployed host" (fun () ->
+                task {
+                    use workspace = new TempWorkspace()
+                    workspace.CreateClassLibrary("lib", validClassSource) |> ignore
+
+                    let externalRoot =
+                        Path.Combine(Path.GetTempPath(), "mcp-verifier-host-artifacts", Guid.NewGuid().ToString("N"))
+
+                    try
+                        use host = new McpHostProcess(workspace.Root, artifactRoot = externalRoot)
+                        host.Send initializeRequest
+                        host.ReadResponse(1, 5000) |> ignore
+                        host.Send initializedNotification
+                        host.Send(toolCall 30 "verify_dotnet_build" "{\"target\":\"lib.csproj\"}")
+                        let response = host.ReadResponse(30, 120000)
+                        Expect.equal (response.["result"].["isError"].GetValue<bool>()) false "configured artifact root starts the host"
+
+                        // Evidence under the configured root is observable only while the
+                        // MCP session is alive: disposing the host service runs
+                        // ArtifactRegistry.EndSession, which removes the per-run
+                        // directories by documented session-cleanup design.
+                        let retained =
+                            Directory.Exists externalRoot
+                            && Directory.EnumerateFiles(externalRoot, "*", SearchOption.AllDirectories) |> Seq.isEmpty |> not
+
+                        Expect.isTrue retained "configured artifact root retains evidence"
+
+                        stop host
+                    finally
+                        if Directory.Exists externalRoot then
+                            Directory.Delete(externalRoot, true)
+                })
+
             testCaseTask "the child build uses the injected host rather than PATH" (fun () ->
                 task {
                     use workspace = new TempWorkspace()
@@ -234,7 +274,7 @@ let private hostTests =
 
                     host.Send initializeRequest
                     let initialized = host.ReadResponse(1, 5000)
-                    Expect.equal (initialized.["result"].["serverInfo"].["name"].GetValue<string>()) "mcp-store-dotnet-verifier" "server name"
+                    Expect.equal (initialized.["result"].["serverInfo"].["name"].GetValue<string>()) "mcp-store-dotnet" "server name"
 
                     host.Send initializedNotification
                     host.Send toolsListRequest

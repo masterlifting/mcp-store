@@ -1,5 +1,6 @@
 .tasks/
 dotnet/dist/
 workflow/dist/
+.opencode/dotnet-verification/
 */bin/
 */obj/

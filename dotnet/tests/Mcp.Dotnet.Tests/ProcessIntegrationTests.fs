@@ -1,12 +1,12 @@
-module Mcp.Verifier.Tests.ProcessIntegrationTests
+module Mcp.Dotnet.Tests.ProcessIntegrationTests
 
 open System
 open System.IO
 open System.Threading
 open System.Threading.Tasks
 open Expecto
-open Mcp.Verifier
-open Mcp.Verifier.Tests.Support
+open Mcp.Dotnet
+open Mcp.Dotnet.Tests.Support
 
 // Real process integration is sequenced to keep the short-timeout case deterministic
 // and to avoid many concurrent dotnet builds competing for machine resources.
@@ -67,6 +67,48 @@ let tests =
                     let details = service.Details(outputRequest compact.RunId) |> expectOk "output details"
                     Expect.isTrue (details.Total > 0) "output retained outside the compact result"
                     Expect.isTrue (details.Items |> List.exists (fun item -> item.StartsWith "stdout:")) "stdout retained"
+                })
+
+            testCaseTask "build ignores a workspace global.json SDK selection" (fun () ->
+                task {
+                    use workspace = new TempWorkspace()
+                    workspace.CreateClassLibrary("lib", validClassSource) |> ignore
+                    workspace.Write("global.json", "{\"sdk\":{\"version\":\"99.99.99\",\"rollForward\":\"disable\"}}")
+                    |> ignore
+                    use service = serviceFor workspace
+
+                    let! result = service.VerifyBuild(buildOptions (Some "lib.csproj"))
+                    let compact = result |> expectOk "build with workspace global.json"
+                    Expect.equal compact.Status VerificationStatus.Succeeded "workspace SDK selection was isolated"
+                })
+
+            testCaseTask "an external artifact root retains the normal evidence contract" (fun () ->
+                task {
+                    use workspace = new TempWorkspace()
+                    workspace.CreateClassLibrary("lib", validClassSource) |> ignore
+                    let externalRoot = Path.Combine(Path.GetTempPath(), "mcp-verifier-external", Guid.NewGuid().ToString("N"))
+
+                    try
+                        use service =
+                            new VerifierService(
+                                workspace.Root,
+                                dotnetHost = dotnetHost (),
+                                artifactRoot = externalRoot,
+                                retention = TimeSpan.FromHours 1.0
+                            )
+
+                        let! result = service.VerifyBuild(buildOptions (Some "lib.csproj"))
+                        let compact = result |> expectOk "external artifact-root build"
+                        Expect.equal compact.Status VerificationStatus.Succeeded "external-root build succeeded"
+                        Expect.isTrue (Directory.Exists externalRoot) "external root exists"
+                        Expect.isTrue
+                            (Directory.EnumerateFiles(externalRoot, "metadata.json", SearchOption.AllDirectories)
+                             |> Seq.isEmpty
+                             |> not)
+                            "external root retains metadata"
+                    finally
+                        if Directory.Exists externalRoot then
+                            Directory.Delete(externalRoot, true)
                 })
 
             testCaseTask "failing build reports bounded diagnostics and retrievable details" (fun () ->

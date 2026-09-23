@@ -1,4 +1,4 @@
-namespace Mcp.Verifier
+namespace Mcp.Dotnet
 
 open System
 open System.IO
@@ -35,14 +35,15 @@ module PathAuthorization =
 
         candidate.Equals(root, comparison) || candidate.StartsWith(prefix, comparison)
 
-    let private isReparse path =
+    let private isReparse (path: string) =
         try
-            (File.Exists path || Directory.Exists path)
-            && (File.GetAttributes path).HasFlag FileAttributes.ReparsePoint
-        with _ ->
-            true
+            (File.GetAttributes path).HasFlag FileAttributes.ReparsePoint
+        with
+        | :? FileNotFoundException
+        | :? DirectoryNotFoundException -> false
+        | _ -> true
 
-    let private validateAncestors root target =
+    let private validateAncestors containmentRoot target =
         let mutable current =
             if File.Exists target then
                 DirectoryInfo(target).Parent
@@ -54,14 +55,13 @@ module PathAuthorization =
         while failure.IsNone && not (isNull current) do
             let currentPath = normalize current.FullName
 
-            if not (within root currentPath) then
+            match containmentRoot with
+            | Some root when not (within root currentPath) ->
                 failure <- Some(UnauthorizedPath "target ancestor is outside the trusted workspace")
-            elif isReparse currentPath then
+            | _ when isReparse currentPath ->
                 failure <- Some(UnauthorizedPath "target or an ancestor is a reparse point")
-            elif currentPath.Equals(root, comparison) then
-                current <- null
-            else
-                current <- current.Parent
+            | Some root when currentPath.Equals(root, comparison) -> current <- null
+            | _ -> current <- current.Parent
 
         match failure with
         | Some error -> Error error
@@ -69,8 +69,11 @@ module PathAuthorization =
 
     let private ensureDirectory path : Result<unit, VerificationError> =
         try
-            Directory.CreateDirectory path |> ignore
-            Ok()
+            if File.Exists path then
+                Error(UnauthorizedPath "artifact root must be a directory")
+            else
+                Directory.CreateDirectory path |> ignore
+                Ok()
         with error ->
             Error(ArtifactFailure $"artifact root could not be created: {error.Message}")
 
@@ -108,14 +111,23 @@ module PathAuthorization =
 
                 let normalized = normalize candidate
 
-                if not (within root normalized) then
+                let external = not (within root normalized)
+
+                if external && not (Path.IsPathFullyQualified artifactRoot) then
+                    return! Error(UnauthorizedPath "an external artifact root must be an absolute path")
+                elif external
+                     && OperatingSystem.IsWindows()
+                     && (artifactRoot.StartsWith("\\\\", StringComparison.Ordinal)
+                         || artifactRoot.StartsWith("//", StringComparison.Ordinal)) then
+                    return! Error(UnauthorizedPath "an external artifact root must be a local path")
+                elif external && not (Path.IsPathRooted artifactRoot) then
                     return! Error(UnauthorizedPath "artifact root is outside the trusted workspace")
 
                 // Check existing hops before creation. Creating first would allow a
                 // missing path below a junction to be materialized outside the root.
-                do! validateAncestors root normalized
+                do! validateAncestors (if external then None else Some root) normalized
                 do! ensureDirectory normalized
-                do! validateAncestors root normalized
+                do! validateAncestors (if external then None else Some root) normalized
                 return normalized
             }
         with error ->
@@ -147,7 +159,7 @@ module PathAuthorization =
                     elif isReparse fullTarget then
                         return! Error(UnauthorizedPath "target must not be a reparse point")
                     else
-                        do! validateAncestors root fullTarget
+                        do! validateAncestors (Some root) fullTarget
 
                         return
                             { WorkspaceRoot = root

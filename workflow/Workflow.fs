@@ -1,4 +1,4 @@
-module TaskRuntime
+module Workflow
 
 open System
 open System.IO
@@ -7,13 +7,14 @@ open System.Security.Cryptography
 open System.Text
 open System.Text.Json
 open System.Text.RegularExpressions
+open System.Threading
 open Common.CE
 open Microsoft.Win32.SafeHandles
 
-// Schema 3 is the sole canonical persisted Task Runtime representation. Older
-// sidecars are migrated out-of-band and are never accepted by the runtime.
+// Schema 1 is the sole canonical persisted Workflow representation. There is no
+// compatibility reader: a task is either this exact document or it is rejected.
 [<Literal>]
-let SchemaVersion = 3
+let SchemaVersion = 1
 
 [<Literal>]
 let GeneralProfileId = "general"
@@ -26,9 +27,6 @@ let OpenCodeProfileId = "opencode"
 
 [<Literal>]
 let SidecarFileName = "runtime.json"
-
-[<Literal>]
-let LockFileName = "runtime.lock"
 
 type Kind =
     | Execution
@@ -5655,11 +5653,11 @@ module private PathSafety =
                 Error(PersistenceFailure $"could not resolve runtime path: {error.Message}")
 
 // A path check is not an ownership boundary: an attacker can replace an
-// already-checked directory with a junction before the first write. Keep an
-// opened handle to every directory in the create path while the lock and the
-// initial sidecar are created. Windows' directory handle denies deletion of
-// the opened directory. The normal path checks remain useful diagnostics, but
-// the handle is what closes the check/use gap for the Windows create operation.
+// already-checked directory with a junction before an operation uses it. Keep
+// opened handles to every directory in the root-to-task path for the complete
+// lock critical section. Windows' directory handles deny deletion of the opened
+// directories. The normal path checks remain useful diagnostics, but the handles
+// close the check/use gap for both creation and existing-record operations.
 module private DirectoryBoundary =
     [<Literal>]
     let private InvalidHandle = -1
@@ -5678,12 +5676,6 @@ module private DirectoryBoundary =
 
     [<Literal>]
     let private OpenReparsePoint = 0x00200000u
-
-    [<Literal>]
-    let private GenericRead = 0x80000000u
-
-    [<Literal>]
-    let private GenericWrite = 0x40000000u
 
     [<DllImport("kernel32.dll", EntryPoint = "CreateFileW", CharSet = CharSet.Unicode, SetLastError = true)>]
     extern IntPtr createFile(string path, uint32 desiredAccess, uint32 shareMode, IntPtr securityAttributes, uint32 creationDisposition, uint32 flagsAndAttributes, IntPtr templateFile)
@@ -5751,35 +5743,6 @@ module private DirectoryBoundary =
         with error ->
             Error(PersistenceFailure $"could not open directory boundary: {error.Message}")
 
-    let openExistingFileNoFollow (path: string) : Result<FileStream, RuntimeError> =
-        try
-            if OperatingSystem.IsWindows() then
-                let nativeHandle =
-                    createFile(
-                        path,
-                        (GenericRead ||| GenericWrite),
-                        0u,
-                        IntPtr.Zero,
-                        OpenExisting,
-                        OpenReparsePoint,
-                        IntPtr.Zero
-                    )
-
-                if nativeHandle = IntPtr(InvalidHandle) then
-                    Error(PersistenceFailure $"could not open runtime lock: {path}")
-                else
-                    let safeHandle = new SafeFileHandle(nativeHandle, true)
-
-                    if PathSafety.isReparseLeaf path then
-                        safeHandle.Dispose()
-                        Error(PersistenceFailure "runtime lock is a reparse point")
-                    else
-                        Ok(new FileStream(safeHandle, FileAccess.ReadWrite, 4096, false))
-            else
-                Error(PersistenceFailure "no-follow file handles are unsupported on this platform")
-        with error ->
-            Error(PersistenceFailure $"could not open runtime lock: {error.Message}")
-
 let private sidecarPath root requestedTaskId =
     match taskId requestedTaskId with
     | Error error -> Error error
@@ -5793,83 +5756,63 @@ let private sidecarPath root requestedTaskId =
             return sidecar, safeTaskDirectory
         }
 
+// The coordination object is an OS-named mutex rather than a sidecar file. It
+// therefore spans producer processes while remaining ephemeral and leaves the
+// schema-v1 task directory free of runtime.lock artifacts.
+let private coordinationName (path: string) =
+    let canonical =
+        let fullPath = Path.GetFullPath path
+        if OperatingSystem.IsWindows() then fullPath.ToUpperInvariant() else fullPath
+
+    let digest = SHA256.HashData(Encoding.UTF8.GetBytes canonical) |> Convert.ToHexString
+    if OperatingSystem.IsWindows() then $"Local\\Mcp.Workflow.Runtime.{digest}" else $"Mcp.Workflow.Runtime.{digest}"
+
 let private withLock (path: string) action =
-    let lockPath = Path.Combine(Path.GetDirectoryName path, LockFileName)
-    let mutable lockWasCreated = false
-
-    let removeCreatedLock () =
-        // The CreateNew result is the ownership proof. Never delete an
-        // existing lock merely because the action failed.
-        if lockWasCreated then
-            try
-                if File.Exists lockPath && not (PathSafety.isReparseLeaf lockPath) then
-                    File.Delete lockPath
-            with _ ->
-                ()
-
     try
-        if PathSafety.isReparseLeaf lockPath then
-            Error(PersistenceFailure "could not acquire runtime lock: lock file is a reparse point")
-        else
-            let lockWasCreated, lockStream =
-                try
-                    let stream = new FileStream(lockPath, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None)
-                    lockWasCreated <- true
-                    true, stream
-                with :? IOException ->
-                    if PathSafety.isReparseLeaf lockPath then
-                        raise (IOException "lock file is a reparse point")
+        use mutex = new Mutex(false, coordinationName path)
+        let mutable acquired = false
 
-                    if OperatingSystem.IsWindows() then
-                        match DirectoryBoundary.openExistingFileNoFollow lockPath with
-                        | Ok stream -> false, stream
-                        | Error(PersistenceFailure message) -> raise (IOException message)
-                        | Error error -> raise (IOException(errorMessage error))
-                    else
-                        // Established Unix creation remains pathname-based. The
-                        // evidence bootstrap is rejected before this path is
-                        // reached when the task directory already exists.
-                        false, new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None)
+        try
+            try
+                mutex.WaitOne() |> ignore
+                acquired <- true
+            with :? AbandonedMutexException ->
+                // WaitOne reports abandonment after transferring ownership to
+                // this process; the operation is still safe to continue.
+                acquired <- true
 
-            let outcome =
-                use lockStream = lockStream
-                action lockWasCreated
-
-            match outcome with
-            | Error _ -> removeCreatedLock ()
-            | Ok _ -> ()
-
-            outcome
+            action ()
+        finally
+            if acquired then mutex.ReleaseMutex()
     with
     | :? UnauthorizedAccessException as error ->
-        removeCreatedLock ()
-        Error(PersistenceFailure $"could not acquire runtime lock: {error.Message}")
+        Error(PersistenceFailure $"could not coordinate runtime operation: {error.Message}")
     | :? IOException as error ->
-        removeCreatedLock ()
-        Error(PersistenceFailure $"could not acquire runtime lock: {error.Message}")
-    | _ ->
-        removeCreatedLock ()
-        reraise ()
+        Error(PersistenceFailure $"could not coordinate runtime operation: {error.Message}")
 
-let private withWindowsCreationBoundaries root taskDirectory action =
+let private withWindowsDirectoryBoundaries root taskDirectory createMissing action =
     let fullRoot = Path.GetFullPath root
     let tasksDirectory = Path.Combine(fullRoot, ".tasks")
 
     try
         // This boundary is intentionally Windows-only. Unix has no complete
-        // descriptor-relative implementation here, so evidence bootstrap is
-        // rejected before the pathname-based creation path can run.
+        // descriptor-relative implementation here, so it uses the validated
+        // pathname boundary below.
         match DirectoryBoundary.openExisting fullRoot with
         | Error error -> Error error
         | Ok rootHandle ->
             use rootHandle = rootHandle
-            Directory.CreateDirectory tasksDirectory |> ignore
+
+            if createMissing then
+                Directory.CreateDirectory tasksDirectory |> ignore
 
             match DirectoryBoundary.openExisting tasksDirectory with
             | Error error -> Error error
             | Ok tasksHandle ->
                 use tasksHandle = tasksHandle
-                Directory.CreateDirectory taskDirectory |> ignore
+
+                if createMissing then
+                    Directory.CreateDirectory taskDirectory |> ignore
 
                 match DirectoryBoundary.openExisting taskDirectory with
                 | Error error -> Error error
@@ -5898,8 +5841,6 @@ let private readTaskLenient path =
 // tolerated so decide can surface and reconcile drift.
 let private readTaskWith profiles path =
     try
-        // A sidecar can disappear after the initial check; clean up only after
-        // releasing the lock stream so that this race cannot persist an orphan.
         if not (File.Exists path) then
             Error(NotFound $"runtime sidecar does not exist: {path}")
         elif PathSafety.isReparseLeaf path then
@@ -5915,32 +5856,63 @@ let private loadTaskLenient path = readTaskLenient path
 
 let private loadTaskWith (profiles: Map<string, EffectiveProfile>) path = readTaskWith profiles path
 
-// Reads and updates must not create a lock as a side effect of a missing
-// runtime.json. Creation is the only operation that may create the task
-// directory and its lock.
-let private withExistingSidecar (path: string) action =
-    if not (File.Exists path) then
-        Error(NotFound $"runtime sidecar does not exist: {path}")
-    else
-        let lockPath = Path.Combine(Path.GetDirectoryName path, LockFileName)
-        let outcome =
-            withLock path (fun _ ->
-                if not (File.Exists path) then
-                    Error(NotFound $"runtime sidecar does not exist: {path}")
-                else
-                    let result = action ()
-                    if File.Exists path then result else Error(NotFound $"runtime sidecar does not exist: {path}"))
+// A task directory has one supported layout: the runtime sidecar at its root.
+// Historical TASK.md/references layouts and persisted locks are not inputs.
+let private validateTaskDirectory (taskDirectory: string) : Result<unit, RuntimeError> =
+    let comparison =
+        if OperatingSystem.IsWindows() then StringComparison.OrdinalIgnoreCase else StringComparison.Ordinal
 
-        if not (File.Exists path) then
-            try
-                if File.Exists lockPath && not (PathSafety.isReparseLeaf lockPath) then
-                    File.Delete lockPath
-
-                Error(NotFound $"runtime sidecar does not exist: {path}")
-            with error ->
-                Error(PersistenceFailure $"could not remove orphan runtime lock: {error.Message}")
+    try
+        if not (Directory.Exists taskDirectory) then
+            Ok()
         else
-            outcome
+            let entries = Directory.EnumerateFileSystemEntries taskDirectory |> Seq.toList
+
+            let rec visit (remaining: string list) : Result<unit, RuntimeError> =
+                match remaining with
+                | [] -> Ok()
+                | entry :: rest ->
+                    let attributes = File.GetAttributes entry
+
+                    if attributes.HasFlag FileAttributes.ReparsePoint then
+                        Error(InvalidInput $"task directory must not contain a reparse point: {entry}")
+                    elif String.Equals(Path.GetFileName entry, SidecarFileName, comparison)
+                         && not (attributes.HasFlag FileAttributes.Directory) then
+                        visit rest
+                    else
+                        Error(
+                            InvalidInput
+                                $"task directory contains unsupported entry; only '{SidecarFileName}' is permitted: {entry}"
+                        )
+
+            visit entries
+    with error ->
+        Error(PersistenceFailure $"could not inspect task directory: {error.Message}")
+
+let private withExistingSidecar root taskDirectory (path: string) action =
+
+    withLock path (fun () ->
+        let withinDirectoryBoundary action =
+            if OperatingSystem.IsWindows() then
+                withWindowsDirectoryBoundaries root taskDirectory false action
+            else
+                action ()
+
+        withinDirectoryBoundary (fun () ->
+            result {
+                do! validateTaskDirectory taskDirectory
+
+                if not (File.Exists path) then
+                    return! Error(NotFound $"runtime sidecar does not exist: {path}")
+
+                let! result = action ()
+
+                if File.Exists path then
+                    return result
+                else
+                    return! Error(NotFound $"runtime sidecar does not exist: {path}")
+            })
+        )
 
 let private atomicWrite (path: string) (content: string) =
     let directory = Path.GetDirectoryName path
@@ -5970,109 +5942,11 @@ let private atomicWrite (path: string) (content: string) =
 
 let private persist path task = atomicWrite path (serialize task)
 
-// A task directory may predate the runtime when an external issue record has
-// been supplied. Only the references tree is evidence-owned; every other
-// pre-existing entry is treated as state or an unsupported sidecar. The lock
-// is the sole exception while a creator already holds it.
-let private validateEvidenceDirectory (taskDirectory: string) (allowHeldLock: bool) (requireEvidence: bool) =
-    let comparison =
-        if OperatingSystem.IsWindows() then StringComparison.OrdinalIgnoreCase
-        else StringComparison.Ordinal
-
-    let sameName left right = String.Equals(left, right, comparison)
-    let samePath left right = String.Equals(Path.GetFullPath left, Path.GetFullPath right, comparison)
-    let lockPath = Path.Combine(taskDirectory, LockFileName)
-
-    let sortedEntries directory =
-        let entries = Directory.EnumerateFileSystemEntries(directory) |> Seq.toArray
-        Array.sortInPlaceWith (fun left right -> StringComparer.OrdinalIgnoreCase.Compare(left, right)) entries
-        entries
-
-    let unsupportedEntry entry =
-        Error(
-            InvalidInput
-                $"task directory contains unsupported pre-existing entry; only references/** evidence is permitted: {entry}"
-        )
-
-    let stateEntry name entry =
-        if sameName name SidecarFileName then
-            Error(InvalidInput $"task directory contains runtime state '{SidecarFileName}': {entry}")
-        elif sameName name LockFileName then
-            Error(InvalidInput $"task directory contains runtime state '{LockFileName}': {entry}")
-        elif sameName name "TASK.md" then
-            Error(InvalidInput $"task directory contains historical TASK.md: {entry}")
-        else
-            unsupportedEntry entry
-
-    let rec visitReferences (directory: string) (entries: string list) : Result<unit, RuntimeError> =
-        match entries with
-        | [] -> Ok()
-        | entry :: remaining ->
-            let attributes = File.GetAttributes entry
-
-            if attributes.HasFlag FileAttributes.ReparsePoint then
-                Error(InvalidInput $"task directory evidence must not contain a reparse point: {entry}")
-            else
-                let name = Path.GetFileName entry
-
-                if sameName name SidecarFileName || sameName name LockFileName || sameName name "TASK.md" then
-                    stateEntry name entry
-                elif attributes.HasFlag FileAttributes.Directory then
-                    visitReferences entry (sortedEntries entry |> Array.toList)
-                    |> Result.bind (fun () -> visitReferences directory remaining)
-                else
-                    visitReferences directory remaining
-
-    try
-        let mutable referencesFound = false
-
-        let rec visitRoot (entries: string list) : Result<unit, RuntimeError> =
-            match entries with
-            | [] -> Ok()
-            | entry :: remaining ->
-                let attributes = File.GetAttributes entry
-
-                if attributes.HasFlag FileAttributes.ReparsePoint then
-                    Error(InvalidInput $"task directory evidence must not contain a reparse point: {entry}")
-                else
-                    let name = Path.GetFileName entry
-
-                    if allowHeldLock && samePath entry lockPath && not (attributes.HasFlag FileAttributes.Directory) then
-                        visitRoot remaining
-                    elif sameName name SidecarFileName || sameName name LockFileName || sameName name "TASK.md" then
-                        stateEntry name entry
-                    elif sameName name "references" && attributes.HasFlag FileAttributes.Directory then
-                        referencesFound <- true
-                        visitReferences entry (sortedEntries entry |> Array.toList)
-                        |> Result.bind (fun () -> visitRoot remaining)
-                    else
-                        unsupportedEntry entry
-
-        let outcome = visitRoot (sortedEntries taskDirectory |> Array.toList)
-
-        match outcome with
-        | Error error -> Error error
-        | Ok() when requireEvidence && not referencesFound ->
-            Error(
-                InvalidInput
-                    $"task directory contains no permitted evidence-only content; expected references/**: {taskDirectory}"
-            )
-        | Ok() -> Ok()
-    with error ->
-        Error(PersistenceFailure $"could not inspect task directory: {error.Message}")
-
 // Section 17: the caller may name an explicit active profile; an omitted profile
 // falls back to general and an unknown id fails before any sidecar is written.
 let createTaskWithProfile root profileId request =
     result {
         let! path, taskDirectory = sidecarPath root request.Id
-
-        if not (OperatingSystem.IsWindows()) && Directory.Exists taskDirectory then
-            return!
-                Error(
-                    InvalidInput
-                        "evidence-only task bootstrap requires Windows directory-handle boundaries"
-                )
 
         let! profiles = resolveProfiles root
         let requestedProfile = profileId |> Option.defaultValue GeneralProfileId
@@ -6088,34 +5962,23 @@ let createTaskWithProfile root profileId request =
             try
                 let createWithinBoundary action =
                     if OperatingSystem.IsWindows() then
-                        withWindowsCreationBoundaries root taskDirectory action
+                        withWindowsDirectoryBoundaries root taskDirectory true action
                     else
                         Directory.CreateDirectory taskDirectory |> ignore
                         action ()
 
                 createWithinBoundary (fun () ->
-                    withLock path (fun lockWasCreated ->
+                    withLock path (fun () ->
                         result {
-                            let entries = Directory.EnumerateFileSystemEntries taskDirectory |> Seq.toList
-                            let lockPath = Path.Combine(taskDirectory, LockFileName)
-                            let hasEvidenceContent =
-                                entries
-                                |> List.exists (fun entry ->
-                                    not (
-                                        String.Equals(
-                                            Path.GetFullPath entry,
-                                            Path.GetFullPath lockPath,
-                                            StringComparison.OrdinalIgnoreCase
-                                        )
-                                    ))
+                            do! validateTaskDirectory taskDirectory
 
-                            // A lock created by this call is the only runtime state
-                            // that may be ignored. All other entries are inspected
-                            // while the lock is held, so concurrent creators cannot
-                            // turn an empty-directory decision into a claim. This also
-                            // gives rejected duplicate creates the stable runtime-state
-                            // diagnostic instead of depending on a pre-lock snapshot.
-                            do! validateEvidenceDirectory taskDirectory lockWasCreated hasEvidenceContent
+                            if File.Exists path then
+                                return!
+                                    Error(
+                                        InvalidInput
+                                            $"task directory contains runtime state '{SidecarFileName}': {path}"
+                                    )
+
                             return! persist path task
                         }))
             with error ->
@@ -6130,8 +5993,8 @@ let createTask root request = createTaskWithProfile root None request
 
 let getTask root id =
     result {
-        let! path, _ = sidecarPath root id
-        return! withExistingSidecar path (fun () -> loadTaskLenient path)
+        let! path, taskDirectory = sidecarPath root id
+        return! withExistingSidecar root taskDirectory path (fun () -> loadTaskLenient path)
     }
 
 // Ordinary CLI/model apply boundary. Invocation is Coordinator-only: there is no
@@ -6140,11 +6003,11 @@ let getTask root id =
 // bridge.
 let applyTask root id expectedRevision command =
     result {
-        let! path, _ = sidecarPath root id
+        let! path, taskDirectory = sidecarPath root id
         let! profiles = resolveProfiles root
 
         return!
-            withExistingSidecar path (fun () ->
+            withExistingSidecar root taskDirectory path (fun () ->
                 result {
                     let! task = loadTaskWith profiles path
 
@@ -6165,9 +6028,9 @@ let applyTask root id expectedRevision command =
 
 let validateTask root id =
     result {
-        let! path, _ = sidecarPath root id
+        let! path, taskDirectory = sidecarPath root id
         let! profiles = resolveProfiles root
-        let! task = withExistingSidecar path (fun () -> loadTaskWith profiles path)
+        let! task = withExistingSidecar root taskDirectory path (fun () -> loadTaskWith profiles path)
 
         // Section 20/23: validation is read-only but truthful. getTask stays
         // lenient; validate fails explicitly when the recorded profile is missing
