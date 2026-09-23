@@ -1,10 +1,10 @@
-module Mcp.Verifier.Tests.QuotaTests
+module Mcp.Dotnet.Tests.QuotaTests
 
 open System
 open System.IO
 open Expecto
-open Mcp.Verifier
-open Mcp.Verifier.Tests.Support
+open Mcp.Dotnet
+open Mcp.Dotnet.Tests.Support
 
 let private smallQuotas =
     { MaxStdoutBytes = 16L

@@ -15,11 +15,11 @@
 // only that root is removed.
 
 #load "../ComputationExpressions.fs"
-#load "../TaskRuntime.fs"
+#load "../Workflow.fs"
 
 open System
 open System.IO
-open TaskRuntime
+open Workflow
 
 let assertEqual name expected actual =
     if actual <> expected then failwithf "%s: expected %A, got %A" name expected actual

@@ -1,4 +1,4 @@
-module Mcp.Verifier.Tests.SecurityTests
+module Mcp.Dotnet.Tests.SecurityTests
 
 open System
 open System.IO
@@ -6,8 +6,8 @@ open System.Text.RegularExpressions
 open System.Threading
 open System.Threading.Tasks
 open Expecto
-open Mcp.Verifier
-open Mcp.Verifier.Tests.Support
+open Mcp.Dotnet
+open Mcp.Dotnet.Tests.Support
 
 let private classLibraryProject =
     "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net11.0</TargetFramework></PropertyGroup></Project>"
@@ -154,13 +154,40 @@ let private artifactRootTests =
             Expect.isTrue (Directory.Exists root) "artifact directory created"
             Expect.isTrue (root.StartsWith(workspace.Root, StringComparison.OrdinalIgnoreCase)) "contained artifact root"
 
-        testCase "artifact root outside the workspace is rejected"
+        testCase "an explicitly configured external artifact root is canonicalized and created"
         <| fun _ ->
             use workspace = new TempWorkspace()
             let outside = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"))
 
-            PathAuthorization.validateArtifactRoot workspace.Root outside
-            |> expectErrorMatching "outside artifact root" isUnauthorizedPath
+            try
+                let root = PathAuthorization.validateArtifactRoot workspace.Root outside |> expectOk "external artifact root"
+                Expect.isTrue (Directory.Exists root) "external artifact directory created"
+                Expect.isFalse (root.StartsWith(workspace.Root, StringComparison.OrdinalIgnoreCase)) "external artifact root is not workspace-local"
+                Expect.equal root (Path.GetFullPath outside) "external artifact root is canonical"
+            finally
+                if Directory.Exists outside then
+                    Directory.Delete(outside, true)
+
+        testCase "relative traversal cannot opt into an external artifact root"
+        <| fun _ ->
+            use workspace = new TempWorkspace()
+            let outside = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"))
+            let relativeOutside = Path.GetRelativePath(workspace.Root, outside)
+
+            PathAuthorization.validateArtifactRoot workspace.Root relativeOutside
+            |> expectErrorMatching "relative external artifact root" isUnauthorizedPath
+            |> ignore
+
+        testCase "external artifact ancestors must not be reparse points"
+        <| fun _ ->
+            use workspace = new TempWorkspace()
+            let real = Path.Combine(workspace.Root, "external-real")
+            Directory.CreateDirectory real |> ignore
+            let link = workspace.CreateJunction("external-link", "external-real")
+            let external = Path.Combine(link, "artifacts")
+
+            PathAuthorization.validateArtifactRoot workspace.Root external
+            |> expectErrorMatching "external reparse ancestor" isUnauthorizedPath
             |> ignore
 
         testCase "reparse artifact ancestors are rejected"

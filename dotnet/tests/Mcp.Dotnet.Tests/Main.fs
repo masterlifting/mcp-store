@@ -1,4 +1,4 @@
-module Mcp.Verifier.Tests.Main
+module Mcp.Dotnet.Tests.Main
 
 open Expecto
 
@@ -8,7 +8,7 @@ let main argv =
         []
         argv
         (testList
-            "Mcp.Verifier"
+            "Mcp.Dotnet"
             [ DomainTests.tests
               InvocationTests.tests
               SecurityTests.tests

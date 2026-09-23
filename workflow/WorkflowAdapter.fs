@@ -1,6 +1,6 @@
-module TaskRuntimeAdapter
+module WorkflowAdapter
 
-open TaskRuntime
+open Workflow
 
 // This is a typed library boundary over the existing runtime operations. It does
 // not add semantics, persistence, authority, or effect execution; callers still

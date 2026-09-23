@@ -1,4 +1,4 @@
-namespace Mcp.Verifier
+namespace Mcp.Dotnet
 
 open System
 open System.Collections.Concurrent
@@ -288,7 +288,7 @@ module private McpHost =
         capabilities["tools"] <- toolsCapability
         result["capabilities"] <- capabilities
         let serverInfo = JsonObject()
-        serverInfo["name"] <- node "mcp-store-dotnet-verifier"
+        serverInfo["name"] <- node "mcp-store-dotnet"
         serverInfo["version"] <- node "1"
         result["serverInfo"] <- serverInfo
         result
@@ -497,13 +497,17 @@ module Program =
             Console.Error.WriteLine($"dotnet verifier startup failed: {message}")
             1
 
-        match args with
-        | [| "--dotnet-host"; injectedHost |] ->
+        let startService injectedHost artifactRoot =
             match AuthorizedInvocation.validateInjectedHost Environment.CurrentDirectory injectedHost with
             | Error error -> startupFailure (VerificationError.message error)
             | Ok validatedHost ->
                 try
-                    use service = new VerifierService(Environment.CurrentDirectory, dotnetHost = validatedHost)
+                    let service =
+                        match artifactRoot with
+                        | Some root -> new VerifierService(Environment.CurrentDirectory, dotnetHost = validatedHost, artifactRoot = root)
+                        | None -> new VerifierService(Environment.CurrentDirectory, dotnetHost = validatedHost)
+
+                    use service = service
                     McpHost.run service
                     0
                 with error ->
@@ -512,4 +516,8 @@ module Program =
                         elif error.Message.Length <= Budgets.Defaults.MessageMaxLength then error.Message
                         else error.Message.Substring(0, Budgets.Defaults.MessageMaxLength)
                     startupFailure message
-        | _ -> startupFailure "the verifier requires exactly one injected --dotnet-host absolute path"
+
+        match args with
+        | [| "--dotnet-host"; injectedHost |] -> startService injectedHost None
+        | [| "--dotnet-host"; injectedHost; "--artifact-root"; artifactRoot |] -> startService injectedHost (Some artifactRoot)
+        | _ -> startupFailure "the verifier requires exactly one injected --dotnet-host absolute path, optionally followed by --artifact-root <path>"

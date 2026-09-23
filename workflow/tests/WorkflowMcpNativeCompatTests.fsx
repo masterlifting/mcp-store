@@ -19,7 +19,7 @@ let repoRoot = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", ".."))
 let requiredSdk = "11.0.100-rc.1.26425.128"
 
 let releaseEntryDll =
-    Path.Combine(repoRoot, "workflow", "bin", "Release", "net11.0", "Task.Runtime.dll")
+    Path.Combine(repoRoot, "workflow", "bin", "Release", "net11.0", "Mcp.Workflow.dll")
 
 let resolveDotnetHost () =
     let names = if OperatingSystem.IsWindows() then [ "dotnet.exe" ] else [ "dotnet" ]

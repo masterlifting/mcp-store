@@ -492,7 +492,7 @@ async def unblock_user(user_id: Union[int, str], account: Optional[str] = None) 
     annotations=ToolAnnotations(title="Import Contacts", openWorldHint=True, destructiveHint=True)
 )
 @with_account(readonly=False)
-async def import_contacts(contacts: list, account: Optional[str] = None) -> str:
+async def import_contacts(contacts: List[Dict[str, str]], account: Optional[str] = None) -> str:
     """
     Import a list of contacts. Each contact should be a dict with phone, first_name, last_name.
     """

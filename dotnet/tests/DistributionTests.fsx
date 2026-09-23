@@ -16,9 +16,9 @@ let version = "1.0.1"
 let archiveName = $"{componentId}-v{version}.zip"
 let publishedFiles =
     [ "FSharp.Core.dll"
-      "Mcp.Verifier.deps.json"
-      "Mcp.Verifier.dll"
-      "Mcp.Verifier.runtimeconfig.json" ]
+      "Mcp.Dotnet.deps.json"
+      "Mcp.Dotnet.dll"
+      "Mcp.Dotnet.runtimeconfig.json" ]
 let archiveFiles = publishedFiles @ [ "NOTICE.txt"; "distribution.json" ] |> List.sort
 
 let assertTrue name condition =
@@ -101,7 +101,7 @@ try
     File.WriteAllText(stalePublishPath, "stale staging output")
     runScript (Path.Combine(dotnet, "BuildDistribution.fsx")) |> ignore
 
-    assertTrue "regeneration removes verifier staging output" (not (File.Exists stalePublishPath))
+    assertTrue "regeneration removes dotnet staging output" (not (File.Exists stalePublishPath))
 
     runScript (Path.Combine(dotnet, "PrepareReleasePins.fsx")) |> ignore
 finally
@@ -119,7 +119,7 @@ let manifest = JsonNode.Parse(File.ReadAllText manifestPath).AsObject()
 assertEqual "manifest id" componentId (manifest["id"].GetValue<string>())
 assertEqual "manifest version" version (manifest["version"].GetValue<string>())
 assertEqual "manifest archive" archiveName (manifest["archive"].GetValue<string>())
-assertEqual "manifest entry DLL" "Mcp.Verifier.dll" (manifest["entryDll"].GetValue<string>())
+assertEqual "manifest entry DLL" "Mcp.Dotnet.dll" (manifest["entryDll"].GetValue<string>())
 
 let manifestEntries =
     manifest["files"].AsArray()

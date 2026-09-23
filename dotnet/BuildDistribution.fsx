@@ -12,15 +12,15 @@ let outputRoot = Path.Combine(dotnet, "dist")
 let sdk = "11.0.100-rc.1.26425.128"
 let version = "1.0.1"
 let componentId = "dotnet"
-let entryDll = "Mcp.Verifier.dll"
+let entryDll = "Mcp.Dotnet.dll"
 
 // The allowlist is the runtime contract. Source, project, build, and debug
 // files produced by publish are intentionally excluded from the archive.
 let publishedFiles =
     [ "FSharp.Core.dll"
-      "Mcp.Verifier.deps.json"
-      "Mcp.Verifier.dll"
-      "Mcp.Verifier.runtimeconfig.json" ]
+      "Mcp.Dotnet.deps.json"
+      "Mcp.Dotnet.dll"
+      "Mcp.Dotnet.runtimeconfig.json" ]
 
 let run arguments =
     let info = ProcessStartInfo("dotnet")
@@ -121,7 +121,7 @@ let publish () =
 
     let expectedFiles = publishedFiles |> List.sort
 
-    assertExactFiles "verifier publish output is not the deterministic allowlist" expectedFiles actualFiles
+    assertExactFiles "dotnet publish output is not the deterministic allowlist" expectedFiles actualFiles
 
     for relativePath in expectedFiles do
         File.Copy(Path.Combine(publishRoot, relativePath), Path.Combine(destination, relativePath))

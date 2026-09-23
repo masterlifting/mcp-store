@@ -1,10 +1,10 @@
-module Mcp.Verifier.Tests.InvocationTests
+module Mcp.Dotnet.Tests.InvocationTests
 
 open System
 open System.IO
 open Expecto
-open Mcp.Verifier
-open Mcp.Verifier.Tests.Support
+open Mcp.Dotnet
+open Mcp.Dotnet.Tests.Support
 
 let private pathsFor (workspace: TempWorkspace) =
     let directory = Path.Combine(workspace.Root, "artifacts", "run")
@@ -59,6 +59,7 @@ let private argumentTests =
             Expect.equal
                 (AuthorizedInvocation.arguments invocation)
                 [ "build"
+                  workspace.Root
                   "--configuration"
                   "Release"
                   "--nologo"
@@ -83,15 +84,14 @@ let private argumentTests =
                         NoRestore = Some true }
 
             let arguments = AuthorizedInvocation.arguments invocation
-            Expect.equal arguments.[1] "lib.csproj" "relative target"
-            Expect.equal (arguments |> List.item 1) (Path.GetRelativePath(workspace.Root, projectPath)) "normalized relative target"
+            Expect.equal (arguments |> List.item 1) (Path.GetFullPath projectPath) "canonical absolute target"
             Expect.isTrue (List.contains "--no-restore" arguments) "no-restore flag"
-            Expect.isTrue (arguments |> List.forall (fun item -> not (item.Contains " "))) "no shell fragment arguments"
+            Expect.isTrue (arguments |> List.forall (fun item -> not (item.Contains "dotnet "))) "no shell fragment arguments"
 
         testCase "test arguments carry filter and TRX logger without shell text"
         <| fun _ ->
             use workspace = new TempWorkspace()
-            workspace.CreateClassLibrary("lib", validClassSource) |> ignore
+            let projectPath = workspace.CreateClassLibrary("lib", validClassSource)
             let paths = pathsFor workspace
 
             let invocation =
@@ -107,7 +107,7 @@ let private argumentTests =
             Expect.equal
                 arguments
                 [ "test"
-                  "lib.csproj"
+                  Path.GetFullPath projectPath
                   "--configuration"
                   "Release"
                   "--nologo"

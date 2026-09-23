@@ -1,10 +1,10 @@
 #load "../ComputationExpressions.fs"
-#load "../TaskRuntime.fs"
-#load "../TaskRuntimeAdapter.fs"
+#load "../Workflow.fs"
+#load "../WorkflowAdapter.fs"
 
 open System
-open TaskRuntime
-open TaskRuntimeAdapter
+open Workflow
+open WorkflowAdapter
 
 let args = fsi.CommandLineArgs |> Array.skip 1
 if args.Length <> 2 then
