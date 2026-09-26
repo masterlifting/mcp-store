@@ -4,6 +4,10 @@
     <RootNamespace>Mcp.Dotnet</RootNamespace>
     <AssemblyName>Mcp.Dotnet</AssemblyName>
     <OutputType>Exe</OutputType>
+    <!-- Publish overrides these; declaring them here keeps an incremental plain
+         Release build from reusing a portable-debug assembly during packaging. -->
+    <DebugType>None</DebugType>
+    <DebugSymbols>false</DebugSymbols>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <WarningsAsErrors>3390;3391;3392;3393</WarningsAsErrors>

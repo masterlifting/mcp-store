@@ -8,6 +8,7 @@ open System
 open System.Diagnostics
 open System.IO
 open System.IO.Compression
+open System.Reflection.PortableExecutable
 open System.Security.Cryptography
 open System.Text.Json.Nodes
 
@@ -50,14 +51,13 @@ let assertConsumerRelativePath label (path: string) =
     assertTrue $"{label} has no traversal or empty segments"
         (segments |> Array.forall (fun segment -> segment <> "" && segment <> "." && segment <> ".."))
 
-let runScript path =
+let runDotnet arguments =
     let info = ProcessStartInfo("dotnet")
     info.WorkingDirectory <- repoRoot
     info.UseShellExecute <- false
     info.RedirectStandardOutput <- true
     info.RedirectStandardError <- true
-    info.ArgumentList.Add "fsi"
-    info.ArgumentList.Add path
+    arguments |> List.iter info.ArgumentList.Add
 
     use childProcess = Process.Start info
     let output = childProcess.StandardOutput.ReadToEndAsync()
@@ -65,9 +65,11 @@ let runScript path =
     childProcess.WaitForExit()
 
     if childProcess.ExitCode <> 0 then
-        failwithf "%s failed: %s" path (error.Result.Trim())
+        failwithf "dotnet %s failed: %s" (String.concat " " arguments) (error.Result.Trim())
 
     output.Result
+
+let runScript path = runDotnet [ "fsi"; path ]
 
 let sha256 path =
     use stream = File.OpenRead path
@@ -95,11 +97,23 @@ assertTrue "pin script reads the configured version" (pinsScript.Contains("Relea
 assertTrue "pin script verifies the manifest revision" (pinsScript.Contains("assertManifestRevision", StringComparison.Ordinal))
 assertTrue "pin script emits assetUri" (pinsScript.Contains("assetUri", StringComparison.Ordinal))
 
+// Declaring these at the project level keeps a plain Release build from
+// producing a portable-debug assembly that packaging reuses incrementally.
+let projectFile = File.ReadAllText(Path.Combine(dotnet, "Mcp.Dotnet.fsproj"))
+assertTrue "project declares the deterministic no-debug output"
+    (projectFile.Contains("<DebugType>None</DebugType>", StringComparison.Ordinal)
+     && projectFile.Contains("<DebugSymbols>false</DebugSymbols>", StringComparison.Ordinal))
+
 let distributionDirectory = Path.Combine(dist, componentId)
 let archivePath = Path.Combine(dist, archiveName)
 let manifestPath = Path.Combine(distributionDirectory, "distribution.json")
 let pinsPath = Path.Combine(dist, "consumer-pins.json")
 let stalePublishPath = Path.Combine(distributionDirectory, "publish", "stale-output.txt")
+
+// Reproduce the F1 precondition: a clean plain Release build must not be able
+// to feed a portable-debug assembly into packaging via incremental reuse.
+runDotnet [ "clean"; "dotnet/Mcp.Dotnet.fsproj"; "-c"; "Release"; "--nologo" ] |> ignore
+runDotnet [ "build"; "dotnet/Mcp.Dotnet.fsproj"; "-c"; "Release"; "--nologo" ] |> ignore
 
 try
     Directory.CreateDirectory(Path.GetDirectoryName stalePublishPath) |> ignore
@@ -175,6 +189,17 @@ for entry in archive.Entries do
     | None -> ()
 
 archive.Dispose()
+
+// The packaged entry assembly must stay the no-debug output even though a
+// plain Release build populated the intermediate outputs before packaging.
+let packagedDllPath = Path.Combine(distributionDirectory, ReleaseConfig.entryDll)
+
+let packagedDllHasNoDebugDirectory =
+    use stream = File.OpenRead packagedDllPath
+    use pe = new PEReader(stream)
+    pe.ReadDebugDirectory().IsEmpty
+
+assertTrue "packaged entry DLL carries no debug directory" packagedDllHasNoDebugDirectory
 
 let pins = JsonNode.Parse(File.ReadAllText pinsPath).AsObject()
 let pinKeys = pins |> Seq.map (fun pair -> pair.Key) |> Set.ofSeq
