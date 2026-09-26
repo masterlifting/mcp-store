@@ -90,7 +90,7 @@ let createDirectoryLink (link: string) (target: string) =
 
 type TempWorkspace() =
     let root =
-        Path.Combine(Path.GetTempPath(), "mcp-verifier-tests", Guid.NewGuid().ToString("N"))
+        Path.Combine(Path.GetTempPath(), "mcp-dotnet-tests", Guid.NewGuid().ToString("N"))
 
     do Directory.CreateDirectory root |> ignore
 

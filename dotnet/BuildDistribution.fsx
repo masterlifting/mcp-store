@@ -10,7 +10,7 @@ let root = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, ".."))
 let dotnet = Path.Combine(root, "dotnet")
 let outputRoot = Path.Combine(dotnet, "dist")
 let sdk = "11.0.100-rc.1.26425.128"
-let version = "1.0.1"
+let version = "1.0.2"
 let componentId = "dotnet"
 let entryDll = "Mcp.Dotnet.dll"
 

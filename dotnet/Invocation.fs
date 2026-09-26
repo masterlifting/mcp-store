@@ -63,7 +63,7 @@ module AuthorizedInvocation =
     let private validateExecutable workspaceRoot candidate : Result<string, VerificationError> =
         try
             if String.IsNullOrWhiteSpace candidate then
-                Error(ProcessStartFailure "the verifier requires an injected .NET host")
+                Error(ProcessStartFailure "the dotnet MCP requires an injected .NET host")
             elif candidate.StartsWith("\\\\", StringComparison.Ordinal) || candidate.StartsWith("//", StringComparison.Ordinal) then
                 Error(ProcessStartFailure "the injected .NET host must be a local absolute path")
             elif not (Path.IsPathFullyQualified candidate) then

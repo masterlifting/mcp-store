@@ -82,7 +82,7 @@ type TestOptions =
       NoBuild: bool option
       Timeout: TimeSpan option }
 
-type VerifierBudgets =
+type DotnetBudgets =
     { InitialErrors: int
       InitialWarnings: int
       InitialFailedTests: int

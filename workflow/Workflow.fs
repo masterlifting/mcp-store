@@ -6,6 +6,7 @@ open System.Runtime.InteropServices
 open System.Security.Cryptography
 open System.Text
 open System.Text.Json
+open System.Text.Json.Nodes
 open System.Text.RegularExpressions
 open System.Threading
 open Common.CE
@@ -341,6 +342,22 @@ type Decision =
 
 type DecisionRef = DecisionRef of string
 
+// Fail-closed authority remediation until the trusted User-authority ingress
+// exists: a blocked operation reports the exact typed authorization it needs so
+// callers do not probe with add-decision, which only creates Coordinator authority.
+[<RequireQualifiedAccess>]
+type DecisionRefStatus =
+    | Absent
+    | Mismatched
+    | Present
+
+type AuthorityMetadata =
+    { RequiredAuthority: MinimumAuthority
+      Operation: string
+      DecisionKind: DecisionKind option
+      Target: DecisionTarget option
+      DecisionRefStatus: DecisionRefStatus }
+
 // Section 5.2: reopening request. Targets are non-empty and validated against the
 // task; authority follows the source lifecycle (Complete -> Coordinator/User,
 // Aborted -> User).
@@ -529,6 +546,15 @@ type RuntimeError =
     | Conflict of expected: int * actual: int
     | InvalidTransition of string
     | PersistenceFailure of string
+    // Carries the exact rendered message so the text surface is unchanged while
+    // the transport can publish the structured remediation block.
+    | AuthorityDenied of metadata: AuthorityMetadata * message: string
+
+// Extracts the structured authority remediation from a runtime error.
+let tryAuthorityMetadata (error: RuntimeError) : AuthorityMetadata option =
+    match error with
+    | AuthorityDenied (metadata, _) -> Some metadata
+    | _ -> None
 
 type EvidenceDto =
     { Id: string
@@ -664,6 +690,7 @@ let private errorMessage error =
     | Conflict (expected, actual) -> $"state revision conflict: expected {expected}, actual {actual}"
     | InvalidTransition message -> message
     | PersistenceFailure message -> message
+    | AuthorityDenied (_, message) -> message
 
 let private nonEmpty name value =
     if String.IsNullOrWhiteSpace value || value.Contains '\r' || value.Contains '\n' then
@@ -758,10 +785,16 @@ let private questionId value = validateId "question id" questionIdRegex value
 let private profileId value = validateId "profile id" profileIdRegex value
 let private capabilityId value = validateId "capability id" capabilityIdRegex value
 
-let private minimumAuthorityToString authority =
+let minimumAuthorityToString authority =
     match authority with
     | MinimumAuthority.CoordinatorAuthority -> "coordinator"
     | MinimumAuthority.UserAuthority -> "user"
+
+let decisionRefStatusToString status =
+    match status with
+    | DecisionRefStatus.Absent -> "absent"
+    | DecisionRefStatus.Mismatched -> "mismatched"
+    | DecisionRefStatus.Present -> "present"
 
 let private parseMinimumAuthority (value: string) : Result<MinimumAuthority, RuntimeError> =
     match value with
@@ -867,7 +900,7 @@ let private parseDecisionAuthority (value: string) : Result<DecisionAuthority, R
     | "profilePolicy" -> Ok ProfilePolicy
     | _ -> Error (InvalidInput "decision authority is not recognized")
 
-let private decisionKindToString kind =
+let decisionKindToString kind =
     match kind with
     | UserDecision -> "userDecision"
     | DesignDecision -> "designDecision"
@@ -894,7 +927,7 @@ let private reopenTargetToString target =
     | ReopenTarget.WorkItemTarget id -> $"workItem:{id}"
     | ReopenTarget.GuardTarget id -> $"guard:{id}"
 
-let private decisionTargetToString target =
+let decisionTargetToString target =
     match target with
     | WaiveAcceptanceTarget id -> $"waiveAcceptance:{id}"
     | GuardDispositionTarget id -> $"guardDisposition:{id}"
@@ -907,6 +940,33 @@ let private decisionTargetToString target =
     | QuestionResolutionTarget id -> $"questionResolution:{id}"
     | ReclassificationTarget text -> $"reclassify:{text}"
     | OtherDecisionTarget text -> $"other:{text}"
+
+// W4/AC19: structured authority remediation for User-required or
+// DecisionRef-bound operations. The block is additive to the error envelope so
+// text-only errors render without it; the four render helpers above are the
+// single source of the wire vocabulary.
+let renderAuthorityMetadata (metadata: AuthorityMetadata) : JsonNode =
+    let authority = JsonObject()
+
+    authority["required"] <-
+        (JsonValue.Create(minimumAuthorityToString metadata.RequiredAuthority) :> JsonNode)
+
+    authority["operation"] <- (JsonValue.Create metadata.Operation :> JsonNode)
+
+    authority["decisionKind"] <-
+        match metadata.DecisionKind with
+        | Some kind -> (JsonValue.Create(decisionKindToString kind) :> JsonNode)
+        | None -> (null : JsonNode)
+
+    authority["target"] <-
+        match metadata.Target with
+        | Some target -> (JsonValue.Create(decisionTargetToString target) :> JsonNode)
+        | None -> (null : JsonNode)
+
+    authority["decisionRefStatus"] <-
+        (JsonValue.Create(decisionRefStatusToString metadata.DecisionRefStatus) :> JsonNode)
+
+    authority :> JsonNode
 
 // Reopen targets are encoded as 'acceptance:<AC-id>', 'workItem:<W-id>', or
 // 'guard:<G-id>'; the domain validates id format/existence.
@@ -3364,6 +3424,13 @@ module private Domain =
                 | None -> false
         | _ -> false
 
+    // The recorded disposition identifies which command must be re-authorized.
+    let private dispositionOperation (guard: Guard) =
+        match guard.Disposition with
+        | GuardDisposition.NotApplicable _ -> "task_apply.mark-not-applicable"
+        | GuardDisposition.Waived _
+        | GuardDisposition.Applicable -> "task_apply.waive-guard"
+
     let private dispositionError (task: TaskModel) (guard: Guard) (reference: string) =
         match dispositionAuthority guard with
         | None ->
@@ -3373,13 +3440,27 @@ module private Domain =
             | Error error -> error
             | Ok referenceId ->
                 match findDecision referenceId task.Decisions with
-                | None -> InvalidInput $"guard '{guard.Id}' disposition references unknown Decision '{referenceId}'"
+                | None ->
+                    AuthorityDenied(
+                        { RequiredAuthority = authority
+                          Operation = dispositionOperation guard
+                          DecisionKind = dispositionDecisionKind guard
+                          Target = Some(GuardDispositionTarget guard.Id)
+                          DecisionRefStatus = DecisionRefStatus.Absent },
+                        $"guard '{guard.Id}' disposition references unknown Decision '{referenceId}'"
+                    )
                 | Some decision ->
                     let requiredKind =
                         dispositionDecisionKind guard |> Option.defaultValue ApplicabilityDecision
 
-                    InvalidInput
+                    AuthorityDenied(
+                        { RequiredAuthority = authority
+                          Operation = dispositionOperation guard
+                          DecisionKind = Some requiredKind
+                          Target = Some(GuardDispositionTarget guard.Id)
+                          DecisionRefStatus = DecisionRefStatus.Mismatched },
                         $"guard '{guard.Id}' disposition Decision '{referenceId}' has kind {decisionKindToString decision.Kind} and does not authorize the exact Guard target at {minimumAuthorityToString authority} authority as kind {decisionKindToString requiredKind}"
+                    )
 
     let private validateGuardDisposition (task: TaskModel) (guard: Guard) =
         match guard.Disposition with
@@ -3826,8 +3907,14 @@ module private Domain =
                 match authority with
                 | User ->
                     Error(
-                        InvalidInput
+                        AuthorityDenied(
+                            { RequiredAuthority = MinimumAuthority.UserAuthority
+                              Operation = "task_apply.add-decision"
+                              DecisionKind = None
+                              Target = None
+                              DecisionRefStatus = DecisionRefStatus.Absent },
                             $"decision '{dto.Id}' claims User authority, which is rejected until the #13 signed-attestation bridge verifies it"
+                        )
                     )
                 | ProfilePolicy ->
                     Error(InvalidInput $"decision '{dto.Id}' claims ProfilePolicy provenance, which serialized state cannot establish")
@@ -3864,8 +3951,14 @@ module private Domain =
                 match confirmationRef with
                 | Some _ ->
                     Error(
-                        InvalidInput
+                        AuthorityDenied(
+                            { RequiredAuthority = MinimumAuthority.UserAuthority
+                              Operation = "task_apply.add-decision"
+                              DecisionKind = None
+                              Target = None
+                              DecisionRefStatus = DecisionRefStatus.Absent },
                             $"decision '{dto.Id}' carries an unverifiable confirmationRef, which is rejected until the #13 signed-attestation bridge verifies it"
+                        )
                     )
                 | None -> Ok()
 
@@ -4491,6 +4584,7 @@ module private Domain =
     let private authorize
         (now: DateTimeOffset)
         (task: TaskModel)
+        (operation: string)
         (decisionKind: DecisionKind)
         (operationTarget: DecisionTarget)
         (minimumAuthority: MinimumAuthority)
@@ -4502,6 +4596,22 @@ module private Domain =
             match decisionRef with
             | Some (DecisionRef referenceId) ->
                 match findDecision referenceId task.Decisions with
+                | None when minimumAuthority <> MinimumAuthority.CoordinatorAuthority ->
+                    // W4/AC19: a User-required operation whose supplied DecisionRef
+                    // does not exist is an absent authorization, not a text-only
+                    // NotFound; report the exact missing authority so the caller can
+                    // distinguish a missing ref from a mismatched one.
+                    return!
+                        Error(
+                            AuthorityDenied(
+                                { RequiredAuthority = minimumAuthority
+                                  Operation = operation
+                                  DecisionKind = Some decisionKind
+                                  Target = Some target
+                                  DecisionRefStatus = DecisionRefStatus.Absent },
+                                $"operation requires {minimumAuthorityToString minimumAuthority} authority and Decision '{referenceId}' was not found; ordinary Coordinator invocation cannot authorize it"
+                            )
+                        )
                 | None -> return! Error(NotFound $"Decision '{referenceId}' was not found")
                 | Some decision when
                     decision.Kind = decisionKind
@@ -4514,15 +4624,27 @@ module private Domain =
                     // (for example a waiver) never authorizes a different operation.
                     return!
                         Error(
-                            InvalidInput
+                            AuthorityDenied(
+                                { RequiredAuthority = minimumAuthority
+                                  Operation = operation
+                                  DecisionKind = Some decisionKind
+                                  Target = Some target
+                                  DecisionRefStatus = DecisionRefStatus.Mismatched },
                                 $"Decision '{referenceId}' has kind {decisionKindToString decision.Kind} and does not authorize the exact operation {decisionTargetToString target} as kind {decisionKindToString decisionKind} at {minimumAuthorityToString minimumAuthority} authority"
+                            )
                         )
             | None ->
                 if minimumAuthority <> MinimumAuthority.CoordinatorAuthority then
                     return!
                         Error(
-                            InvalidInput
+                            AuthorityDenied(
+                                { RequiredAuthority = minimumAuthority
+                                  Operation = operation
+                                  DecisionKind = Some decisionKind
+                                  Target = Some target
+                                  DecisionRefStatus = DecisionRefStatus.Absent },
                                 $"operation requires {minimumAuthorityToString minimumAuthority} authority; ordinary Coordinator invocation cannot authorize it"
+                            )
                         )
                 else
                     // Section 9.2: runtime creates the durable target-bound Decision
@@ -4833,6 +4955,7 @@ module private Domain =
                             authorize
                                 now
                                 task
+                                "task_apply.reopen"
                                 DesignDecision
                                 target
                                 minimumAuthority
@@ -4875,6 +4998,7 @@ module private Domain =
                                 authorize
                                     now
                                     task
+                                    "task_apply.apply-contract-patch"
                                     ContractRevision
                                     target
                                     minimumAuthority
@@ -4906,6 +5030,7 @@ module private Domain =
                             authorize
                                 now
                                 task
+                                "task_apply.reconcile-contract-drift"
                                 ContractRevision
                                 target
                                 MinimumAuthority.CoordinatorAuthority
@@ -4924,6 +5049,7 @@ module private Domain =
                         authorize
                             now
                             task
+                            "task_apply.reconcile-contract-drift"
                             ContractRevision
                             target
                             MinimumAuthority.UserAuthority
@@ -5005,6 +5131,7 @@ module private Domain =
                             authorize
                                 now
                                 task
+                                "task_apply.mark-not-applicable"
                                 ApplicabilityDecision
                                 (GuardDispositionTarget id)
                                 minimumAuthority
@@ -5033,6 +5160,7 @@ module private Domain =
                             authorize
                                 now
                                 task
+                                "task_apply.waive-guard"
                                 WaiverDecision
                                 (GuardDispositionTarget id)
                                 minimumAuthority
@@ -5082,7 +5210,20 @@ module private Domain =
                     | Some decision when decision.Targets |> List.contains (QuestionResolutionTarget question.Id) ->
                         Ok [ QuestionResolved(id, reference) ]
                     | Some _ ->
-                        Error [ InvalidInput $"Decision '{referenceId}' does not target Question '{id}'" ]
+                        // W4/AC19: a present DecisionRef that does not target this
+                        // question is a mismatch, not a syntax error; report the
+                        // canonical User/UserDecision remediation (the disposition is
+                        // coordinator-created today, but the signed User path is the
+                        // durable authorization once #18 lands).
+                        Error
+                            [ AuthorityDenied(
+                                  { RequiredAuthority = MinimumAuthority.UserAuthority
+                                    Operation = "task_apply.resolve-question"
+                                    DecisionKind = Some UserDecision
+                                    Target = Some(QuestionResolutionTarget question.Id)
+                                    DecisionRefStatus = DecisionRefStatus.Mismatched },
+                                  $"Decision '{referenceId}' does not target Question '{id}'"
+                              ) ]
         | QuestionResolved _ ->
             Error [ InvalidInput "question resolution events are produced by decide and cannot be applied as commands" ]
         | ReclassifyTask _ ->
@@ -5206,6 +5347,7 @@ module private Domain =
                     authorize
                         now
                         task
+                        "task_apply.reclassify-task"
                         ContractRevision
                         (reclassificationTarget kind targetProfileId)
                         minimumAuthority
@@ -5235,6 +5377,7 @@ module private Domain =
                     authorize
                         now
                         task
+                        "task_apply.reconcile-profile-drift"
                         ContractRevision
                         (ReclassificationTarget($"profileDrift:{task.Profile}"))
                         MinimumAuthority.CoordinatorAuthority
@@ -6017,7 +6160,20 @@ let applyTask root id expectedRevision command =
                     let! events =
                         match decideAt profiles DateTimeOffset.UtcNow task command with
                         | Ok events -> Ok events
-                        | Error errors -> Error(InvalidInput(errors |> List.map errorMessage |> String.concat "; "))
+                        | Error errors ->
+                            // W4/AC19: carry the structured authority remediation
+                            // through unchanged instead of flattening it into a
+                            // text-only InvalidInput. Every other error list keeps
+                            // its existing flattened envelope.
+                            match
+                                errors
+                                |> List.tryPick (fun error ->
+                                    match error with
+                                    | AuthorityDenied _ -> Some error
+                                    | _ -> None)
+                            with
+                            | Some authorityError -> Error authorityError
+                            | None -> Error(InvalidInput(errors |> List.map errorMessage |> String.concat "; "))
 
                     let next = evolve task events
                     let next = { next with StateRevision = task.StateRevision + 1 }

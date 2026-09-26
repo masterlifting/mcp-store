@@ -1,5 +1,5 @@
 // Deterministic contract coverage for the component-local dotnet v1 producer.
-// The test regenerates v1.0.1 output and proves the stored v1.0.0 output is untouched.
+// The test regenerates v1.0.2 output and proves the stored v1.0.0 output is untouched.
 
 open System
 open System.Diagnostics
@@ -12,7 +12,7 @@ let repoRoot = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", ".."))
 let dotnet = Path.Combine(repoRoot, "dotnet")
 let dist = Path.Combine(dotnet, "dist")
 let componentId = "dotnet"
-let version = "1.0.1"
+let version = "1.0.2"
 let archiveName = $"{componentId}-v{version}.zip"
 let publishedFiles =
     [ "FSharp.Core.dll"
@@ -81,12 +81,12 @@ let pinsScript = File.ReadAllText(Path.Combine(dotnet, "PrepareReleasePins.fsx")
 assertTrue "build script owns only dotnet packaging" (not (buildScript.Contains("task-runtime", StringComparison.OrdinalIgnoreCase)))
 assertTrue "pin script owns only dotnet packaging" (not (pinsScript.Contains("task-runtime", StringComparison.OrdinalIgnoreCase)))
 assertTrue "build script uses dotnet project" (buildScript.Contains("dotnet/Mcp.Dotnet.fsproj", StringComparison.Ordinal))
-assertTrue "build script names the corrected v1.0.1 release" (buildScript.Contains("let version = \"1.0.1\"", StringComparison.Ordinal))
+assertTrue "build script names the corrected v1.0.2 release" (buildScript.Contains("let version = \"1.0.2\"", StringComparison.Ordinal))
 assertTrue "scripts use the canonical component identity" (buildScript.Contains("let componentId = \"dotnet\"", StringComparison.Ordinal))
 assertTrue "manifest records per-file hashes" (buildScript.Contains("fileEntry[\"sha256\"]", StringComparison.Ordinal))
 assertTrue "manifest uses the OpenCode consumer path field" (buildScript.Contains("fileEntry[\"path\"]", StringComparison.Ordinal))
 assertTrue "build script does not emit the incompatible name field" (not (buildScript.Contains("fileEntry[\"name\"]", StringComparison.Ordinal)))
-assertTrue "pin script names the corrected v1.0.1 release" (pinsScript.Contains("let version = \"1.0.1\"", StringComparison.Ordinal))
+assertTrue "pin script names the corrected v1.0.2 release" (pinsScript.Contains("let version = \"1.0.2\"", StringComparison.Ordinal))
 
 let distributionDirectory = Path.Combine(dist, componentId)
 let archivePath = Path.Combine(dist, archiveName)

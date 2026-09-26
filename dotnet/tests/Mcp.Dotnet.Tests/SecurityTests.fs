@@ -150,7 +150,7 @@ let private artifactRootTests =
         testCase "relative artifact root inside the workspace is created"
         <| fun _ ->
             use workspace = new TempWorkspace()
-            let root = PathAuthorization.validateArtifactRoot workspace.Root ".mcp-store/dotnet-verification" |> expectOk "artifact root"
+            let root = PathAuthorization.validateArtifactRoot workspace.Root ".mcp-store/dotnet" |> expectOk "artifact root"
             Expect.isTrue (Directory.Exists root) "artifact directory created"
             Expect.isTrue (root.StartsWith(workspace.Root, StringComparison.OrdinalIgnoreCase)) "contained artifact root"
 

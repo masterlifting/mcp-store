@@ -11,10 +11,10 @@ open Mcp.Dotnet.Tests.Support
 // Real process integration is sequenced to keep the short-timeout case deterministic
 // and to avoid many concurrent dotnet builds competing for machine resources.
 let private serviceFor (workspace: TempWorkspace) =
-    new VerifierService(
+    new DotnetService(
         workspace.Root,
         dotnetHost = dotnetHost (),
-        artifactRoot = Path.Combine(workspace.Root, ".mcp-store", "dotnet-verification"),
+        artifactRoot = Path.Combine(workspace.Root, ".mcp-store", "dotnet"),
         retention = TimeSpan.FromHours 1.0
     )
 
@@ -86,11 +86,11 @@ let tests =
                 task {
                     use workspace = new TempWorkspace()
                     workspace.CreateClassLibrary("lib", validClassSource) |> ignore
-                    let externalRoot = Path.Combine(Path.GetTempPath(), "mcp-verifier-external", Guid.NewGuid().ToString("N"))
+                    let externalRoot = Path.Combine(Path.GetTempPath(), "mcp-dotnet-external", Guid.NewGuid().ToString("N"))
 
                     try
                         use service =
-                            new VerifierService(
+                            new DotnetService(
                                 workspace.Root,
                                 dotnetHost = dotnetHost (),
                                 artifactRoot = externalRoot,
@@ -290,7 +290,7 @@ let tests =
                     let! result = service.VerifyBuild(buildOptions (Some "lib.csproj"))
                     result |> expectOk "successful build" |> ignore
 
-                    let artifactRoot = Path.Combine(workspace.Root, ".mcp-store", "dotnet-verification")
+                    let artifactRoot = Path.Combine(workspace.Root, ".mcp-store", "dotnet")
 
                     let binlogs =
                         Directory.EnumerateFiles(artifactRoot, "*.binlog", SearchOption.AllDirectories)

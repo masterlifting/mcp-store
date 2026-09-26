@@ -8,29 +8,29 @@ only `.tasks/<TASK-ID>/runtime.json` in strict schema v1; legacy layouts and
 aliases are rejected. Coordination is process-ephemeral, so `runtime.lock` is
 never created or retained.
 
-The distribution scripts are component-local: they emit no verifier artifacts.
+The distribution scripts are component-local: they emit only Workflow artifacts.
 The .NET MCP has its own producer boundary under `dotnet/` and its release is
 not part of the Workflow bootstrap.
 
-The v1 release build produces the corrected immutable `workflow-v1.0.1.zip`
-framework-dependent `net11.0` distribution. The v1.0.0 archive remains an
-immutable historical release with the original manifest-schema failure. The
-consumer must invoke the pinned `Mcp.Workflow.dll` entry DLL with `dotnet exec`;
-it must not run source scripts or restore/build the producer at runtime.
+The v1 release build produces the corrected immutable `workflow-v1.0.2.zip`
+framework-dependent `net11.0` distribution. The v1.0.0 and v1.0.1 archives
+remain immutable historical releases. The consumer must invoke the pinned
+`Mcp.Workflow.dll` entry DLL with `dotnet exec`; it must not run source scripts
+or restore/build the producer at runtime.
 
 ```text
 dotnet build workflow/Mcp.Workflow.fsproj -c Release
 dotnet run --project workflow/Mcp.Workflow.fsproj -c Release --no-build
 ```
 
-For the corrected immutable `workflow-v1.0.1.zip` asset, run
+For the corrected immutable `workflow-v1.0.2.zip` asset, run
 `dotnet fsi workflow/BuildDistributions.fsx`, then
 `dotnet fsi workflow/PrepareReleasePins.fsx`, and verify with
 `dotnet fsi workflow/tests/DistributionTests.fsx`. The build stages only
 `workflow/Mcp.Workflow.fsproj` under `workflow/dist/workflow/` and emits:
 
 ```text
-workflow/dist/workflow-v1.0.1.zip
+workflow/dist/workflow-v1.0.2.zip
 workflow/dist/workflow/distribution.json
 workflow/dist/consumer-pins.json
 ```

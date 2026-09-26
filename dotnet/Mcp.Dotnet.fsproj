@@ -17,7 +17,7 @@
     <Compile Include="ProcessRunner.fs" />
     <Compile Include="Parsers.fs" />
     <Compile Include="Artifacts.fs" />
-    <Compile Include="Verifier.fs" />
+    <Compile Include="DotnetService.fs" />
     <Compile Include="Host.fs" />
   </ItemGroup>
 </Project>
