@@ -187,7 +187,8 @@ let pins = JsonNode.Parse(File.ReadAllText pinsPath).AsObject()
 let pinKeys = pins |> Seq.map (fun pair -> pair.Key) |> Set.ofSeq
 assertEqual "consumer pins contain only workflow" (Set.singleton componentId) pinKeys
 let pin = pins[componentId].AsObject()
-assertExactFiles "pin properties" [ "assetName"; "assetUri"; "archiveSha256"; "manifestSha256"; "revision" ]
+assertExactFiles "pin properties"
+    ([ "assetName"; "assetUri"; "archiveSha256"; "manifestSha256"; "revision" ] |> List.sort)
     (pin |> Seq.map (fun pair -> pair.Key) |> Seq.toList)
 assertEqual "pin asset name" archiveName (pin["assetName"].GetValue<string>())
 assertEqual "pin asset uri" assetUri (pin["assetUri"].GetValue<string>())
