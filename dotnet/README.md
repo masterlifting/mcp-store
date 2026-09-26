@@ -23,10 +23,21 @@ The host path is intentionally supplied by the consumer. The producer rejects
 relative, non-canonical, workspace-local, missing, or reparse-point hosts.
 
 The producer requires an explicit `artifactRoot` supplied by the consumer. It
-must be a local absolute path; the producer does not derive any
-OpenCode-specific path. Roots are canonicalized and rejected when they or their
-ancestors are reparse points. Per-run isolation, aggregate and per-artifact
-quotas, retention, and session cleanup apply identically to external roots.
+must be a fully-qualified local absolute path outside the trusted workspace; the
+producer never resolves a relative path and never derives an OpenCode-specific
+path. Roots are canonicalized, validated without side effects, and rejected when
+they are the workspace root or a descendant, an existing file, a reparse point,
+a path that traverses a reparse point, or a Windows UNC/network path.
+
+Run state is namespaced as `<artifact-root>/<workspace-id>/<run-id>`, where
+`workspace-id` is the lowercase SHA-256 hex of the canonical trusted workspace
+(case-normalized only on Windows) and `run-id` is an opaque directory name that
+is independent of the public run identifier. The root itself is consumer-owned.
+Cleanup recursively removes only registry-owned run directories and then removes
+the owned workspace namespace non-recursively only when it is empty; it never
+removes the shared root, sibling workspaces, or unrelated entries. Per-run
+isolation, aggregate and per-artifact quotas, retention, and cleanup apply
+identically to every external root.
 
 The MCP host/runtime startup prerequisite is consumer-provisioned and is
 independent of project SDK selection. Project build/test runs use the normal
@@ -47,6 +58,13 @@ dotnet run --project tests/Mcp.Dotnet.Tests/Mcp.Dotnet.Tests.fsproj --configurat
 Run the command from this directory. It targets `net11.0`, references
 `Mcp.Dotnet.fsproj` directly, and owns the dotnet build/test domain, authorization,
 process, quota, and MCP transport coverage.
+
+The repo-shared provenance guard has a focused check that does not require a clean
+tree:
+
+```text
+dotnet fsi dotnet/tests/ProvenanceTests.fsx
+```
 
 ## Producer packaging
 

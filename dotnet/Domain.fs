@@ -131,6 +131,23 @@ type DetailKind =
     | FailedTests
     | Output
 
+[<RequireQualifiedAccess>]
+module DetailKind =
+    let all =
+        [ DetailKind.Errors
+          DetailKind.Warnings
+          DetailKind.FailedTests
+          DetailKind.Output ]
+
+    let name kind =
+        match kind with
+        | DetailKind.Errors -> "errors"
+        | DetailKind.Warnings -> "warnings"
+        | DetailKind.FailedTests -> "failed-tests"
+        | DetailKind.Output -> "output"
+
+    let tryParse value = all |> List.tryFind (fun kind -> name kind = value)
+
 type DetailRequest =
     { RunId: string
       Kind: DetailKind
@@ -196,6 +213,55 @@ module TestCounts =
           Passed = 0
           Failed = 0
           Skipped = 0 }
+
+// Shared by the runtime validator and the published tools/list schema so the two
+// representations cannot drift.
+[<RequireQualifiedAccess>]
+module ConfigurationName =
+    [<Literal>]
+    let MaxLength = 64
+
+    [<Literal>]
+    let Default = "Release"
+
+    [<Literal>]
+    let Pattern = "^[A-Za-z0-9_.-]+$"
+
+    let private isAllowedCharacter (character: char) =
+        (character >= 'A' && character <= 'Z')
+        || (character >= 'a' && character <= 'z')
+        || (character >= '0' && character <= '9')
+        || character = '_'
+        || character = '-'
+        || character = '.'
+
+    let isValid (value: string) =
+        not (String.IsNullOrWhiteSpace value)
+        && value.Length <= MaxLength
+        && value |> Seq.forall isAllowedCharacter
+
+    let validate (candidate: string option) : Result<string, VerificationError> =
+        match candidate with
+        | None -> Ok Default
+        | Some value when String.IsNullOrWhiteSpace value -> Error(InvalidInput "configuration must be non-empty")
+        | Some value when value.Length > MaxLength -> Error(InvalidInput "configuration is too long")
+        | Some value when not (value |> Seq.forall isAllowedCharacter) ->
+            Error(InvalidInput "configuration contains unsupported characters")
+        | Some value -> Ok value
+
+[<RequireQualifiedAccess>]
+module TestFilter =
+    [<Literal>]
+    let MaxLength = 512
+
+    let validate (candidate: string option) : Result<string option, VerificationError> =
+        match candidate with
+        | None -> Ok None
+        | Some value when String.IsNullOrWhiteSpace value ->
+            Error(InvalidInput "filter must be non-empty when supplied")
+        | Some value when value.Length > MaxLength || value.IndexOf('\u0000') >= 0 ->
+            Error(InvalidInput "filter is invalid or too long")
+        | Some value -> Ok(Some value)
 
 type internal ResultBuilder() =
     member _.Bind(value, continuation) = Result.bind continuation value

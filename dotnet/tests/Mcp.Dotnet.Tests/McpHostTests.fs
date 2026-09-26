@@ -143,7 +143,7 @@ type private McpHostProcess(workingDirectory: string, artifactRoot: string, ?inj
             pending.Dispose()
 
 let private workspaceArtifactRoot (workspace: TempWorkspace) =
-    Path.Combine(workspace.Root, ".mcp-store", "dotnet")
+    workspace.ExternalArtifactRoot
 
 let private initializeRequest =
     """{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"dotnet-mcp-tests","version":"1"}}}"""

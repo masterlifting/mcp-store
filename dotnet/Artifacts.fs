@@ -16,11 +16,12 @@ type private RegistryEntry =
       CreatedAt: DateTimeOffset
       CompletedAt: DateTimeOffset option }
 
-type ArtifactRegistry(artifactRoot: string, retention: TimeSpan, ?quotas: ArtifactQuotas) =
+type ArtifactRegistry(artifactRoot: string, workspaceNamespace: string, retention: TimeSpan, ?quotas: ArtifactQuotas) =
     let entries = ConcurrentDictionary<string, RegistryEntry>(StringComparer.Ordinal)
     let gate = obj ()
     let effectiveQuotas = quotas |> Option.defaultValue Budgets.DefaultArtifactQuotas
     let artifactRoot = Path.GetFullPath artifactRoot
+    let workspaceDirectory = Path.Combine(artifactRoot, workspaceNamespace)
     let pathComparison = if OperatingSystem.IsWindows() then StringComparison.OrdinalIgnoreCase else StringComparison.Ordinal
 
     let pathIsWithin (root: string) (candidate: string) =
@@ -69,7 +70,8 @@ type ArtifactRegistry(artifactRoot: string, retention: TimeSpan, ?quotas: Artifa
             let binlogBytes = fileLength handle.Paths.Binlog
             let trxBytes = fileLength handle.Paths.Trx
             let runBytes = sumFiles handle.Paths.Directory
-            let aggregateBytes = sumFiles artifactRoot
+            // Aggregate owns only this workspace namespace, never sibling workspaces.
+            let aggregateBytes = sumFiles workspaceDirectory
 
             if stdoutBytes > effectiveQuotas.MaxStdoutBytes then Some(ArtifactQuotaExceeded "stdout artifact quota exceeded")
             elif stderrBytes > effectiveQuotas.MaxStderrBytes then Some(ArtifactQuotaExceeded "stderr artifact quota exceeded")
@@ -95,6 +97,20 @@ type ArtifactRegistry(artifactRoot: string, retention: TimeSpan, ?quotas: Artifa
           Trx = Path.Combine(directory, "test-results.trx")
           ParsedEvidence = Path.Combine(directory, "parsed-evidence.json") }
 
+    let removeRunDirectory (directory: string) =
+        try Directory.Delete(directory, true) with _ -> ()
+
+        // The namespace may be shared with sibling run state, so it is removed only
+        // when empty and never recursively. The consumer-owned root is never removed.
+        try
+            if
+                Directory.Exists workspaceDirectory
+                && (Directory.EnumerateFileSystemEntries workspaceDirectory |> Seq.isEmpty)
+            then
+                Directory.Delete(workspaceDirectory, false)
+        with _ ->
+            ()
+
     let removeExpired now =
         for pair in entries do
             let entry = pair.Value
@@ -104,10 +120,18 @@ type ArtifactRegistry(artifactRoot: string, retention: TimeSpan, ?quotas: Artifa
                 let mutable removed = Unchecked.defaultof<RegistryEntry>
 
                 if entries.TryRemove(pair.Key, &removed) then
-                    try Directory.Delete(removed.Handle.Paths.Directory, true) with _ -> ()
+                    removeRunDirectory removed.Handle.Paths.Directory
             | _ -> ()
 
     do
+        if
+            String.IsNullOrWhiteSpace workspaceNamespace
+            || workspaceNamespace.IndexOfAny([| Path.DirectorySeparatorChar; Path.AltDirectorySeparatorChar |]) >= 0
+            || workspaceNamespace = "."
+            || workspaceNamespace = ".."
+        then
+            invalidArg (nameof workspaceNamespace) "workspace namespace must be a single non-empty path segment"
+
         if retention <= TimeSpan.Zero then invalidArg (nameof retention) "retention must be positive"
 
         match Budgets.validateArtifactQuotas effectiveQuotas with
@@ -116,7 +140,7 @@ type ArtifactRegistry(artifactRoot: string, retention: TimeSpan, ?quotas: Artifa
 
     let allocateRun () : Result<RunHandle, VerificationError> =
         try
-            if sumFiles artifactRoot >= effectiveQuotas.MaxAggregateBytes then
+            if sumFiles workspaceDirectory >= effectiveQuotas.MaxAggregateBytes then
                 Error(ArtifactQuotaExceeded "aggregate artifact quota is already exhausted")
             else
                 let mutable created = None
@@ -126,10 +150,10 @@ type ArtifactRegistry(artifactRoot: string, retention: TimeSpan, ?quotas: Artifa
                     attempt <- attempt + 1
                     let runIdText = randomToken 32
                     let directoryName = randomToken 18
-                    let directory = Path.GetFullPath(Path.Combine(artifactRoot, directoryName))
+                    let directory = Path.GetFullPath(Path.Combine(workspaceDirectory, directoryName))
 
                     try
-                        if not (pathIsWithin artifactRoot directory) then
+                        if not (pathIsWithin workspaceDirectory directory) then
                             ()
                         else
                             Directory.CreateDirectory directory |> ignore
@@ -146,9 +170,9 @@ type ArtifactRegistry(artifactRoot: string, retention: TimeSpan, ?quotas: Artifa
                                 if entries.TryAdd(runIdText, entry) then
                                     created <- Some handle
                                 else
-                                    Directory.Delete(directory, true)
+                                    removeRunDirectory directory
                             else
-                                Directory.Delete(directory, true)
+                                removeRunDirectory directory
                     with _ -> ()
 
                 match created with
@@ -160,8 +184,9 @@ type ArtifactRegistry(artifactRoot: string, retention: TimeSpan, ?quotas: Artifa
         lock gate (fun () ->
             removeExpired DateTimeOffset.UtcNow
 
-            // The configured root is created on the first allocation, not at startup.
-            match PathAuthorization.ensureArtifactRoot artifactRoot with
+            // The workspace namespace under the configured root is created on the
+            // first allocation, not at startup.
+            match PathAuthorization.ensureArtifactRoot workspaceDirectory with
             | Error error -> Error error
             | Ok() -> allocateRun ())
 
@@ -189,7 +214,7 @@ type ArtifactRegistry(artifactRoot: string, retention: TimeSpan, ?quotas: Artifa
         lock gate (fun () ->
             let mutable removed = Unchecked.defaultof<RegistryEntry>
             if entries.TryRemove(RunId.value handle.RunId, &removed) then
-                try Directory.Delete(removed.Handle.Paths.Directory, true) with _ -> ())
+                removeRunDirectory removed.Handle.Paths.Directory)
 
     member _.Get(runId: string) : Result<RetainedEvidence, VerificationError> =
         lock gate (fun () ->
@@ -221,7 +246,7 @@ type ArtifactRegistry(artifactRoot: string, retention: TimeSpan, ?quotas: Artifa
             for pair in entries do
                 let mutable removed = Unchecked.defaultof<RegistryEntry>
                 if entries.TryRemove(pair.Key, &removed) then
-                    try Directory.Delete(removed.Handle.Paths.Directory, true) with _ -> ())
+                    removeRunDirectory removed.Handle.Paths.Directory)
 
     member _.Count = entries.Count
 

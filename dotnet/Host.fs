@@ -106,12 +106,9 @@ module private McpHost =
         }
 
     let private parseDetailKind value =
-        match value with
-        | "errors" -> Ok DetailKind.Errors
-        | "warnings" -> Ok DetailKind.Warnings
-        | "failed-tests" -> Ok DetailKind.FailedTests
-        | "output" -> Ok DetailKind.Output
-        | _ -> invalid "kind must be one of: errors, warnings, failed-tests, output"
+        match DetailKind.tryParse value with
+        | Some kind -> Ok kind
+        | None -> invalid "kind must be one of: errors, warnings, failed-tests, output"
 
     let private parseDetails arguments =
         result {
@@ -262,7 +259,7 @@ module private McpHost =
         let payload = JsonObject()
         payload["ok"] <- node true
         payload["runId"] <- node result.RunId
-        payload["kind"] <- node (match result.Kind with | DetailKind.Errors -> "errors" | DetailKind.Warnings -> "warnings" | DetailKind.FailedTests -> "failed-tests" | DetailKind.Output -> "output")
+        payload["kind"] <- node (DetailKind.name result.Kind)
         payload["offset"] <- node result.Offset
         payload["limit"] <- node result.Limit
         payload["total"] <- node result.Total

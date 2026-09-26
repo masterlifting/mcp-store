@@ -14,7 +14,7 @@ let private serviceFor (workspace: TempWorkspace) =
     new DotnetService(
         workspace.Root,
         dotnetHost = dotnetHost (),
-        artifactRoot = Path.Combine(workspace.Root, ".mcp-store", "dotnet"),
+        artifactRoot = workspace.ExternalArtifactRoot,
         retention = TimeSpan.FromHours 1.0
     )
 
@@ -117,7 +117,7 @@ let tests =
             testCase "startup does not create the configured artifact root"
             <| fun _ ->
                 use workspace = new TempWorkspace()
-                let artifactRoot = Path.Combine(workspace.Root, "artifacts")
+                let artifactRoot = workspace.ExternalArtifactRoot
 
                 use _service =
                     new DotnetService(
@@ -133,7 +133,7 @@ let tests =
                 task {
                     use workspace = new TempWorkspace()
                     workspace.CreateClassLibrary("lib", validClassSource) |> ignore
-                    let artifactRoot = Path.Combine(workspace.Root, "artifacts")
+                    let artifactRoot = workspace.ExternalArtifactRoot
 
                     use service =
                         new DotnetService(
@@ -150,19 +150,17 @@ let tests =
 
                     Expect.isTrue (Directory.Exists artifactRoot) "the root is created on first allocation"
 
-                    let entries = Directory.EnumerateFileSystemEntries artifactRoot |> Seq.toList
-                    Expect.isTrue (entries.Length >= 1) "at least one run directory exists"
-
-                    Expect.isTrue
-                        (entries |> List.forall (fun path -> Directory.Exists path))
-                        "the root contains only producer-owned run directories"
+                    let namespaceDirectory = Path.Combine(artifactRoot, workspace.Namespace)
+                    Expect.isTrue (Directory.Exists namespaceDirectory) "the workspace namespace is created"
+                    Expect.equal (Directory.EnumerateFileSystemEntries namespaceDirectory |> Seq.toList |> List.length) 1 "one owned run directory"
+                    Expect.isTrue (Directory.EnumerateFileSystemEntries namespaceDirectory |> Seq.forall Directory.Exists) "the namespace contains only run directories"
                 })
 
             testCaseTask "session cleanup removes producer artifacts but not unrelated files" (fun () ->
                 task {
                     use workspace = new TempWorkspace()
                     workspace.CreateClassLibrary("lib", validClassSource) |> ignore
-                    let artifactRoot = Path.Combine(workspace.Root, "artifacts")
+                    let artifactRoot = workspace.ExternalArtifactRoot
                     let unrelated = Path.Combine(artifactRoot, "consumer-data.txt")
 
                     use service =
@@ -176,7 +174,8 @@ let tests =
                     let! result = service.VerifyBuild(buildOptions (Some "lib.csproj"))
                     result |> expectOk "build before cleanup" |> ignore
 
-                    let runDirectories = Directory.EnumerateDirectories artifactRoot |> Seq.toList
+                    let namespaceDirectory = Path.Combine(artifactRoot, workspace.Namespace)
+                    let runDirectories = Directory.EnumerateDirectories namespaceDirectory |> Seq.toList
                     Expect.isTrue (runDirectories.Length >= 1) "producer state exists before cleanup"
                     File.WriteAllText(unrelated, "consumer data")
 
@@ -187,6 +186,9 @@ let tests =
                     Expect.isTrue
                         (runDirectories |> List.forall (fun path -> not (Directory.Exists path)))
                         "producer run directories are removed"
+
+                    Expect.isFalse (Directory.Exists namespaceDirectory) "the emptied owned namespace is removed"
+                    Expect.isTrue (Directory.Exists artifactRoot) "the shared consumer root is preserved"
                 })
 
             testCaseTask "failing build reports bounded diagnostics and retrievable details" (fun () ->
@@ -340,7 +342,7 @@ let tests =
                             MaxRunBytes = 256L
                             MaxAggregateBytes = 4096L }
 
-                    use registry = new ArtifactRegistry(artifactRoot, TimeSpan.FromHours 1.0, quotas = quotas)
+                    use registry = new ArtifactRegistry(artifactRoot, workspace.Namespace, TimeSpan.FromHours 1.0, quotas = quotas)
                     let handle = startRun registry
 
                     let invocation =
@@ -368,7 +370,7 @@ let tests =
                     let! result = service.VerifyBuild(buildOptions (Some "lib.csproj"))
                     result |> expectOk "successful build" |> ignore
 
-                    let artifactRoot = Path.Combine(workspace.Root, ".mcp-store", "dotnet")
+                    let artifactRoot = workspace.ExternalArtifactRoot
 
                     let binlogs =
                         Directory.EnumerateFiles(artifactRoot, "*.binlog", SearchOption.AllDirectories)

@@ -17,7 +17,7 @@ let private emptyPaths =
 
 let private runIdFor action =
     use workspace = new TempWorkspace()
-    use registry = new ArtifactRegistry(Path.Combine(workspace.Root, "artifacts"), TimeSpan.FromHours 1.0)
+    use registry = new ArtifactRegistry(Path.Combine(workspace.Root, "artifacts"), workspace.Namespace, TimeSpan.FromHours 1.0)
     action (startRun registry).RunId
 
 let private statusTests =

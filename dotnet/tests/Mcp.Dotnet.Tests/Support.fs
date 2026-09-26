@@ -92,9 +92,18 @@ type TempWorkspace() =
     let root =
         Path.Combine(Path.GetTempPath(), "mcp-dotnet-tests", Guid.NewGuid().ToString("N"))
 
+    // Producer artifact roots must sit outside the trusted workspace; this sibling
+    // temp directory is created lazily by the code under test.
+    let externalArtifactRoot =
+        Path.Combine(Path.GetTempPath(), "mcp-dotnet-tests-external", Guid.NewGuid().ToString("N"))
+
     do Directory.CreateDirectory root |> ignore
 
     member _.Root = root
+
+    member _.ExternalArtifactRoot = externalArtifactRoot
+
+    member _.Namespace = PathAuthorization.workspaceNamespace root
 
     member _.Write(relativePath: string, content: string) =
         let path = Path.Combine(root, relativePath)
@@ -162,10 +171,11 @@ type TempWorkspace() =
 
     interface IDisposable with
         member _.Dispose() =
-            try
-                Directory.Delete(root, true)
-            with _ ->
-                ()
+            for path in [ root; externalArtifactRoot ] do
+                try
+                    Directory.Delete(path, true)
+                with _ ->
+                    ()
 
 let validClassSource = "public class Class1 { public int Value => 1; }"
 let invalidClassSource = "public class Class1 { public int Value() { return NotDefined; } }"

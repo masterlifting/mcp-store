@@ -2,6 +2,7 @@ module Mcp.Dotnet.Tests.DotnetSchemaParityTests
 
 open System
 open System.IO
+open System.Text.RegularExpressions
 open System.Text.Json.Nodes
 open Expecto
 open Mcp.Dotnet
@@ -9,16 +10,12 @@ open Mcp.Dotnet.Tests.Support
 
 // The published tools/list schema must encode the same bounds the runtime parser
 // enforces. This suite extracts the literal from Host.fs so the shipped schema is
-// the only schema under test, then compares budget-derived bounds to
-// Budgets.Defaults so a future budget change makes the schema test fail.
+// the only schema under test, then compares the shared runtime definitions to it
+// so a future change makes the schema test fail.
 
-// Mirrors the literal bound in dotnet/Invocation.fs validateConfiguration; the
-// published schema and the runtime check must move together.
-let private configurationMaxLength = 64
-let private configurationPattern = "^[A-Za-z0-9_.-]+$"
-
-// Mirrors the literal bound in dotnet/Invocation.fs validateFilter.
-let private filterMaxLength = 512
+let private configurationMaxLength = ConfigurationName.MaxLength
+let private configurationPattern = ConfigurationName.Pattern
+let private filterMaxLength = TestFilter.MaxLength
 
 let private expectedTimeoutMinimum = int Budgets.Defaults.MinimumTimeout.TotalMilliseconds
 let private expectedTimeoutMaximum = int Budgets.Defaults.MaximumTimeout.TotalMilliseconds
@@ -147,6 +144,149 @@ let private schemaTests =
             expectInt limit "minimum" 1 "details.limit"
             expectInt limit "maximum" expectedLimitMaximum "details.limit"
             expectInt limit "default" expectedLimitDefault "details.limit"
+
+        testCase "every tool rejects unknown properties and details requires runId and kind"
+        <| fun _ ->
+            for toolName in [ "build"; "test"; "details" ] do
+                Expect.equal
+                    ((toolByName toolName).["inputSchema"].["additionalProperties"].GetValue<bool>())
+                    false
+                    $"{toolName}.additionalProperties"
+
+            let required =
+                (toolByName "details").["inputSchema"].["required"].AsArray()
+                |> Seq.map (fun value -> value.GetValue<string>())
+                |> Set.ofSeq
+
+            Expect.equal required (Set.ofList [ "runId"; "kind" ]) "details required properties"
     ]
 
-let tests = schemaTests
+let private publishedConfigurationPattern =
+    (properties "build").["configuration"].["pattern"].GetValue<string>()
+
+let private publishedConfigurationMaxLength =
+    (properties "build").["configuration"].["maxLength"].GetValue<int>()
+
+let private configurationRegex = Regex publishedConfigurationPattern
+
+// JSON Schema `pattern` is an ECMA-262 whole-value match, where `$` does not match
+// before a trailing newline the way .NET `Regex` does. Requiring a full-width match
+// keeps this model from accepting a value the runtime predicate rejects.
+let private schemaAcceptsConfiguration value =
+    if String.IsNullOrWhiteSpace value || value.Length > publishedConfigurationMaxLength then
+        false
+    else
+        let matched = configurationRegex.Match value
+        matched.Success && matched.Index = 0 && matched.Length = value.Length
+
+let private behavioralParityTests =
+    testList "Dotnet runtime/schema behavioral parity" [
+        testCase "configuration predicate matches the published pattern and length"
+        <| fun _ ->
+            let valid = [ "Release"; "Debug"; "Release_1.0-x"; "a"; String('a', publishedConfigurationMaxLength) ]
+
+            let invalid =
+                [ ""
+                  "   "
+                  "Release; rm -rf /"
+                  "Ünïcode"
+                  "a b"
+                  "Release\n"
+                  "Release\t"
+                  "Release\r"
+                  String('a', publishedConfigurationMaxLength + 1) ]
+
+            for value in valid do
+                Expect.isTrue (schemaAcceptsConfiguration value) $"schema accepts configuration '{value}'"
+                Expect.isTrue (ConfigurationName.isValid value) $"runtime accepts configuration '{value}'"
+
+            for value in invalid do
+                Expect.isFalse (schemaAcceptsConfiguration value) $"schema rejects configuration '{value}'"
+                Expect.isFalse (ConfigurationName.isValid value) $"runtime rejects configuration '{value}'"
+
+        testProperty "runtime predicate agrees with the published configuration pattern"
+        <| fun (value: string) -> ConfigurationName.isValid value = schemaAcceptsConfiguration value
+
+        testCase "configuration validation returns the shared default and rejects unsupported values"
+        <| fun _ ->
+            Expect.equal (ConfigurationName.validate None) (Ok ConfigurationName.Default) "default configuration"
+            Expect.equal (ConfigurationName.validate (Some "Release")) (Ok "Release") "explicit configuration"
+
+            for value in
+                [ ""
+                  "   "
+                  "Release; rm -rf /"
+                  "Ünïcode"
+                  "Release\n"
+                  "Release\t"
+                  String('a', ConfigurationName.MaxLength + 1) ] do
+                ConfigurationName.validate (Some value)
+                |> expectErrorMatching $"configuration '{value}'" isInvalidInput
+                |> ignore
+
+        testCase "filter validation rejects blank, overlong, and NUL values"
+        <| fun _ ->
+            Expect.equal (TestFilter.validate None) (Ok None) "absent filter"
+            Expect.equal (TestFilter.validate (Some "Category=Fast")) (Ok(Some "Category=Fast")) "valid filter"
+
+            for value in [ ""; "   "; String('a', TestFilter.MaxLength + 1); "a\u0000b" ] do
+                TestFilter.validate (Some value)
+                |> expectErrorMatching $"filter '{value}'" isInvalidInput
+                |> ignore
+
+        testCase "detail kind vocabulary matches the runtime parser"
+        <| fun _ ->
+            Expect.equal
+                (DetailKind.all |> List.map DetailKind.name)
+                [ "errors"; "warnings"; "failed-tests"; "output" ]
+                "detail kind names"
+
+            for kind in DetailKind.all do
+                Expect.equal (DetailKind.tryParse (DetailKind.name kind)) (Some kind) $"{kind} round-trips"
+
+            Expect.equal (DetailKind.tryParse "nope") None "unknown kind rejected"
+
+        testCase "runId, offset, and limit bounds match runtime pagination"
+        <| fun _ ->
+            use workspace = new TempWorkspace()
+            use registry = new ArtifactRegistry(Path.Combine(workspace.Root, "artifacts"), workspace.Namespace, TimeSpan.FromHours 1.0)
+
+            registry.Get "   "
+            |> expectErrorMatching "blank run id" isUnknownRunId
+            |> ignore
+
+            Budgets.page Budgets.Defaults { RunId = "r"; Kind = DetailKind.Errors; Offset = -1; Limit = None } [ "a" ]
+            |> expectErrorMatching "negative offset" isInvalidPagination
+            |> ignore
+
+            Budgets.page Budgets.Defaults { RunId = "r"; Kind = DetailKind.Errors; Offset = 0; Limit = Some 0 } [ "a" ]
+            |> expectErrorMatching "zero limit" isInvalidPagination
+            |> ignore
+
+            Budgets.page
+                Budgets.Defaults
+                { RunId = "r"
+                  Kind = DetailKind.Errors
+                  Offset = 0
+                  Limit = Some(Budgets.Defaults.DetailsMaxPageSize + 1) }
+                [ "a" ]
+            |> expectErrorMatching "limit above maximum" isInvalidPagination
+            |> ignore
+
+        testCase "timeout bounds match the published schema"
+        <| fun _ ->
+            Expect.equal
+                (Budgets.validateTimeout Budgets.Defaults None)
+                (Ok Budgets.Defaults.DefaultTimeout)
+                "default timeout"
+
+            Budgets.validateTimeout Budgets.Defaults (Some(TimeSpan.FromMilliseconds 1.0))
+            |> expectErrorMatching "below minimum" isInvalidInput
+            |> ignore
+
+            Budgets.validateTimeout Budgets.Defaults (Some(TimeSpan.FromHours 2.0))
+            |> expectErrorMatching "above maximum" isInvalidInput
+            |> ignore
+    ]
+
+let tests = testList "Dotnet schema" [ schemaTests; behavioralParityTests ]

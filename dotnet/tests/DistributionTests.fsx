@@ -3,6 +3,7 @@
 // manifest/pin contract end-to-end.
 
 #load "../ReleaseConfig.fsx"
+#load "../../BuildProvenance.fsx"
 
 open System
 open System.Diagnostics
@@ -96,6 +97,7 @@ assertTrue "pin script loads the producer release config" (pinsScript.Contains("
 assertTrue "pin script reads the configured version" (pinsScript.Contains("ReleaseConfig.version", StringComparison.Ordinal))
 assertTrue "pin script verifies the manifest revision" (pinsScript.Contains("assertManifestRevision", StringComparison.Ordinal))
 assertTrue "pin script emits assetUri" (pinsScript.Contains("assetUri", StringComparison.Ordinal))
+assertTrue "pin script emits the validated manifest revision" (pinsScript.Contains("value[\"revision\"]", StringComparison.Ordinal))
 
 // Declaring these at the project level keeps a plain Release build from
 // producing a portable-debug assembly that packaging reuses incrementally.
@@ -136,6 +138,13 @@ assertEqual "manifest version" ReleaseConfig.version (manifest["version"].GetVal
 assertEqual "manifest sdk" ReleaseConfig.sdkVersion (manifest["sdk"].GetValue<string>())
 assertEqual "manifest archive" archiveName (manifest["archive"].GetValue<string>())
 assertEqual "manifest entry DLL" ReleaseConfig.entryDll (manifest["entryDll"].GetValue<string>())
+
+let manifestRevision = manifest["revision"].GetValue<string>()
+assertTrue "manifest revision is a full commit SHA"
+    (manifestRevision.Length = 40 && manifestRevision |> Seq.forall Uri.IsHexDigit)
+
+let headRevision = BuildProvenance.committedHead repoRoot
+assertEqual "manifest revision equals the committed HEAD" headRevision manifestRevision
 
 let manifestEntries =
     manifest["files"].AsArray()
@@ -205,9 +214,13 @@ let pins = JsonNode.Parse(File.ReadAllText pinsPath).AsObject()
 let pinKeys = pins |> Seq.map (fun pair -> pair.Key) |> Set.ofSeq
 assertEqual "consumer pins contain only dotnet" (Set.singleton componentId) pinKeys
 let pin = pins[componentId].AsObject()
+assertExactFiles "pin properties" [ "assetName"; "assetUri"; "archiveSha256"; "manifestSha256"; "revision" ]
+    (pin |> Seq.map (fun pair -> pair.Key) |> Seq.toList)
 assertEqual "pin asset name" archiveName (pin["assetName"].GetValue<string>())
 assertEqual "pin asset uri" assetUri (pin["assetUri"].GetValue<string>())
 assertEqual "pin archive SHA-256" (sha256 archivePath) (pin["archiveSha256"].GetValue<string>())
 assertEqual "pin manifest SHA-256" (sha256 manifestPath) (pin["manifestSha256"].GetValue<string>())
+assertEqual "pin revision equals validated manifest revision" manifestRevision (pin["revision"].GetValue<string>())
+assertEqual "pin revision equals the committed HEAD" headRevision (pin["revision"].GetValue<string>())
 
 printfn "dotnet distribution contract passed: %s" archiveName

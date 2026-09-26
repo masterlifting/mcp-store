@@ -38,7 +38,7 @@ if requiredManifestValue "id" <> componentId
     failwith "dotnet v1 manifest identity does not match the release pin"
 
 BuildProvenance.assertCleanTree root
-BuildProvenance.assertManifestRevision manifestPath (BuildProvenance.committedHead root)
+let revision = BuildProvenance.assertManifestRevision manifestPath (BuildProvenance.committedHead root)
 
 let pins = JsonObject()
 let value = JsonObject()
@@ -46,12 +46,14 @@ value["assetName"] <- JsonValue.Create archiveName
 value["assetUri"] <- JsonValue.Create assetUri
 value["archiveSha256"] <- JsonValue.Create(sha256 archivePath)
 value["manifestSha256"] <- JsonValue.Create(sha256 manifestPath)
+value["revision"] <- JsonValue.Create revision
 pins[componentId] <- value
 
 File.WriteAllText(output, pins.ToJsonString(JsonSerializerOptions(WriteIndented = true)))
 
 printfn
-    "dotnet asset=%s archiveSha256=%s manifestSha256=%s"
+    "dotnet asset=%s archiveSha256=%s manifestSha256=%s revision=%s"
     archiveName
     (sha256 archivePath)
     (sha256 manifestPath)
+    revision

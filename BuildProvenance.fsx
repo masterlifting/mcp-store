@@ -29,6 +29,9 @@ let assertCleanTree root =
     | 0, dirty, _ -> failwithf "refusing to package from a dirty source tree:\n%s" dirty
     | c, _, e -> failwithf "git status failed (%d): %s" c e
 
+// Validates that the on-disk manifest records the expected committed HEAD and
+// returns that validated revision so callers can propagate the exact same value
+// into consumer pins instead of generating a revision independently.
 let assertManifestRevision manifestPath expected =
     let rev =
         (System.Text.Json.Nodes.JsonNode.Parse(System.IO.File.ReadAllText manifestPath))
@@ -36,3 +39,5 @@ let assertManifestRevision manifestPath expected =
 
     if rev <> expected then
         failwithf "manifest revision %s does not match clean HEAD %s; rebuild the distribution" rev expected
+
+    rev

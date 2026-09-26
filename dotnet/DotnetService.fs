@@ -75,6 +75,7 @@ type DotnetService(
     let registry =
         new ArtifactRegistry(
             rootForArtifacts,
+            PathAuthorization.workspaceNamespace root,
             retention |> Option.defaultValue (TimeSpan.FromHours 1.0),
             quotas = Budgets.DefaultArtifactQuotas
         )
