@@ -1,8 +1,7 @@
 // Deterministic coverage for the Workflow fail-closed authority remediation
-// contract (AC19). The structured `error.authority` block is published for
-// every authority denial; non-authority errors stay envelope-identical.
-// End-to-end authorization is exercised separately by WorkflowMcpTests.fsx and
-// WorkflowCrossProcessTests.fsx via the live MCP boundary.
+// contract. The structured `error.authority` block is published for every
+// authority denial; non-authority errors stay envelope-identical. End-to-end
+// authorization through the live MCP boundary is exercised by WorkflowMcpTests.fsx.
 
 #load "../ComputationExpressions.fs"
 #load "../Workflow.fs"

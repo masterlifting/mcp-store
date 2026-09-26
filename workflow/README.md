@@ -12,7 +12,7 @@ The distribution scripts are component-local: they emit only Workflow artifacts.
 The .NET MCP has its own producer boundary under `dotnet/` and its release is
 not part of the Workflow bootstrap.
 
-The v1 release build produces the corrected immutable `v1.0.3.zip`
+The v1 release build produces the immutable `v1.0.3.zip`
 framework-dependent `net11.0` distribution. The archive filename encodes the
 version only; the producer identity already comes from the producer directory,
 the manifest `id`, the project/assembly identity, the release context, and
@@ -25,7 +25,7 @@ dotnet build workflow/Mcp.Workflow.fsproj -c Release
 dotnet run --project workflow/Mcp.Workflow.fsproj -c Release --no-build
 ```
 
-For the corrected immutable `v1.0.3.zip` asset, run
+For the immutable `v1.0.3.zip` asset, run
 `dotnet fsi workflow/BuildDistributions.fsx`, then
 `dotnet fsi workflow/PrepareReleasePins.fsx`, and verify with
 `dotnet fsi workflow/tests/DistributionTests.fsx`. The build stages only

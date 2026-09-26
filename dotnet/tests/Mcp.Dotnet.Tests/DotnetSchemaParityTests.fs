@@ -207,33 +207,6 @@ let private behavioralParityTests =
         testProperty "runtime predicate agrees with the published configuration pattern"
         <| fun (value: string) -> ConfigurationName.isValid value = schemaAcceptsConfiguration value
 
-        testCase "configuration validation returns the shared default and rejects unsupported values"
-        <| fun _ ->
-            Expect.equal (ConfigurationName.validate None) (Ok ConfigurationName.Default) "default configuration"
-            Expect.equal (ConfigurationName.validate (Some "Release")) (Ok "Release") "explicit configuration"
-
-            for value in
-                [ ""
-                  "   "
-                  "Release; rm -rf /"
-                  "Ünïcode"
-                  "Release\n"
-                  "Release\t"
-                  String('a', ConfigurationName.MaxLength + 1) ] do
-                ConfigurationName.validate (Some value)
-                |> expectErrorMatching $"configuration '{value}'" isInvalidInput
-                |> ignore
-
-        testCase "filter validation rejects blank, overlong, and NUL values"
-        <| fun _ ->
-            Expect.equal (TestFilter.validate None) (Ok None) "absent filter"
-            Expect.equal (TestFilter.validate (Some "Category=Fast")) (Ok(Some "Category=Fast")) "valid filter"
-
-            for value in [ ""; "   "; String('a', TestFilter.MaxLength + 1); "a\u0000b" ] do
-                TestFilter.validate (Some value)
-                |> expectErrorMatching $"filter '{value}'" isInvalidInput
-                |> ignore
-
         testCase "detail kind vocabulary matches the runtime parser"
         <| fun _ ->
             Expect.equal

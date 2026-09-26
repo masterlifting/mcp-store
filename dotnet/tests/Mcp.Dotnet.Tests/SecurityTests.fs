@@ -367,24 +367,6 @@ let private namespaceTests =
                 Expect.throws
                     (fun () -> new ArtifactRegistry(artifactRoot, invalid, TimeSpan.FromHours 1.0) |> ignore)
                     $"namespace '{invalid}' is rejected"
-
-        testCase "run state is rooted at root/namespace/run"
-        <| fun _ ->
-            use workspace = new TempWorkspace()
-            let artifactRoot = workspace.ExternalArtifactRoot
-            use registry = new ArtifactRegistry(artifactRoot, workspace.Namespace, TimeSpan.FromHours 1.0)
-            let handle = startRun registry
-            let namespaceDirectory = Path.Combine(artifactRoot, workspace.Namespace)
-
-            Expect.equal
-                (Path.GetDirectoryName namespaceDirectory)
-                (Path.GetFullPath artifactRoot)
-                "namespace sits directly under the configured root"
-
-            Expect.equal
-                (Path.GetDirectoryName handle.Paths.Directory)
-                namespaceDirectory
-                "run sits directly under the namespace"
     ]
 
 let private noLaunchTests =

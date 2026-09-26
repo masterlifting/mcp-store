@@ -68,7 +68,7 @@ dotnet fsi dotnet/tests/ProvenanceTests.fsx
 
 ## Producer packaging
 
-From the repository root, build and pin the corrected immutable `v1.0.3.zip`
+From the repository root, build and pin the immutable `v1.0.3.zip`
 release with:
 
 ```text

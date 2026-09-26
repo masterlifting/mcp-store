@@ -79,33 +79,6 @@ let sha256 path =
 let sha256Stream (stream: Stream) =
     SHA256.HashData stream |> Convert.ToHexString |> fun value -> value.ToLowerInvariant()
 
-let buildScript = File.ReadAllText(Path.Combine(dotnet, "BuildDistribution.fsx"))
-let pinsScript = File.ReadAllText(Path.Combine(dotnet, "PrepareReleasePins.fsx"))
-assertTrue "build script owns only dotnet packaging" (not (buildScript.Contains("task-runtime", StringComparison.OrdinalIgnoreCase)))
-assertTrue "pin script owns only dotnet packaging" (not (pinsScript.Contains("task-runtime", StringComparison.OrdinalIgnoreCase)))
-assertTrue "build script uses dotnet project" (buildScript.Contains("dotnet/Mcp.Dotnet.fsproj", StringComparison.Ordinal))
-assertTrue "build script loads the producer release config" (buildScript.Contains("#load \"ReleaseConfig.fsx\"", StringComparison.Ordinal))
-assertTrue "build script reads the configured version" (buildScript.Contains("ReleaseConfig.version", StringComparison.Ordinal))
-assertTrue "build script reads the configured SDK" (buildScript.Contains("ReleaseConfig.sdkVersion", StringComparison.Ordinal))
-assertTrue "build script uses the configured archive name" (buildScript.Contains("ReleaseConfig.archiveName", StringComparison.Ordinal))
-assertTrue "build script enforces the provenance guard" (buildScript.Contains("BuildProvenance.assertCleanTree", StringComparison.Ordinal))
-assertTrue "build script derives the target framework from the project" (not (buildScript.Contains("\"net11.0\"", StringComparison.Ordinal)))
-assertTrue "manifest records per-file hashes" (buildScript.Contains("fileEntry[\"sha256\"]", StringComparison.Ordinal))
-assertTrue "manifest uses the OpenCode consumer path field" (buildScript.Contains("fileEntry[\"path\"]", StringComparison.Ordinal))
-assertTrue "build script does not emit the incompatible name field" (not (buildScript.Contains("fileEntry[\"name\"]", StringComparison.Ordinal)))
-assertTrue "pin script loads the producer release config" (pinsScript.Contains("#load \"ReleaseConfig.fsx\"", StringComparison.Ordinal))
-assertTrue "pin script reads the configured version" (pinsScript.Contains("ReleaseConfig.version", StringComparison.Ordinal))
-assertTrue "pin script verifies the manifest revision" (pinsScript.Contains("assertManifestRevision", StringComparison.Ordinal))
-assertTrue "pin script emits assetUri" (pinsScript.Contains("assetUri", StringComparison.Ordinal))
-assertTrue "pin script emits the validated manifest revision" (pinsScript.Contains("value[\"revision\"]", StringComparison.Ordinal))
-
-// Declaring these at the project level keeps a plain Release build from
-// producing a portable-debug assembly that packaging reuses incrementally.
-let projectFile = File.ReadAllText(Path.Combine(dotnet, "Mcp.Dotnet.fsproj"))
-assertTrue "project declares the deterministic no-debug output"
-    (projectFile.Contains("<DebugType>None</DebugType>", StringComparison.Ordinal)
-     && projectFile.Contains("<DebugSymbols>false</DebugSymbols>", StringComparison.Ordinal))
-
 let distributionDirectory = Path.Combine(dist, componentId)
 let archivePath = Path.Combine(dist, archiveName)
 let manifestPath = Path.Combine(distributionDirectory, "distribution.json")

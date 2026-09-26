@@ -1,10 +1,8 @@
 #load "ReleaseConfig.fsx"
-#load "../BuildProvenance.fsx"
+#load "../ReleasePins.fsx"
 
 open System
 open System.IO
-open System.Security.Cryptography
-open System.Text.Json
 open System.Text.Json.Nodes
 
 let root = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, ".."))
@@ -14,10 +12,6 @@ let componentId = ReleaseConfig.componentId
 let version = ReleaseConfig.version
 let archiveName = ReleaseConfig.archiveName
 let assetUri = ReleaseConfig.assetUri
-
-let sha256 path =
-    use stream = File.OpenRead path
-    SHA256.HashData stream |> Convert.ToHexString |> fun value -> value.ToLowerInvariant()
 
 let manifestPath = Path.Combine(dist, componentId, "distribution.json")
 let archivePath = Path.Combine(dist, archiveName)
@@ -37,23 +31,12 @@ if requiredManifestValue "id" <> componentId
    || requiredManifestValue "archive" <> archiveName then
     failwith "workflow v1 manifest identity does not match the release pin"
 
-BuildProvenance.assertCleanTree root
-let revision = BuildProvenance.assertManifestRevision manifestPath (BuildProvenance.committedHead root)
-
-let pins = JsonObject()
-let value = JsonObject()
-value["assetName"] <- JsonValue.Create archiveName
-value["assetUri"] <- JsonValue.Create assetUri
-value["archiveSha256"] <- JsonValue.Create(sha256 archivePath)
-value["manifestSha256"] <- JsonValue.Create(sha256 manifestPath)
-value["revision"] <- JsonValue.Create revision
-pins[componentId] <- value
-
-File.WriteAllText(output, pins.ToJsonString(JsonSerializerOptions(WriteIndented = true)))
+let archiveSha256, manifestSha256, revision =
+    ReleasePins.writeConsumerPins root manifestPath archivePath output componentId archiveName assetUri
 
 printfn
     "workflow asset=%s archiveSha256=%s manifestSha256=%s revision=%s"
     archiveName
-    (sha256 archivePath)
-    (sha256 manifestPath)
+    archiveSha256
+    manifestSha256
     revision
