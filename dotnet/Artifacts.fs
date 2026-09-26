@@ -114,51 +114,56 @@ type ArtifactRegistry(artifactRoot: string, retention: TimeSpan, ?quotas: Artifa
         | Ok _ -> ()
         | Error error -> invalidArg (nameof quotas) (VerificationError.message error)
 
-        Directory.CreateDirectory(artifactRoot) |> ignore
+    let allocateRun () : Result<RunHandle, VerificationError> =
+        try
+            if sumFiles artifactRoot >= effectiveQuotas.MaxAggregateBytes then
+                Error(ArtifactQuotaExceeded "aggregate artifact quota is already exhausted")
+            else
+                let mutable created = None
+                let mutable attempt = 0
+
+                while created.IsNone && attempt < 20 do
+                    attempt <- attempt + 1
+                    let runIdText = randomToken 32
+                    let directoryName = randomToken 18
+                    let directory = Path.GetFullPath(Path.Combine(artifactRoot, directoryName))
+
+                    try
+                        if not (pathIsWithin artifactRoot directory) then
+                            ()
+                        else
+                            Directory.CreateDirectory directory |> ignore
+
+                            if not (isReparse directory) then
+                                let runId = RunId.create runIdText
+                                let handle = { RunId = runId; Paths = createPaths directory }
+                                let entry =
+                                    { Handle = handle
+                                      Completed = None
+                                      CreatedAt = DateTimeOffset.UtcNow
+                                      CompletedAt = None }
+
+                                if entries.TryAdd(runIdText, entry) then
+                                    created <- Some handle
+                                else
+                                    Directory.Delete(directory, true)
+                            else
+                                Directory.Delete(directory, true)
+                    with _ -> ()
+
+                match created with
+                | Some handle -> Ok handle
+                | None -> Error(ArtifactFailure "could not allocate an isolated verification artifact directory")
+        with error -> Error(ArtifactFailure $"artifact quota could not be measured: {error.Message}")
 
     member _.Start(operation) : Result<RunHandle, VerificationError> =
         lock gate (fun () ->
             removeExpired DateTimeOffset.UtcNow
-            try
-                if sumFiles artifactRoot >= effectiveQuotas.MaxAggregateBytes then
-                    Error(ArtifactQuotaExceeded "aggregate artifact quota is already exhausted")
-                else
-                    let mutable created = None
-                    let mutable attempt = 0
 
-                    while created.IsNone && attempt < 20 do
-                        attempt <- attempt + 1
-                        let runIdText = randomToken 32
-                        let directoryName = randomToken 18
-                        let directory = Path.GetFullPath(Path.Combine(artifactRoot, directoryName))
-
-                        try
-                            if not (pathIsWithin artifactRoot directory) then
-                                ()
-                            else
-                                Directory.CreateDirectory directory |> ignore
-
-                                if not (isReparse directory) then
-                                    let runId = RunId.create runIdText
-                                    let handle = { RunId = runId; Paths = createPaths directory }
-                                    let entry =
-                                        { Handle = handle
-                                          Completed = None
-                                          CreatedAt = DateTimeOffset.UtcNow
-                                          CompletedAt = None }
-
-                                    if entries.TryAdd(runIdText, entry) then
-                                        created <- Some handle
-                                    else
-                                        Directory.Delete(directory, true)
-                                else
-                                    Directory.Delete(directory, true)
-                        with _ -> ()
-
-                    match created with
-                    | Some handle -> Ok handle
-                    | None -> Error(ArtifactFailure "could not allocate an isolated verification artifact directory")
-            with error -> Error(ArtifactFailure $"artifact quota could not be measured: {error.Message}"))
+            // The configured root is created on the first allocation, not at startup.
+            match PathAuthorization.ensureArtifactRoot artifactRoot with
+            | Error error -> Error error
+            | Ok() -> allocateRun ())
 
     member _.Complete(handle: RunHandle, evidence: RetainedEvidence) : Result<unit, VerificationError> =
         lock gate (fun () ->

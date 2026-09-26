@@ -516,7 +516,7 @@ let installedStatus =
 
         if mutexCount = 0 || lockCount > 0 then
             printfn "WARNING STALE-INSTALL: the local install predates the ephemeral-mutex coordination."
-            printfn "  W6 owns installing the regenerated v1.0.2 distribution; this run verified the repo-built package instead."
+            printfn "  W6 owns installing the regenerated v1.0.3 distribution; this run verified the repo-built package instead."
             Some false
         else
             Some true

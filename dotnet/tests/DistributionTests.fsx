@@ -1,5 +1,8 @@
 // Deterministic contract coverage for the component-local dotnet v1 producer.
-// The test regenerates v1.0.2 output and proves the stored v1.0.0 output is untouched.
+// The test regenerates the current v1 release output and verifies the
+// manifest/pin contract end-to-end.
+
+#load "../ReleaseConfig.fsx"
 
 open System
 open System.Diagnostics
@@ -11,14 +14,11 @@ open System.Text.Json.Nodes
 let repoRoot = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", ".."))
 let dotnet = Path.Combine(repoRoot, "dotnet")
 let dist = Path.Combine(dotnet, "dist")
-let componentId = "dotnet"
-let version = "1.0.2"
-let archiveName = $"{componentId}-v{version}.zip"
-let publishedFiles =
-    [ "FSharp.Core.dll"
-      "Mcp.Dotnet.deps.json"
-      "Mcp.Dotnet.dll"
-      "Mcp.Dotnet.runtimeconfig.json" ]
+let componentId = ReleaseConfig.componentId
+let version = ReleaseConfig.version
+let archiveName = ReleaseConfig.archiveName
+let assetUri = ReleaseConfig.assetUri
+let publishedFiles = ReleaseConfig.publishedFiles
 let archiveFiles = publishedFiles @ [ "NOTICE.txt"; "distribution.json" ] |> List.sort
 
 let assertTrue name condition =
@@ -81,20 +81,25 @@ let pinsScript = File.ReadAllText(Path.Combine(dotnet, "PrepareReleasePins.fsx")
 assertTrue "build script owns only dotnet packaging" (not (buildScript.Contains("task-runtime", StringComparison.OrdinalIgnoreCase)))
 assertTrue "pin script owns only dotnet packaging" (not (pinsScript.Contains("task-runtime", StringComparison.OrdinalIgnoreCase)))
 assertTrue "build script uses dotnet project" (buildScript.Contains("dotnet/Mcp.Dotnet.fsproj", StringComparison.Ordinal))
-assertTrue "build script names the corrected v1.0.2 release" (buildScript.Contains("let version = \"1.0.2\"", StringComparison.Ordinal))
-assertTrue "scripts use the canonical component identity" (buildScript.Contains("let componentId = \"dotnet\"", StringComparison.Ordinal))
+assertTrue "build script loads the producer release config" (buildScript.Contains("#load \"ReleaseConfig.fsx\"", StringComparison.Ordinal))
+assertTrue "build script reads the configured version" (buildScript.Contains("ReleaseConfig.version", StringComparison.Ordinal))
+assertTrue "build script reads the configured SDK" (buildScript.Contains("ReleaseConfig.sdkVersion", StringComparison.Ordinal))
+assertTrue "build script uses the configured archive name" (buildScript.Contains("ReleaseConfig.archiveName", StringComparison.Ordinal))
+assertTrue "build script enforces the provenance guard" (buildScript.Contains("BuildProvenance.assertCleanTree", StringComparison.Ordinal))
+assertTrue "build script derives the target framework from the project" (not (buildScript.Contains("\"net11.0\"", StringComparison.Ordinal)))
 assertTrue "manifest records per-file hashes" (buildScript.Contains("fileEntry[\"sha256\"]", StringComparison.Ordinal))
 assertTrue "manifest uses the OpenCode consumer path field" (buildScript.Contains("fileEntry[\"path\"]", StringComparison.Ordinal))
 assertTrue "build script does not emit the incompatible name field" (not (buildScript.Contains("fileEntry[\"name\"]", StringComparison.Ordinal)))
-assertTrue "pin script names the corrected v1.0.2 release" (pinsScript.Contains("let version = \"1.0.2\"", StringComparison.Ordinal))
+assertTrue "pin script loads the producer release config" (pinsScript.Contains("#load \"ReleaseConfig.fsx\"", StringComparison.Ordinal))
+assertTrue "pin script reads the configured version" (pinsScript.Contains("ReleaseConfig.version", StringComparison.Ordinal))
+assertTrue "pin script verifies the manifest revision" (pinsScript.Contains("assertManifestRevision", StringComparison.Ordinal))
+assertTrue "pin script emits assetUri" (pinsScript.Contains("assetUri", StringComparison.Ordinal))
 
 let distributionDirectory = Path.Combine(dist, componentId)
 let archivePath = Path.Combine(dist, archiveName)
 let manifestPath = Path.Combine(distributionDirectory, "distribution.json")
 let pinsPath = Path.Combine(dist, "consumer-pins.json")
-let priorArchivePath = Path.Combine(dist, "dotnet-v1.0.0.zip")
 let stalePublishPath = Path.Combine(distributionDirectory, "publish", "stale-output.txt")
-let priorArchiveContents = if File.Exists priorArchivePath then Some(File.ReadAllBytes priorArchivePath) else None
 
 try
     Directory.CreateDirectory(Path.GetDirectoryName stalePublishPath) |> ignore
@@ -108,18 +113,15 @@ finally
     if File.Exists stalePublishPath then
         File.Delete stalePublishPath
 
-match priorArchiveContents with
-| Some contents -> assertEqual "stored v1.0.0 archive is preserved" contents (File.ReadAllBytes priorArchivePath)
-| None -> ()
-
 for path in [ distributionDirectory; archivePath; manifestPath; pinsPath ] do
     assertTrue ($"required release artifact exists: {path}") (File.Exists path || Directory.Exists path)
 
 let manifest = JsonNode.Parse(File.ReadAllText manifestPath).AsObject()
 assertEqual "manifest id" componentId (manifest["id"].GetValue<string>())
-assertEqual "manifest version" version (manifest["version"].GetValue<string>())
+assertEqual "manifest version" ReleaseConfig.version (manifest["version"].GetValue<string>())
+assertEqual "manifest sdk" ReleaseConfig.sdkVersion (manifest["sdk"].GetValue<string>())
 assertEqual "manifest archive" archiveName (manifest["archive"].GetValue<string>())
-assertEqual "manifest entry DLL" "Mcp.Dotnet.dll" (manifest["entryDll"].GetValue<string>())
+assertEqual "manifest entry DLL" ReleaseConfig.entryDll (manifest["entryDll"].GetValue<string>())
 
 let manifestEntries =
     manifest["files"].AsArray()
@@ -179,6 +181,7 @@ let pinKeys = pins |> Seq.map (fun pair -> pair.Key) |> Set.ofSeq
 assertEqual "consumer pins contain only dotnet" (Set.singleton componentId) pinKeys
 let pin = pins[componentId].AsObject()
 assertEqual "pin asset name" archiveName (pin["assetName"].GetValue<string>())
+assertEqual "pin asset uri" assetUri (pin["assetUri"].GetValue<string>())
 assertEqual "pin archive SHA-256" (sha256 archivePath) (pin["archiveSha256"].GetValue<string>())
 assertEqual "pin manifest SHA-256" (sha256 manifestPath) (pin["manifestSha256"].GetValue<string>())
 

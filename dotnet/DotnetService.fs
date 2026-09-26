@@ -47,8 +47,8 @@ module private DetailSource =
 
 type DotnetService(
     workspaceRoot: string,
+    artifactRoot: string,
     ?dotnetHost: string,
-    ?artifactRoot: string,
     ?budgets: DotnetBudgets,
     ?retention: TimeSpan
 ) =
@@ -67,11 +67,8 @@ type DotnetService(
         | Ok _ -> ()
         | Error error -> invalidArg (nameof budgets) (VerificationError.message error)
 
-    let requestedArtifactRoot =
-        artifactRoot |> Option.defaultValue (Path.Combine(root, ".opencode", "dotnet"))
-
     let rootForArtifacts =
-        match PathAuthorization.validateArtifactRoot root requestedArtifactRoot with
+        match PathAuthorization.validateArtifactRoot root artifactRoot with
         | Ok value -> value
         | Error error -> invalidArg (nameof artifactRoot) (VerificationError.message error)
 

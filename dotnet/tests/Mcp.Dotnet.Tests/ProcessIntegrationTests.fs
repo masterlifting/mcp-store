@@ -69,17 +69,20 @@ let tests =
                     Expect.isTrue (details.Items |> List.exists (fun item -> item.StartsWith "stdout:")) "stdout retained"
                 })
 
-            testCaseTask "build ignores a workspace global.json SDK selection" (fun () ->
+            testCaseTask "build uses the workspace working directory and respects its global.json" (fun () ->
                 task {
                     use workspace = new TempWorkspace()
                     workspace.CreateClassLibrary("lib", validClassSource) |> ignore
+                    // An unavailable pinned SDK fails the build only when the child
+                    // resolves global.json from the workspace working directory.
                     workspace.Write("global.json", "{\"sdk\":{\"version\":\"99.99.99\",\"rollForward\":\"disable\"}}")
                     |> ignore
                     use service = serviceFor workspace
 
                     let! result = service.VerifyBuild(buildOptions (Some "lib.csproj"))
                     let compact = result |> expectOk "build with workspace global.json"
-                    Expect.equal compact.Status VerificationStatus.Succeeded "workspace SDK selection was isolated"
+                    Expect.equal compact.Status VerificationStatus.Failed "the workspace SDK selection is honored"
+                    Expect.isTrue (compact.ExitCode |> Option.exists (fun code -> code <> 0)) "non-zero exit"
                 })
 
             testCaseTask "an external artifact root retains the normal evidence contract" (fun () ->
@@ -109,6 +112,81 @@ let tests =
                     finally
                         if Directory.Exists externalRoot then
                             Directory.Delete(externalRoot, true)
+                })
+
+            testCase "startup does not create the configured artifact root"
+            <| fun _ ->
+                use workspace = new TempWorkspace()
+                let artifactRoot = Path.Combine(workspace.Root, "artifacts")
+
+                use _service =
+                    new DotnetService(
+                        workspace.Root,
+                        dotnetHost = dotnetHost (),
+                        artifactRoot = artifactRoot,
+                        retention = TimeSpan.FromHours 1.0
+                    )
+
+                Expect.isFalse (Directory.Exists artifactRoot) "startup creates no artifact directory"
+
+            testCaseTask "the first build creates only producer-owned state under the configured root" (fun () ->
+                task {
+                    use workspace = new TempWorkspace()
+                    workspace.CreateClassLibrary("lib", validClassSource) |> ignore
+                    let artifactRoot = Path.Combine(workspace.Root, "artifacts")
+
+                    use service =
+                        new DotnetService(
+                            workspace.Root,
+                            dotnetHost = dotnetHost (),
+                            artifactRoot = artifactRoot,
+                            retention = TimeSpan.FromHours 1.0
+                        )
+
+                    Expect.isFalse (Directory.Exists artifactRoot) "the root is absent before the first run"
+
+                    let! result = service.VerifyBuild(buildOptions (Some "lib.csproj"))
+                    result |> expectOk "lazy root build" |> ignore
+
+                    Expect.isTrue (Directory.Exists artifactRoot) "the root is created on first allocation"
+
+                    let entries = Directory.EnumerateFileSystemEntries artifactRoot |> Seq.toList
+                    Expect.isTrue (entries.Length >= 1) "at least one run directory exists"
+
+                    Expect.isTrue
+                        (entries |> List.forall (fun path -> Directory.Exists path))
+                        "the root contains only producer-owned run directories"
+                })
+
+            testCaseTask "session cleanup removes producer artifacts but not unrelated files" (fun () ->
+                task {
+                    use workspace = new TempWorkspace()
+                    workspace.CreateClassLibrary("lib", validClassSource) |> ignore
+                    let artifactRoot = Path.Combine(workspace.Root, "artifacts")
+                    let unrelated = Path.Combine(artifactRoot, "consumer-data.txt")
+
+                    use service =
+                        new DotnetService(
+                            workspace.Root,
+                            dotnetHost = dotnetHost (),
+                            artifactRoot = artifactRoot,
+                            retention = TimeSpan.FromHours 1.0
+                        )
+
+                    let! result = service.VerifyBuild(buildOptions (Some "lib.csproj"))
+                    result |> expectOk "build before cleanup" |> ignore
+
+                    let runDirectories = Directory.EnumerateDirectories artifactRoot |> Seq.toList
+                    Expect.isTrue (runDirectories.Length >= 1) "producer state exists before cleanup"
+                    File.WriteAllText(unrelated, "consumer data")
+
+                    service.EndSession()
+
+                    Expect.isTrue (File.Exists unrelated) "unrelated files are not removed"
+
+                    Expect.isTrue
+                        (runDirectories |> List.forall (fun path -> not (Directory.Exists path)))
+                        "producer run directories are removed"
                 })
 
             testCaseTask "failing build reports bounded diagnostics and retrievable details" (fun () ->

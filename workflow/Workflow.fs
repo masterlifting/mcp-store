@@ -6033,29 +6033,32 @@ let private validateTaskDirectory (taskDirectory: string) : Result<unit, Runtime
         Error(PersistenceFailure $"could not inspect task directory: {error.Message}")
 
 let private withExistingSidecar root taskDirectory (path: string) action =
-
-    withLock path (fun () ->
-        let withinDirectoryBoundary action =
-            if OperatingSystem.IsWindows() then
-                withWindowsDirectoryBoundaries root taskDirectory false action
-            else
-                action ()
-
-        withinDirectoryBoundary (fun () ->
-            result {
-                do! validateTaskDirectory taskDirectory
-
-                if not (File.Exists path) then
-                    return! Error(NotFound $"runtime sidecar does not exist: {path}")
-
-                let! result = action ()
-
-                if File.Exists path then
-                    return result
+    // A missing task directory fails closed before any Windows handle is opened so
+    // the not-found contract is identical on every platform.
+    if not (Directory.Exists taskDirectory) then
+        Error(NotFound $"runtime sidecar does not exist: {path}")
+    else
+        withLock path (fun () ->
+            let withinDirectoryBoundary action =
+                if OperatingSystem.IsWindows() then
+                    withWindowsDirectoryBoundaries root taskDirectory false action
                 else
-                    return! Error(NotFound $"runtime sidecar does not exist: {path}")
-            })
-        )
+                    action ()
+
+            withinDirectoryBoundary (fun () ->
+                result {
+                    do! validateTaskDirectory taskDirectory
+
+                    if not (File.Exists path) then
+                        return! Error(NotFound $"runtime sidecar does not exist: {path}")
+
+                    let! result = action ()
+
+                    if File.Exists path then
+                        return result
+                    else
+                        return! Error(NotFound $"runtime sidecar does not exist: {path}")
+                }))
 
 let private atomicWrite (path: string) (content: string) =
     let directory = Path.GetDirectoryName path

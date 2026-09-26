@@ -147,23 +147,27 @@ let private targetTests =
 
 let private artifactRootTests =
     testList "artifact root authorization" [
-        testCase "relative artifact root inside the workspace is created"
+        testCase "relative artifact root inside the workspace resolves without eager creation"
         <| fun _ ->
             use workspace = new TempWorkspace()
             let root = PathAuthorization.validateArtifactRoot workspace.Root ".mcp-store/dotnet" |> expectOk "artifact root"
-            Expect.isTrue (Directory.Exists root) "artifact directory created"
             Expect.isTrue (root.StartsWith(workspace.Root, StringComparison.OrdinalIgnoreCase)) "contained artifact root"
+            Expect.isFalse (Directory.Exists root) "validation does not create the root"
+            Expect.isOk (PathAuthorization.ensureArtifactRoot root) "the root is materialized on first allocation"
+            Expect.isTrue (Directory.Exists root) "artifact directory created lazily"
 
-        testCase "an explicitly configured external artifact root is canonicalized and created"
+        testCase "an explicitly configured external artifact root is canonicalized without eager creation"
         <| fun _ ->
             use workspace = new TempWorkspace()
             let outside = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"))
 
             try
                 let root = PathAuthorization.validateArtifactRoot workspace.Root outside |> expectOk "external artifact root"
-                Expect.isTrue (Directory.Exists root) "external artifact directory created"
+                Expect.isFalse (Directory.Exists root) "validation does not create the external root"
                 Expect.isFalse (root.StartsWith(workspace.Root, StringComparison.OrdinalIgnoreCase)) "external artifact root is not workspace-local"
                 Expect.equal root (Path.GetFullPath outside) "external artifact root is canonical"
+                Expect.isOk (PathAuthorization.ensureArtifactRoot root) "the external root is materialized on first allocation"
+                Expect.isTrue (Directory.Exists root) "external artifact directory created lazily"
             finally
                 if Directory.Exists outside then
                     Directory.Delete(outside, true)

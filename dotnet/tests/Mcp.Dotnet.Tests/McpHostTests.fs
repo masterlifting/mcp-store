@@ -50,7 +50,7 @@ let private runHostToCompletion (arguments: string list) (workingDirectory: stri
 
     child.ExitCode, stdout, stderr
 
-type private McpHostProcess(workingDirectory: string, ?injectedHost: string, ?artifactRoot: string) =
+type private McpHostProcess(workingDirectory: string, artifactRoot: string, ?injectedHost: string) =
     let dllPath = dotnetMcpDllPath ()
 
     do
@@ -63,13 +63,8 @@ type private McpHostProcess(workingDirectory: string, ?injectedHost: string, ?ar
         startInfo.ArgumentList.Add dllPath
         startInfo.ArgumentList.Add "--dotnet-host"
         startInfo.ArgumentList.Add(defaultArg injectedHost (dotnetHost ()))
-
-        match artifactRoot with
-        | Some root ->
-            startInfo.ArgumentList.Add "--artifact-root"
-            startInfo.ArgumentList.Add root
-        | None -> ()
-
+        startInfo.ArgumentList.Add "--artifact-root"
+        startInfo.ArgumentList.Add artifactRoot
         startInfo.WorkingDirectory <- workingDirectory
         startInfo.UseShellExecute <- false
         startInfo.CreateNoWindow <- true
@@ -147,6 +142,9 @@ type private McpHostProcess(workingDirectory: string, ?injectedHost: string, ?ar
             hostProcess.Dispose()
             pending.Dispose()
 
+let private workspaceArtifactRoot (workspace: TempWorkspace) =
+    Path.Combine(workspace.Root, ".mcp-store", "dotnet")
+
 let private initializeRequest =
     """{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"dotnet-mcp-tests","version":"1"}}}"""
 
@@ -175,23 +173,31 @@ let private stop (host: McpHostProcess) =
 let private hostTests =
     testSequenced
         (testList "MCP stdio host" [
-            testCase "the host requires exactly one injected --dotnet-host"
+            testCase "the host requires both --dotnet-host and --artifact-root"
             <| fun _ ->
                 use workspace = new TempWorkspace()
                 workspace.CreateClassLibrary("lib", validClassSource) |> ignore
-                let exitCode, stdout, stderr = runHostToCompletion [] workspace.Root
 
-                Expect.equal exitCode 1 "startup rejected"
-                Expect.isTrue (stderr.Contains("requires exactly one injected --dotnet-host")) "actionable startup diagnostic"
+                let missingRootCode, missingRootStdout, missingRootStderr =
+                    runHostToCompletion [ "--dotnet-host"; dotnetHost () ] workspace.Root
+
+                Expect.equal missingRootCode 1 "startup rejected without an artifact root"
+                Expect.isTrue (missingRootStderr.Contains("--artifact-root")) "startup names the missing flag"
+                Expect.isFalse (missingRootStdout.Contains("\"jsonrpc\"")) "no protocol traffic on rejected startup"
+
+                let exitCode, stdout, stderr = runHostToCompletion [] workspace.Root
+                Expect.equal exitCode 1 "startup rejected without flags"
+                Expect.isTrue (stderr.Contains("requires --dotnet-host")) "actionable startup diagnostic"
                 Expect.isFalse (stdout.Contains("\"jsonrpc\"")) "no protocol traffic on rejected startup"
 
             testCase "a workspace-local injected host is rejected at startup"
             <| fun _ ->
                 use workspace = new TempWorkspace()
                 let decoy = workspace.Write("dotnet.exe", "decoy") |> Path.GetFullPath
+                let artifactRoot = workspaceArtifactRoot workspace
 
                 let exitCode, stdout, stderr =
-                    runHostToCompletion [ "--dotnet-host"; decoy ] workspace.Root
+                    runHostToCompletion [ "--dotnet-host"; decoy; "--artifact-root"; artifactRoot ] workspace.Root
 
                 Expect.equal exitCode 1 "startup rejected"
                 Expect.isTrue (stderr.Contains("dotnet MCP startup failed")) "bounded startup failure"
@@ -206,7 +212,7 @@ let private hostTests =
                         Path.Combine(Path.GetTempPath(), "mcp-dotnet-host-artifacts", Guid.NewGuid().ToString("N"))
 
                     try
-                        use host = new McpHostProcess(workspace.Root, artifactRoot = externalRoot)
+                        use host = new McpHostProcess(workspace.Root, externalRoot)
                         host.Send initializeRequest
                         host.ReadResponse(1, 5000) |> ignore
                         host.Send initializedNotification
@@ -243,7 +249,7 @@ let private hostTests =
                     File.WriteAllText(fake, "not a portable executable")
 
                     try
-                        use host = new McpHostProcess(workspace.Root, injectedHost = fake)
+                        use host = new McpHostProcess(workspace.Root, workspaceArtifactRoot workspace, injectedHost = fake)
                         host.Send initializeRequest
                         host.ReadResponse(1, 5000) |> ignore
                         host.Send initializedNotification
@@ -270,7 +276,7 @@ let private hostTests =
                 task {
                     use workspace = new TempWorkspace()
                     workspace.CreateClassLibrary("lib", validClassSource) |> ignore
-                    use host = new McpHostProcess(workspace.Root)
+                    use host = new McpHostProcess(workspace.Root, workspaceArtifactRoot workspace)
 
                     host.Send initializeRequest
                     let initialized = host.ReadResponse(1, 5000)
@@ -300,7 +306,7 @@ let private hostTests =
                 task {
                     use workspace = new TempWorkspace()
                     workspace.CreateClassLibrary("lib", validClassSource) |> ignore
-                    use host = new McpHostProcess(workspace.Root)
+                    use host = new McpHostProcess(workspace.Root, workspaceArtifactRoot workspace)
 
                     host.Send initializeRequest
                     host.ReadResponse(1, 5000) |> ignore
@@ -324,7 +330,7 @@ let private hostTests =
                 task {
                     use workspace = new TempWorkspace()
                     workspace.CreateClassLibrary("lib", validClassSource) |> ignore
-                    use host = new McpHostProcess(workspace.Root)
+                    use host = new McpHostProcess(workspace.Root, workspaceArtifactRoot workspace)
 
                     host.Send initializeRequest
                     host.ReadResponse(1, 5000) |> ignore
@@ -360,7 +366,7 @@ let private hostTests =
                 task {
                     use workspace = new TempWorkspace()
                     workspace.CreateClassLibrary("lib", validClassSource) |> ignore
-                    use host = new McpHostProcess(workspace.Root)
+                    use host = new McpHostProcess(workspace.Root, workspaceArtifactRoot workspace)
 
                     host.Send initializeRequest
                     host.ReadResponse(1, 5000) |> ignore
@@ -383,7 +389,7 @@ let private hostTests =
                     use workspace = new TempWorkspace()
                     let projectPath = workspace.CreateXunitTestProject("sample", "sample")
                     let target = Path.GetRelativePath(workspace.Root, projectPath).Replace('\\', '/')
-                    use host = new McpHostProcess(workspace.Root)
+                    use host = new McpHostProcess(workspace.Root, workspaceArtifactRoot workspace)
 
                     host.Send initializeRequest
                     host.ReadResponse(1, 5000) |> ignore
@@ -400,11 +406,7 @@ let private hostTests =
                     Expect.isNull (payload.["trxUnavailableReason"]) "no TRX reason when retained"
 
                     let trxArtifacts =
-                        Directory.EnumerateFiles(
-                            Path.Combine(workspace.Root, ".opencode", "dotnet"),
-                            "*.trx",
-                            SearchOption.AllDirectories
-                        )
+                        Directory.EnumerateFiles(workspaceArtifactRoot workspace, "*.trx", SearchOption.AllDirectories)
                         |> Seq.toList
 
                     Expect.isTrue (trxArtifacts.Length >= 1) "a TRX artifact was retained"
@@ -433,7 +435,7 @@ let private hostTests =
                 task {
                     use workspace = new TempWorkspace()
                     workspace.CreateClassLibrary("lib", validClassSource) |> ignore
-                    use host = new McpHostProcess(workspace.Root)
+                    use host = new McpHostProcess(workspace.Root, workspaceArtifactRoot workspace)
 
                     host.Send initializeRequest
                     host.ReadResponse(1, 5000) |> ignore
@@ -458,7 +460,7 @@ let private hostTests =
                 task {
                     use workspace = new TempWorkspace()
                     workspace.CreateClassLibrary("lib", manyErrorSource 120 300) |> ignore
-                    use host = new McpHostProcess(workspace.Root)
+                    use host = new McpHostProcess(workspace.Root, workspaceArtifactRoot workspace)
 
                     host.Send initializeRequest
                     host.ReadResponse(1, 5000) |> ignore

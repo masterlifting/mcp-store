@@ -274,9 +274,9 @@ module private McpHost =
 
     let private toolsJson =
         """[
-              {"name":"build","description":"Run the capability-controlled dotnet build and return a bounded semantic result.","inputSchema":{"type":"object","additionalProperties":false,"properties":{"target":{"type":"string","description":"Workspace-relative .NET project or solution file."},"configuration":{"type":"string","description":"Safe configuration name; defaults to Release."},"noRestore":{"type":"boolean","description":"Skip restore; defaults to false."},"timeoutMs":{"type":"integer","minimum":100,"maximum":1800000,"description":"Timeout in milliseconds; defaults to five minutes."}}}},
-              {"name":"test","description":"Run the capability-controlled dotnet test and return bounded counts and failures.","inputSchema":{"type":"object","additionalProperties":false,"properties":{"target":{"type":"string","description":"Workspace-relative .NET project or solution file."},"configuration":{"type":"string","description":"Safe configuration name; defaults to Release."},"filter":{"type":"string","description":"One controlled dotnet test filter value."},"noBuild":{"type":"boolean","description":"Skip build; defaults to false."},"timeoutMs":{"type":"integer","minimum":100,"maximum":1800000,"description":"Timeout in milliseconds; defaults to five minutes."}}}},
-              {"name":"details","description":"Read one bounded page of retained evidence by opaque run ID.","inputSchema":{"type":"object","additionalProperties":false,"required":["runId","kind"],"properties":{"runId":{"type":"string"},"kind":{"type":"string","enum":["errors","warnings","failed-tests","output"]},"offset":{"type":"integer","minimum":0,"default":0},"limit":{"type":"integer","minimum":1,"maximum":128}}}}
+              {"name":"build","description":"Run the capability-controlled dotnet build and return a bounded semantic result.","inputSchema":{"type":"object","additionalProperties":false,"properties":{"target":{"type":"string","description":"Workspace-relative .NET project or solution file."},"configuration":{"type":"string","minLength":1,"maxLength":64,"pattern":"^[A-Za-z0-9_.-]+$","default":"Release","description":"Safe configuration name; defaults to Release."},"noRestore":{"type":"boolean","default":false,"description":"Skip restore; defaults to false."},"timeoutMs":{"type":"integer","minimum":100,"maximum":1800000,"default":300000,"description":"Timeout in milliseconds; defaults to five minutes."}}}},
+              {"name":"test","description":"Run the capability-controlled dotnet test and return bounded counts and failures.","inputSchema":{"type":"object","additionalProperties":false,"properties":{"target":{"type":"string","description":"Workspace-relative .NET project or solution file."},"configuration":{"type":"string","minLength":1,"maxLength":64,"pattern":"^[A-Za-z0-9_.-]+$","default":"Release","description":"Safe configuration name; defaults to Release."},"filter":{"type":"string","minLength":1,"maxLength":512,"description":"One controlled dotnet test filter value."},"noBuild":{"type":"boolean","default":false,"description":"Skip build; defaults to false."},"timeoutMs":{"type":"integer","minimum":100,"maximum":1800000,"default":300000,"description":"Timeout in milliseconds; defaults to five minutes."}}}},
+              {"name":"details","description":"Read one bounded page of retained evidence by opaque run ID.","inputSchema":{"type":"object","additionalProperties":false,"required":["runId","kind"],"properties":{"runId":{"type":"string","minLength":1},"kind":{"type":"string","enum":["errors","warnings","failed-tests","output"]},"offset":{"type":"integer","minimum":0,"default":0},"limit":{"type":"integer","minimum":1,"maximum":128,"default":32}}}}
             ]"""
 
     let private initializeResult =
@@ -502,12 +502,13 @@ module Program =
             | Error error -> startupFailure (VerificationError.message error)
             | Ok validatedHost ->
                 try
-                    let service =
-                        match artifactRoot with
-                        | Some root -> new DotnetService(Environment.CurrentDirectory, dotnetHost = validatedHost, artifactRoot = root)
-                        | None -> new DotnetService(Environment.CurrentDirectory, dotnetHost = validatedHost)
+                    use service =
+                        new DotnetService(
+                            Environment.CurrentDirectory,
+                            dotnetHost = validatedHost,
+                            artifactRoot = artifactRoot
+                        )
 
-                    use service = service
                     McpHost.run service
                     0
                 with error ->
@@ -518,6 +519,7 @@ module Program =
                     startupFailure message
 
         match args with
-        | [| "--dotnet-host"; injectedHost |] -> startService injectedHost None
-        | [| "--dotnet-host"; injectedHost; "--artifact-root"; artifactRoot |] -> startService injectedHost (Some artifactRoot)
-        | _ -> startupFailure "the dotnet MCP requires exactly one injected --dotnet-host absolute path, optionally followed by --artifact-root <path>"
+        | [| "--dotnet-host"; injectedHost; "--artifact-root"; artifactRoot |] ->
+            startService injectedHost artifactRoot
+        | _ ->
+            startupFailure "the dotnet MCP requires --dotnet-host <absolute-path> and --artifact-root <absolute-path>"

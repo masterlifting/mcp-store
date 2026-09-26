@@ -1,3 +1,6 @@
+#load "ReleaseConfig.fsx"
+#load "../BuildProvenance.fsx"
+
 open System
 open System.Diagnostics
 open System.IO
@@ -9,18 +12,15 @@ open System.Text.Json.Nodes
 let root = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, ".."))
 let dotnet = Path.Combine(root, "dotnet")
 let outputRoot = Path.Combine(dotnet, "dist")
-let sdk = "11.0.100-rc.1.26425.128"
-let version = "1.0.2"
-let componentId = "dotnet"
-let entryDll = "Mcp.Dotnet.dll"
+let sdk = ReleaseConfig.sdkVersion
+let version = ReleaseConfig.version
+let componentId = ReleaseConfig.componentId
+let entryDll = ReleaseConfig.entryDll
+let archiveName = ReleaseConfig.archiveName
 
 // The allowlist is the runtime contract. Source, project, build, and debug
 // files produced by publish are intentionally excluded from the archive.
-let publishedFiles =
-    [ "FSharp.Core.dll"
-      "Mcp.Dotnet.deps.json"
-      "Mcp.Dotnet.dll"
-      "Mcp.Dotnet.runtimeconfig.json" ]
+let publishedFiles = ReleaseConfig.publishedFiles
 
 let run arguments =
     let info = ProcessStartInfo("dotnet")
@@ -37,20 +37,8 @@ let run arguments =
     if childProcess.ExitCode <> 0 then
         failwithf "dotnet %s failed: %s" (String.concat " " arguments) (error.Result.Trim())
 
-let revision =
-    let info = ProcessStartInfo("git", "rev-parse HEAD")
-    info.WorkingDirectory <- root
-    info.UseShellExecute <- false
-    info.RedirectStandardOutput <- true
-    info.RedirectStandardError <- true
-    use childProcess = Process.Start info
-    let value = childProcess.StandardOutput.ReadToEnd().Trim()
-    childProcess.WaitForExit()
-
-    if childProcess.ExitCode <> 0 || value.Length <> 40 then
-        failwith "producer revision could not be resolved"
-
-    value
+BuildProvenance.assertCleanTree root
+let revision = BuildProvenance.committedHead root
 
 let sha256 path =
     use stream = File.OpenRead path
@@ -100,8 +88,6 @@ let publish () =
         "dotnet/Mcp.Dotnet.fsproj"
         "--configuration"
         "Release"
-        "--framework"
-        "net11.0"
         "--self-contained"
         "false"
         "-p:UseAppHost=false"
@@ -137,7 +123,6 @@ let publish () =
 
     assertExactFiles "dotnet v1 staging contains unexpected files" (publishedFiles @ [ "NOTICE.txt" ] |> List.sort) stagedFiles
 
-    let archiveName = $"{componentId}-v{version}.zip"
     let manifest = JsonObject()
     manifest["schemaVersion"] <- JsonValue.Create 1
     manifest["id"] <- JsonValue.Create componentId
