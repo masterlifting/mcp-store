@@ -291,7 +291,7 @@ let private trustedHostTests =
 
             Invocation.build
                 workspace.Root
-                (Path.Combine(Path.GetTempPath(), "mcp-verifier-host", "missing-dotnet.exe"))
+                (Path.Combine(Path.GetTempPath(), "mcp-dotnet-host", "missing-dotnet.exe"))
                 Budgets.Defaults
                 defaultBuildOptions
                 (pathsFor workspace)
@@ -316,7 +316,7 @@ let private trustedHostTests =
             use workspace = new TempWorkspace()
             workspace.CreateClassLibrary("lib", validClassSource) |> ignore
             let host = dotnetHost ()
-            let outsideRoot = Path.Combine(Path.GetTempPath(), "mcp-verifier-host", Guid.NewGuid().ToString("N"))
+            let outsideRoot = Path.Combine(Path.GetTempPath(), "mcp-dotnet-host", Guid.NewGuid().ToString("N"))
             Directory.CreateDirectory outsideRoot |> ignore
             let link = Path.Combine(outsideRoot, "host-link")
 

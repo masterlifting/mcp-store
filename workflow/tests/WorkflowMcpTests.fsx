@@ -349,6 +349,43 @@ try
         "task_apply schema enumerates command variants"
         (not (isJsonNull applyTool.["inputSchema"].["properties"].["command"].["oneOf"]))
 
+    // W3/AC17: wire-level guard for the live-usage schema gaps. The published
+    // command schema must keep every required name declared and expose the
+    // addGuard contract-patch variant and structured resolve-question fields.
+    let commandVariants =
+        applyTool.["inputSchema"].["properties"].["command"].["oneOf"].AsArray()
+
+    let findCommandVariant name =
+        commandVariants
+        |> Seq.find (fun variant -> nodeString variant.["properties"].["type"].["const"] = name)
+
+    let resolveQuestion = findCommandVariant "resolve-question"
+
+    let resolveQuestionProperties =
+        resolveQuestion.["properties"].AsObject()
+        |> Seq.map (fun entry -> entry.Key)
+        |> Set.ofSeq
+
+    for requiredName in resolveQuestion.["required"].AsArray() |> Seq.map nodeString do
+        assertTrue
+            $"resolve-question required '{requiredName}' is declared"
+            (Set.contains requiredName resolveQuestionProperties)
+
+    assertEqual
+        "resolve-question questionId pattern"
+        "^Q[0-9]+$"
+        (nodeString resolveQuestion.["properties"].["questionId"].["pattern"])
+
+    let patchVariants =
+        (findCommandVariant "apply-contract-patch").["properties"].["patch"].["oneOf"].AsArray()
+
+    let patchTypes =
+        patchVariants
+        |> Seq.map (fun variant -> nodeString variant.["properties"].["type"].["const"])
+        |> Set.ofSeq
+
+    assertTrue "apply-contract-patch exposes addGuard" (Set.contains "addGuard" patchTypes)
+
     let createTool = tools |> Seq.find (fun tool -> nodeString tool.["name"] = "task_create")
     assertEqual "task_create schema requires acceptance criteria" true (createTool.["inputSchema"].["properties"].["acceptanceCriteria"].["minItems"].GetValue<int>() > 0)
     assertEqual "task_create schema requires work items" true (createTool.["inputSchema"].["properties"].["workItems"].["minItems"].GetValue<int>() > 0)

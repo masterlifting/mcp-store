@@ -1,3 +1,6 @@
+#load "ReleaseConfig.fsx"
+#load "../BuildProvenance.fsx"
+
 open System
 open System.Diagnostics
 open System.IO
@@ -9,19 +12,16 @@ open System.Text.Json.Nodes
 let root = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, ".."))
 let workflow = Path.Combine(root, "workflow")
 let outputRoot = Path.Combine(workflow, "dist")
-let sdk = "11.0.100-rc.1.26425.128"
-let version = "1.0.1"
-let componentId = "workflow"
-let entryDll = "Mcp.Workflow.dll"
+let sdk = ReleaseConfig.sdkVersion
+let version = ReleaseConfig.version
+let componentId = ReleaseConfig.componentId
+let entryDll = ReleaseConfig.entryDll
+let archiveName = ReleaseConfig.archiveName
 
 // The publish output is intentionally narrowed to the files consumed by the
 // framework-dependent Workflow launcher. Keeping this list component local
 // prevents a future producer from silently acquiring ownership here.
-let publishedFiles =
-    [ "FSharp.Core.dll"
-      "Mcp.Workflow.deps.json"
-      "Mcp.Workflow.dll"
-      "Mcp.Workflow.runtimeconfig.json" ]
+let publishedFiles = ReleaseConfig.publishedFiles
 
 let run arguments =
     let info = ProcessStartInfo("dotnet")
@@ -38,20 +38,8 @@ let run arguments =
     if childProcess.ExitCode <> 0 then
         failwithf "dotnet %s failed: %s" (String.concat " " arguments) (error.Result.Trim())
 
-let revision =
-    let info = ProcessStartInfo("git", "rev-parse HEAD")
-    info.WorkingDirectory <- root
-    info.UseShellExecute <- false
-    info.RedirectStandardOutput <- true
-    info.RedirectStandardError <- true
-    use childProcess = Process.Start info
-    let value = childProcess.StandardOutput.ReadToEnd().Trim()
-    childProcess.WaitForExit()
-
-    if childProcess.ExitCode <> 0 || value.Length <> 40 then
-        failwith "producer revision could not be resolved"
-
-    value
+BuildProvenance.assertCleanTree root
+let revision = BuildProvenance.committedHead root
 
 let sha256 path =
     use stream = File.OpenRead path
@@ -101,8 +89,6 @@ let publishWorkflow () =
           "workflow/Mcp.Workflow.fsproj"
           "--configuration"
           "Release"
-          "--framework"
-          "net11.0"
           "--self-contained"
           "false"
           "-p:UseAppHost=false"
@@ -136,7 +122,6 @@ let publishWorkflow () =
 
     assertExactFiles "workflow v1 staging contains unexpected files" (publishedFiles @ [ "NOTICE.txt" ] |> List.sort) stagedFiles
 
-    let archiveName = $"{componentId}-v{version}.zip"
     let manifest = JsonObject()
     manifest["schemaVersion"] <- JsonValue.Create 1
     manifest["id"] <- JsonValue.Create componentId

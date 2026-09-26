@@ -67,16 +67,6 @@ module PathAuthorization =
         | Some error -> Error error
         | None -> Ok()
 
-    let private ensureDirectory path : Result<unit, VerificationError> =
-        try
-            if File.Exists path then
-                Error(UnauthorizedPath "artifact root must be a directory")
-            else
-                Directory.CreateDirectory path |> ignore
-                Ok()
-        with error ->
-            Error(ArtifactFailure $"artifact root could not be created: {error.Message}")
-
     let validateWorkspace workspaceRoot : Result<string, VerificationError> =
         try
             if String.IsNullOrWhiteSpace workspaceRoot then
@@ -122,16 +112,34 @@ module PathAuthorization =
                     return! Error(UnauthorizedPath "an external artifact root must be a local path")
                 elif external && not (Path.IsPathRooted artifactRoot) then
                     return! Error(UnauthorizedPath "artifact root is outside the trusted workspace")
+                elif File.Exists normalized then
+                    return! Error(UnauthorizedPath "artifact root must be a directory")
 
-                // Check existing hops before creation. Creating first would allow a
-                // missing path below a junction to be materialized outside the root.
-                do! validateAncestors (if external then None else Some root) normalized
-                do! ensureDirectory normalized
+                // Check existing hops so a missing path below a junction is never
+                // materialized outside the root when the root is created lazily.
                 do! validateAncestors (if external then None else Some root) normalized
                 return normalized
             }
         with error ->
             Error(InvalidInput $"artifact root is invalid: {error.Message}")
+
+    let ensureArtifactRoot (artifactRoot: string) : Result<unit, VerificationError> =
+        try
+            result {
+                let normalized = normalize artifactRoot
+
+                if File.Exists normalized then
+                    return! Error(UnauthorizedPath "artifact root must be a directory")
+                else
+                    // Re-check ancestors at creation so a reparse point introduced
+                    // after startup validation cannot redirect the root.
+                    do! validateAncestors None normalized
+                    Directory.CreateDirectory normalized |> ignore
+                    do! validateAncestors None normalized
+                    return ()
+            }
+        with error ->
+            Error(ArtifactFailure $"artifact root could not be created: {error.Message}")
 
     let private authorizeTarget root value : Result<AuthorizedPath, VerificationError> =
         try

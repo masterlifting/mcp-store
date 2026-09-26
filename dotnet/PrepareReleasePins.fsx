@@ -1,3 +1,6 @@
+#load "ReleaseConfig.fsx"
+#load "../BuildProvenance.fsx"
+
 open System
 open System.IO
 open System.Security.Cryptography
@@ -7,9 +10,10 @@ open System.Text.Json.Nodes
 let root = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, ".."))
 let dist = Path.Combine(root, "dotnet", "dist")
 let output = Path.Combine(dist, "consumer-pins.json")
-let componentId = "dotnet"
-let version = "1.0.1"
-let archiveName = $"{componentId}-v{version}.zip"
+let componentId = ReleaseConfig.componentId
+let version = ReleaseConfig.version
+let archiveName = ReleaseConfig.archiveName
+let assetUri = ReleaseConfig.assetUri
 
 let sha256 path =
     use stream = File.OpenRead path
@@ -33,13 +37,21 @@ if requiredManifestValue "id" <> componentId
    || requiredManifestValue "archive" <> archiveName then
     failwith "dotnet v1 manifest identity does not match the release pin"
 
+BuildProvenance.assertCleanTree root
+BuildProvenance.assertManifestRevision manifestPath (BuildProvenance.committedHead root)
+
 let pins = JsonObject()
 let value = JsonObject()
 value["assetName"] <- JsonValue.Create archiveName
+value["assetUri"] <- JsonValue.Create assetUri
 value["archiveSha256"] <- JsonValue.Create(sha256 archivePath)
 value["manifestSha256"] <- JsonValue.Create(sha256 manifestPath)
 pins[componentId] <- value
 
 File.WriteAllText(output, pins.ToJsonString(JsonSerializerOptions(WriteIndented = true)))
 
-printfn "dotnet asset=%s archiveSha256=%s manifestSha256=%s" archiveName (sha256 archivePath) (sha256 manifestPath)
+printfn
+    "dotnet asset=%s archiveSha256=%s manifestSha256=%s"
+    archiveName
+    (sha256 archivePath)
+    (sha256 manifestPath)

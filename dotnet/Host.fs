@@ -86,7 +86,7 @@ module private McpHost =
 
     let private parseBuild arguments =
         result {
-            let! arguments = objectProperties "verify_dotnet_build arguments" arguments [ "target"; "configuration"; "noRestore"; "timeoutMs" ] []
+            let! arguments = objectProperties "build arguments" arguments [ "target"; "configuration"; "noRestore"; "timeoutMs" ] []
             let! target = optionalString "target" arguments
             let! configuration = optionalString "configuration" arguments
             let! noRestore = optionalBoolean "noRestore" arguments None
@@ -96,7 +96,7 @@ module private McpHost =
 
     let private parseTest arguments =
         result {
-            let! arguments = objectProperties "verify_dotnet_test arguments" arguments [ "target"; "configuration"; "filter"; "noBuild"; "timeoutMs" ] []
+            let! arguments = objectProperties "test arguments" arguments [ "target"; "configuration"; "filter"; "noBuild"; "timeoutMs" ] []
             let! target = optionalString "target" arguments
             let! configuration = optionalString "configuration" arguments
             let! filter = optionalString "filter" arguments
@@ -115,9 +115,9 @@ module private McpHost =
 
     let private parseDetails arguments =
         result {
-            let! arguments = objectProperties "verification_details arguments" arguments [ "runId"; "kind"; "offset"; "limit" ] [ "runId"; "kind" ]
-            let! runId = requiredString "verification_details arguments" "runId" arguments
-            let! kindText = requiredString "verification_details arguments" "kind" arguments
+            let! arguments = objectProperties "details arguments" arguments [ "runId"; "kind"; "offset"; "limit" ] [ "runId"; "kind" ]
+            let! runId = requiredString "details arguments" "runId" arguments
+            let! kindText = requiredString "details arguments" "kind" arguments
             let! kind = parseDetailKind kindText
             let! offsetValue = optionalInteger "offset" arguments
             let! limit = optionalInteger "limit" arguments
@@ -274,9 +274,9 @@ module private McpHost =
 
     let private toolsJson =
         """[
-              {"name":"verify_dotnet_build","description":"Run the capability-controlled dotnet build and return a bounded semantic result.","inputSchema":{"type":"object","additionalProperties":false,"properties":{"target":{"type":"string","description":"Workspace-relative .NET project or solution file."},"configuration":{"type":"string","description":"Safe configuration name; defaults to Release."},"noRestore":{"type":"boolean","description":"Skip restore; defaults to false."},"timeoutMs":{"type":"integer","minimum":100,"maximum":1800000,"description":"Timeout in milliseconds; defaults to five minutes."}}}},
-              {"name":"verify_dotnet_test","description":"Run the capability-controlled dotnet test and return bounded counts and failures.","inputSchema":{"type":"object","additionalProperties":false,"properties":{"target":{"type":"string","description":"Workspace-relative .NET project or solution file."},"configuration":{"type":"string","description":"Safe configuration name; defaults to Release."},"filter":{"type":"string","description":"One controlled dotnet test filter value."},"noBuild":{"type":"boolean","description":"Skip build; defaults to false."},"timeoutMs":{"type":"integer","minimum":100,"maximum":1800000,"description":"Timeout in milliseconds; defaults to five minutes."}}}},
-              {"name":"verification_details","description":"Read one bounded page of retained verifier evidence by opaque run ID.","inputSchema":{"type":"object","additionalProperties":false,"required":["runId","kind"],"properties":{"runId":{"type":"string"},"kind":{"type":"string","enum":["errors","warnings","failed-tests","output"]},"offset":{"type":"integer","minimum":0,"default":0},"limit":{"type":"integer","minimum":1,"maximum":128}}}}
+              {"name":"build","description":"Run the capability-controlled dotnet build and return a bounded semantic result.","inputSchema":{"type":"object","additionalProperties":false,"properties":{"target":{"type":"string","description":"Workspace-relative .NET project or solution file."},"configuration":{"type":"string","minLength":1,"maxLength":64,"pattern":"^[A-Za-z0-9_.-]+$","default":"Release","description":"Safe configuration name; defaults to Release."},"noRestore":{"type":"boolean","default":false,"description":"Skip restore; defaults to false."},"timeoutMs":{"type":"integer","minimum":100,"maximum":1800000,"default":300000,"description":"Timeout in milliseconds; defaults to five minutes."}}}},
+              {"name":"test","description":"Run the capability-controlled dotnet test and return bounded counts and failures.","inputSchema":{"type":"object","additionalProperties":false,"properties":{"target":{"type":"string","description":"Workspace-relative .NET project or solution file."},"configuration":{"type":"string","minLength":1,"maxLength":64,"pattern":"^[A-Za-z0-9_.-]+$","default":"Release","description":"Safe configuration name; defaults to Release."},"filter":{"type":"string","minLength":1,"maxLength":512,"description":"One controlled dotnet test filter value."},"noBuild":{"type":"boolean","default":false,"description":"Skip build; defaults to false."},"timeoutMs":{"type":"integer","minimum":100,"maximum":1800000,"default":300000,"description":"Timeout in milliseconds; defaults to five minutes."}}}},
+              {"name":"details","description":"Read one bounded page of retained evidence by opaque run ID.","inputSchema":{"type":"object","additionalProperties":false,"required":["runId","kind"],"properties":{"runId":{"type":"string","minLength":1},"kind":{"type":"string","enum":["errors","warnings","failed-tests","output"]},"offset":{"type":"integer","minimum":0,"default":0},"limit":{"type":"integer","minimum":1,"maximum":128,"default":32}}}}
             ]"""
 
     let private initializeResult =
@@ -358,29 +358,29 @@ module private McpHost =
             return name, arguments
         }
 
-    let private invokeTool (service: VerifierService) name arguments cancellationToken =
+    let private invokeTool (service: DotnetService) name arguments cancellationToken =
         task {
             try
                 match name with
-                | "verify_dotnet_build" ->
+                | "build" ->
                     match parseBuild arguments with
                     | Error message -> return failure (VerificationError.InvalidInput message)
                     | Ok options ->
                         let! result = service.VerifyBuild(options, cancellationToken = cancellationToken)
                         match result with | Ok value -> return buildResult value | Error error -> return failure error
-                | "verify_dotnet_test" ->
+                | "test" ->
                     match parseTest arguments with
                     | Error message -> return failure (VerificationError.InvalidInput message)
                     | Ok options ->
                         let! result = service.VerifyTest(options, cancellationToken = cancellationToken)
                         match result with | Ok value -> return testResult value | Error error -> return failure error
-                | "verification_details" ->
+                | "details" ->
                     match parseDetails arguments with
                     | Error message -> return failure (VerificationError.InvalidInput message)
                     | Ok request ->
                         match service.Details request with | Ok value -> return detailsResult value | Error error -> return failure error
                 | _ -> return failure (VerificationError.InvalidInput $"tool '{name}' is not registered")
-            with _ -> return failure (VerificationError.ArtifactFailure "verifier operation failed")
+            with _ -> return failure (VerificationError.ArtifactFailure "dotnet operation failed")
         }
 
     let private handleImmediate id methodName parameters =
@@ -413,7 +413,7 @@ module private McpHost =
         | "shutdown" -> response id (JsonObject())
         | _ -> protocolError id -32601 $"method '{methodName}' is not supported"
 
-    let run (service: VerifierService) =
+    let run (service: DotnetService) =
         let outputGate = obj ()
         let logGate = obj ()
         let active = ConcurrentDictionary<string, CancellationTokenSource>(StringComparer.Ordinal)
@@ -444,7 +444,7 @@ module private McpHost =
                                 |> Option.defaultValue "n/a"
                             log $"{name} completed runId={runId}"
                         with error ->
-                            write (response id (failure (VerificationError.ArtifactFailure "verifier operation failed")))
+                            write (response id (failure (VerificationError.ArtifactFailure "dotnet operation failed")))
                             log $"{name} failed: {error.Message}"
 
                         let mutable removed: CancellationTokenSource = null
@@ -488,13 +488,13 @@ module private McpHost =
                     | _, None -> ()
 
         shutdown.Cancel()
-        try Task.WaitAll(running.ToArray()) with :? AggregateException -> log "one or more verifier operations did not shut down cleanly"
+        try Task.WaitAll(running.ToArray()) with :? AggregateException -> log "one or more dotnet operations did not shut down cleanly"
 
 module Program =
     [<EntryPoint>]
     let main args =
         let startupFailure message =
-            Console.Error.WriteLine($"dotnet verifier startup failed: {message}")
+            Console.Error.WriteLine($"dotnet MCP startup failed: {message}")
             1
 
         let startService injectedHost artifactRoot =
@@ -502,22 +502,24 @@ module Program =
             | Error error -> startupFailure (VerificationError.message error)
             | Ok validatedHost ->
                 try
-                    let service =
-                        match artifactRoot with
-                        | Some root -> new VerifierService(Environment.CurrentDirectory, dotnetHost = validatedHost, artifactRoot = root)
-                        | None -> new VerifierService(Environment.CurrentDirectory, dotnetHost = validatedHost)
+                    use service =
+                        new DotnetService(
+                            Environment.CurrentDirectory,
+                            dotnetHost = validatedHost,
+                            artifactRoot = artifactRoot
+                        )
 
-                    use service = service
                     McpHost.run service
                     0
                 with error ->
                     let message =
-                        if isNull error.Message then "verifier host could not start"
+                        if isNull error.Message then "dotnet MCP host could not start"
                         elif error.Message.Length <= Budgets.Defaults.MessageMaxLength then error.Message
                         else error.Message.Substring(0, Budgets.Defaults.MessageMaxLength)
                     startupFailure message
 
         match args with
-        | [| "--dotnet-host"; injectedHost |] -> startService injectedHost None
-        | [| "--dotnet-host"; injectedHost; "--artifact-root"; artifactRoot |] -> startService injectedHost (Some artifactRoot)
-        | _ -> startupFailure "the verifier requires exactly one injected --dotnet-host absolute path, optionally followed by --artifact-root <path>"
+        | [| "--dotnet-host"; injectedHost; "--artifact-root"; artifactRoot |] ->
+            startService injectedHost artifactRoot
+        | _ ->
+            startupFailure "the dotnet MCP requires --dotnet-host <absolute-path> and --artifact-root <absolute-path>"

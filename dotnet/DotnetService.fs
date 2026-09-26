@@ -45,11 +45,11 @@ module private DetailSource =
                         (stderr |> Seq.map (fun line -> $"stderr: {line}"))
             }
 
-type VerifierService(
+type DotnetService(
     workspaceRoot: string,
+    artifactRoot: string,
     ?dotnetHost: string,
-    ?artifactRoot: string,
-    ?budgets: VerifierBudgets,
+    ?budgets: DotnetBudgets,
     ?retention: TimeSpan
 ) =
     let rootResult = PathAuthorization.validateWorkspace workspaceRoot
@@ -67,11 +67,8 @@ type VerifierService(
         | Ok _ -> ()
         | Error error -> invalidArg (nameof budgets) (VerificationError.message error)
 
-    let requestedArtifactRoot =
-        artifactRoot |> Option.defaultValue (Path.Combine(root, ".opencode", "dotnet-verification"))
-
     let rootForArtifacts =
-        match PathAuthorization.validateArtifactRoot root requestedArtifactRoot with
+        match PathAuthorization.validateArtifactRoot root artifactRoot with
         | Ok value -> value
         | Error error -> invalidArg (nameof artifactRoot) (VerificationError.message error)
 
