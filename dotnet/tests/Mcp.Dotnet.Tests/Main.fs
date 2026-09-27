@@ -14,4 +14,5 @@ let main argv =
               SecurityTests.tests
               ProcessIntegrationTests.tests
               McpHostTests.tests
-              QuotaTests.tests ])
+              QuotaTests.tests
+              DotnetSchemaParityTests.tests ])

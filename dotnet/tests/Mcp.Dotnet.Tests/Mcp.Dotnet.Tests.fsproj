@@ -15,6 +15,7 @@
     <Compile Include="ProcessIntegrationTests.fs" />
     <Compile Include="McpHostTests.fs" />
     <Compile Include="QuotaTests.fs" />
+    <Compile Include="DotnetSchemaParityTests.fs" />
     <Compile Include="Main.fs" />
   </ItemGroup>
   <ItemGroup>

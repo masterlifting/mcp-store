@@ -6,13 +6,14 @@ open System.Runtime.InteropServices
 open System.Security.Cryptography
 open System.Text
 open System.Text.Json
+open System.Text.Json.Nodes
 open System.Text.RegularExpressions
 open System.Threading
 open Common.CE
 open Microsoft.Win32.SafeHandles
 
-// Schema 1 is the sole canonical persisted Workflow representation. There is no
-// compatibility reader: a task is either this exact document or it is rejected.
+// Schema 1 is the sole canonical persisted Workflow representation: a task is
+// either this exact document or it is rejected.
 [<Literal>]
 let SchemaVersion = 1
 
@@ -43,8 +44,8 @@ type EvidenceKind =
     | DecisionEvidence
     | Other of string
 
-// EvidenceSource stays an open semantic primitive because the architecture
-// enumerates EvidenceKind but does not fix a source vocabulary.
+// EvidenceSource stays an open semantic primitive because EvidenceKind is
+// enumerated but no source vocabulary is fixed.
 type EvidenceSource = EvidenceSource of string
 
 type EvidenceValidity =
@@ -74,14 +75,14 @@ type Acceptance =
       Text: string
       State: AcceptanceState }
 
-// Section 21: task semantic contract has two phases. Draft absorbs ordinary
+// task semantic contract has two phases. Draft absorbs ordinary
 // Coordinator design; the first material StartWorkItem establishes the baseline
 // and records the contract fingerprint that later writes must match.
 type ContractState =
     | Draft
     | Baselined
 
-// Section 23: the contract-critical semantic content that is fingerprinted.
+// the contract-critical semantic content that is fingerprinted.
 // The canonical snapshot travels as a command payload for drift restoration; it
 // is never persisted as a second writable contract.
 type ContractContent =
@@ -90,9 +91,9 @@ type ContractContent =
       NonGoals: string
       AcceptanceCriteria: (string * string) list }
 
-// Section 15: Guards are the mechanically enforceable Profile/task-design policy.
-// Decisions are not implemented yet, so decision-backed dispositions cannot be
-// produced by a command; only Applicable guards participate in satisfaction.
+// Guards are the mechanically enforceable Profile/task-design policy. Only
+// Applicable guards participate in satisfaction; any other disposition requires
+// a matching target-bound Decision.
 [<RequireQualifiedAccess>]
 type MinimumAuthority =
     | CoordinatorAuthority
@@ -143,7 +144,7 @@ type Guard =
       Waiver: WaiverPolicy
       Disposition: GuardDisposition }
 
-// Section 15.5: a ProfileMaterialized Guard paired with the ProfileGuardSpec.Key
+// a ProfileMaterialized Guard paired with the ProfileGuardSpec.Key
 // that materialized it. Carrying the key through the sync event lets evolve persist
 // stable key provenance without changing the Guard record/wire shape, so sync
 // correlates by key rather than by indistinguishable structured content.
@@ -160,7 +161,7 @@ type GuardSpec =
       Applicability: ApplicabilityPolicy
       Waiver: WaiverPolicy }
 
-// Sections 17-20: Profiles are the primary task-design extension point. A Profile
+// Profiles are the primary task-design extension point. A Profile
 // is task policy, never a permission grant; the capability envelope describes
 // what the task may use, and mandatory policy is materialized as typed Guards.
 type CapabilityEnvelope =
@@ -248,7 +249,7 @@ type ProfileOverlay =
       Policy: ProfilePolicyOverlay option
       SemanticGuidance: SemanticGuidanceOverlay option }
 
-// Section 22: one explicit operation-based patch model. Runtime never judges
+// one explicit operation-based patch model. Runtime never judges
 // fuzzy textual materiality; every mutation is a typed operation.
 type AcceptanceDraft =
     { Id: string
@@ -265,7 +266,7 @@ type ContractPatch =
     | SetScope of string
     | SetNonGoals of string
 
-// Section 23: reconciliation is not a special authority path. Restoring the
+// reconciliation is not a special authority path. Restoring the
 // recorded canonical contract is Coordinator-authorized and fingerprint-verified;
 // accepting an out-of-band rewrite is a User-authorized material change.
 [<RequireQualifiedAccess>]
@@ -273,14 +274,14 @@ type ReconciliationPlan =
     | RestoreCanonicalContract of ContractContent
     | AcceptExternalContract
 
-// Section 30: durable logical work ownership. Role is the stable responsibility;
+// durable logical work ownership. Role is the stable responsibility;
 // AgentId is the optional concrete identity used to prove independent production.
 // Provider/session/instance identities are never persisted as authority.
 type Owner =
     { Role: string
       AgentId: string option }
 
-// Section 5.2: reopening is explicit and must name the state it invalidates.
+// reopening is explicit and must name the state it invalidates.
 // Qualified access keeps these cases from colliding with the GuardTarget type
 // and its WorkItemTarget case.
 [<RequireQualifiedAccess>]
@@ -289,16 +290,15 @@ type ReopenTarget =
     | WorkItemTarget of string
     | GuardTarget of string
 
-// Section 27.1: terminal completion handoff prose, structurally validated only.
+// Terminal completion handoff prose, structurally validated only.
 type TerminalHandoff =
     { State: string
       EvidenceSummary: string
       Next: string }
 
-// Section 9: Decisions are first-class provenance entities with stable IDs and
-// typed authorization targets. This increment records them as domain objects
-// only: nothing is authorized by a Decision yet, ordinary input is
-// Coordinator-only, and trusted User/ProfilePolicy provenance is deferred.
+// Decisions are first-class provenance entities with stable IDs and typed
+// authorization targets. Ordinary input is Coordinator-only; User/ProfilePolicy
+// provenance is trusted only through an adapter-issued attestation.
 type DecisionAuthority =
     | User
     | Coordinator
@@ -341,7 +341,23 @@ type Decision =
 
 type DecisionRef = DecisionRef of string
 
-// Section 5.2: reopening request. Targets are non-empty and validated against the
+// Fail-closed authority remediation until the trusted User-authority ingress
+// exists: a blocked operation reports the exact typed authorization it needs so
+// callers do not probe with add-decision, which only creates Coordinator authority.
+[<RequireQualifiedAccess>]
+type DecisionRefStatus =
+    | Absent
+    | Mismatched
+    | Present
+
+type AuthorityMetadata =
+    { RequiredAuthority: MinimumAuthority
+      Operation: string
+      DecisionKind: DecisionKind option
+      Target: DecisionTarget option
+      DecisionRefStatus: DecisionRefStatus }
+
+// reopening request. Targets are non-empty and validated against the
 // task; authority follows the source lifecycle (Complete -> Coordinator/User,
 // Aborted -> User).
 type ReopenRequest =
@@ -349,14 +365,14 @@ type ReopenRequest =
       DecisionRef: DecisionRef option
       Targets: ReopenTarget list }
 
-// Section 17.5/25.1: reclassification changes Kind and/or Profile while
+// reclassification changes Kind and/or Profile while
 // preserving history. Both fields are optional; at least one must change.
 type ReclassificationRequest =
     { Kind: Kind option
       Profile: string option
       Reason: string }
 
-// Section 10: Questions are blocking domain entities. TaskWide questions stop
+// Questions are blocking domain entities. TaskWide questions stop
 // every pending WorkItem and task completion; WorkItems-scoped questions stop
 // only the referenced WorkItems.
 type QuestionImpact =
@@ -435,7 +451,7 @@ type TaskModel =
       Kind: Kind
       Profile: string
       ProfileFingerprint: string
-      // Section 21/23: contract-critical semantic prose plus the baseline anchor.
+      // contract-critical semantic prose plus the baseline anchor.
       Objective: string
       Scope: string
       NonGoals: string
@@ -447,7 +463,7 @@ type TaskModel =
       Evidence: EvidenceRecord list
       AcceptanceCriteria: Acceptance list
       Guards: Guard list
-      // Section 15.5: stable key provenance for ProfileMaterialized Guards. Maps a
+      // stable key provenance for ProfileMaterialized Guards. Maps a
       // materialized Guard.Id to the ProfileGuardSpec.Key that produced it so sync
       // preserves/disposes by key instead of transferring identity between
       // same-content keys. Task-design guards have no entry.
@@ -455,7 +471,7 @@ type TaskModel =
       Decisions: Decision list
       Questions: Question list
       WorkItems: WorkItem list
-      // Section 27.1: current terminal handoff; superseded handoffs are retained
+      // current terminal handoff; superseded handoffs are retained
       // in CompletionHistory so a reopen never deletes completion prose.
       TerminalHandoff: TerminalHandoff option
       CompletionHistory: TerminalHandoff list }
@@ -478,39 +494,38 @@ type TaskCommand =
     // AddGuard carries the caller's GuardSpec; GuardAdded is the decide-produced
     // event carrying the validated Guard (Origin/Disposition assigned by runtime).
     | GuardAdded of Guard
-    // Section 25: guard disposition commands carry the optional pre-existing
+    // guard disposition commands carry the optional pre-existing
     // DecisionRef; GuardDispositionSet is the decide-produced event form.
     | MarkGuardNotApplicable of string * DecisionRef option
     | WaiveGuard of string * DecisionRef option
     | GuardDispositionSet of string * GuardDisposition
-    // Decisions are provenance-only in this slice; AddDecision assigns the
-    // Coordinator authority and the decision ID.
+    // AddDecision assigns the Coordinator authority and the decision ID.
     | AddDecision of DecisionDraft
     | DecisionAdded of Decision
     | AddQuestion of QuestionDraft
     | QuestionOpened of Question
     | ResolveQuestion of string * DecisionRef
     | QuestionResolved of string * DecisionRef
-    // Section 30: owner rebinding event; produced by decide from RebindOwner.
+    // owner rebinding event; produced by decide from RebindOwner.
     | OwnerRebound of string * Owner
-    // Section 5.2: targeted reopen command; decide normalizes it into TaskReopened.
+    // targeted reopen command; decide normalizes it into TaskReopened.
     | ReopenTask of ReopenRequest
-    // Section 5.2: targeted reopen event; produced by decide from ReopenTask.
+    // targeted reopen event; produced by decide from ReopenTask.
     | TaskReopened of ReopenRequest
-    // Section 21.2: baseline event emitted immediately before the first material
+    // baseline event emitted immediately before the first material
     // StartWorkItem; carries the freshly recorded contract fingerprint.
     | ContractBaselined of string
-    // Section 22: post-baseline contract patches may carry an optional
+    // post-baseline contract patches may carry an optional
     // pre-existing target-bound DecisionRef; ContractPatchApplied is the
     // decide-produced event. The bool records whether the patch was baselined
     // (and therefore created contractRevision history).
     | ApplyContractPatch of ContractPatch * DecisionRef option
     | ContractPatchApplied of ContractPatch * bool
-    // Section 23: drift reconciliation is converted into ordinary authority
+    // drift reconciliation is converted into ordinary authority
     // rules rather than bypassing them.
     | ReconcileContractDrift of ReconciliationPlan
     | ContractDriftReconciled of ReconciliationPlan
-    // Sections 17.5/20: profile selection/reclassification and profile drift
+    // profile selection/reclassification and profile drift
     // reconciliation. ReclassifyTask/ReconcileProfileDrift are command forms;
     // TaskReclassified/ProfileDriftReconciled are the decide-produced events.
     | ReclassifyTask of ReclassificationRequest
@@ -529,6 +544,15 @@ type RuntimeError =
     | Conflict of expected: int * actual: int
     | InvalidTransition of string
     | PersistenceFailure of string
+    // Carries the exact rendered message so the text surface is unchanged while
+    // the transport can publish the structured remediation block.
+    | AuthorityDenied of metadata: AuthorityMetadata * message: string
+
+// Extracts the structured authority remediation from a runtime error.
+let tryAuthorityMetadata (error: RuntimeError) : AuthorityMetadata option =
+    match error with
+    | AuthorityDenied (metadata, _) -> Some metadata
+    | _ -> None
 
 type EvidenceDto =
     { Id: string
@@ -548,12 +572,12 @@ type AcceptanceDto =
       State: string
       EvidenceRefs: string list }
 
-// Section 30: owner is an optional nested object; absent means inherit.
+// owner is an optional nested object; absent means inherit.
 type OwnerDto =
     { Role: string
       AgentId: string }
 
-// Section 27.1: terminal handoff wire shape.
+// terminal handoff wire shape.
 type TerminalHandoffDto =
     { State: string
       EvidenceSummary: string
@@ -640,9 +664,9 @@ type CreateRequest =
       AcceptanceCriteria: (string * string) list
       WorkItems: WorkItemSpec list }
 
-// Section 9.1 is fail-closed until #13 supplies an adapter-issued signed
-// attestation: ordinary runtime and CLI invocation is Coordinator-only. There is
-// no in-process User ingress (no receipt factory, no authority parameter, no
+// Authority is fail-closed because no adapter-issued signed attestation exists:
+// ordinary runtime and CLI invocation is Coordinator-only. There is no
+// in-process User ingress (no receipt factory, no authority parameter, no
 // flag/environment input), so a User-required operation cannot be authorized
 // here. Untrusted sidecar Decisions claiming User/ProfilePolicy provenance are
 // rejected at the DTO/domain boundary rather than trusted.
@@ -664,6 +688,7 @@ let private errorMessage error =
     | Conflict (expected, actual) -> $"state revision conflict: expected {expected}, actual {actual}"
     | InvalidTransition message -> message
     | PersistenceFailure message -> message
+    | AuthorityDenied (_, message) -> message
 
 let private nonEmpty name value =
     if String.IsNullOrWhiteSpace value || value.Contains '\r' || value.Contains '\n' then
@@ -758,10 +783,16 @@ let private questionId value = validateId "question id" questionIdRegex value
 let private profileId value = validateId "profile id" profileIdRegex value
 let private capabilityId value = validateId "capability id" capabilityIdRegex value
 
-let private minimumAuthorityToString authority =
+let minimumAuthorityToString authority =
     match authority with
     | MinimumAuthority.CoordinatorAuthority -> "coordinator"
     | MinimumAuthority.UserAuthority -> "user"
+
+let decisionRefStatusToString status =
+    match status with
+    | DecisionRefStatus.Absent -> "absent"
+    | DecisionRefStatus.Mismatched -> "mismatched"
+    | DecisionRefStatus.Present -> "present"
 
 let private parseMinimumAuthority (value: string) : Result<MinimumAuthority, RuntimeError> =
     match value with
@@ -867,7 +898,7 @@ let private parseDecisionAuthority (value: string) : Result<DecisionAuthority, R
     | "profilePolicy" -> Ok ProfilePolicy
     | _ -> Error (InvalidInput "decision authority is not recognized")
 
-let private decisionKindToString kind =
+let decisionKindToString kind =
     match kind with
     | UserDecision -> "userDecision"
     | DesignDecision -> "designDecision"
@@ -894,7 +925,7 @@ let private reopenTargetToString target =
     | ReopenTarget.WorkItemTarget id -> $"workItem:{id}"
     | ReopenTarget.GuardTarget id -> $"guard:{id}"
 
-let private decisionTargetToString target =
+let decisionTargetToString target =
     match target with
     | WaiveAcceptanceTarget id -> $"waiveAcceptance:{id}"
     | GuardDispositionTarget id -> $"guardDisposition:{id}"
@@ -907,6 +938,33 @@ let private decisionTargetToString target =
     | QuestionResolutionTarget id -> $"questionResolution:{id}"
     | ReclassificationTarget text -> $"reclassify:{text}"
     | OtherDecisionTarget text -> $"other:{text}"
+
+// structured authority remediation for User-required or
+// DecisionRef-bound operations. The block is additive to the error envelope so
+// text-only errors render without it; the four render helpers above are the
+// single source of the wire vocabulary.
+let renderAuthorityMetadata (metadata: AuthorityMetadata) : JsonNode =
+    let authority = JsonObject()
+
+    authority["required"] <-
+        (JsonValue.Create(minimumAuthorityToString metadata.RequiredAuthority) :> JsonNode)
+
+    authority["operation"] <- (JsonValue.Create metadata.Operation :> JsonNode)
+
+    authority["decisionKind"] <-
+        match metadata.DecisionKind with
+        | Some kind -> (JsonValue.Create(decisionKindToString kind) :> JsonNode)
+        | None -> (null : JsonNode)
+
+    authority["target"] <-
+        match metadata.Target with
+        | Some target -> (JsonValue.Create(decisionTargetToString target) :> JsonNode)
+        | None -> (null : JsonNode)
+
+    authority["decisionRefStatus"] <-
+        (JsonValue.Create(decisionRefStatusToString metadata.DecisionRefStatus) :> JsonNode)
+
+    authority :> JsonNode
 
 // Reopen targets are encoded as 'acceptance:<AC-id>', 'workItem:<W-id>', or
 // 'guard:<G-id>'; the domain validates id format/existence.
@@ -1003,7 +1061,7 @@ let parseQuestionImpact (value: string) : Result<QuestionImpact, RuntimeError> =
     else
         Error (InvalidInput "question impact must be 'taskWide' or 'workItems:<W-id,...>'")
 
-// Section 23: the canonical contract fingerprint covers Objective/Scope/Non-Goals
+// the canonical contract fingerprint covers Objective/Scope/Non-Goals
 // and Acceptance-Criterion IDs/text in a deterministic order. Length-prefixed
 // segments keep the canonical form unambiguous without escaping rules.
 let private segment (value: string) = $"{value.Length}:{value}"
@@ -1028,7 +1086,7 @@ let private sha256Hex (value: string) =
     |> Convert.ToHexString
     |> fun hex -> hex.ToLowerInvariant()
 
-// Section 23: the fingerprint is over the canonicalized contract content, so any
+// the fingerprint is over the canonicalized contract content, so any
 // out-of-band rewrite of prose or AC text changes it while AC state does not.
 let contractFingerprintOf (content: ContractContent) = sha256Hex (canonicalContract content)
 
@@ -1039,13 +1097,13 @@ let contractContentOf (task: TaskModel) : ContractContent =
       AcceptanceCriteria =
         task.AcceptanceCriteria |> List.map (fun criterion -> criterion.Id, criterion.Text) }
 
-// Section 23: drift is only meaningful once a baseline fingerprint is recorded.
+// drift is only meaningful once a baseline fingerprint is recorded.
 let contractDrift (task: TaskModel) : bool =
     match task.ContractState with
     | Draft -> false
     | Baselined -> contractFingerprintOf (contractContentOf task) <> task.ContractFingerprint
 
-// Section 9.6/22.2: a post-baseline patch is authorized against a deterministic ID
+// a post-baseline patch is authorized against a deterministic ID
 // derived from its exact canonical payload, not from the revision it will create.
 let private canonicalGuardSpec (spec: GuardSpec) =
     let kind, minimumCount, producerRole, independent =
@@ -1086,7 +1144,7 @@ let contractPatchIdOf (patch: ContractPatch) =
 
     parts |> List.map segment |> String.concat "|" |> sha256Hex
 
-// Section 23: reconciliation is authorized against a deterministic plan ID so the
+// reconciliation is authorized against a deterministic plan ID so the
 // exact restore/accept payload is the security target, not the resulting revision.
 let private contractReconciliationId (plan: ReconciliationPlan) =
     match plan with
@@ -1111,7 +1169,7 @@ let private optionalNonEmpty name value =
     | Some text when String.IsNullOrWhiteSpace text -> Ok None
     | Some text -> nonEmpty name text |> Result.map Some
 
-// Section 17/19: every effective profile uses the same content-derived
+// every effective profile uses the same content-derived
 // fingerprint, including the built-in general profile.
 let private canonicalProfileGuard (spec: ProfileGuardSpec) =
     [ "pguard-v1"
@@ -1175,7 +1233,7 @@ let private builtinGeneralDefinition: ProfileDefinition =
       Policy = { Guards = []; RequiredSections = []; RoleDefaults = [] }
       SemanticGuidance = { Common = ""; Research = ""; Execution = "" } }
 
-// Section 17.2: the shared `software` profile owns repository/branch context
+// the shared `software` profile owns repository/branch context
 // and engineering conventions as guidance, and materializes the
 // build/test/review obligations as structured execution Guards. Build and test
 // are routine quality gates the Coordinator may mark not-applicable when the
@@ -1257,8 +1315,8 @@ let private builtinSoftwareDefinition: ProfileDefinition =
           Execution =
             "Engineer owns implementation and implementation-side build evidence; tester owns materially applicable test design, implementation, and execution; the reviewer stays independent and read-only. Build/test/review requirements are risk-driven structured Guards, and review is retained when applicability is uncertain. Execution complexity is distinct from architecture sensitivity: escalate to architecture only for contract, boundary, persistence, concurrency, security, or ownership impact. Debugging follows reproduce/evidence/hypothesis/falsification/fix/verify." } }
 
-// Section 17.2: the shared `opencode` profile targets the harness itself. It
-// references #2 capabilities/roles without redefining them and never grants
+// The shared `opencode` profile targets the harness itself. It references
+// external capabilities/roles without redefining them and never grants
 // permissions; its mandatory policy is structured Guards. Execution materializes
 // validation and fail-closed review obligations; Research materializes a
 // harness-investigation evidence expectation. TaskKind scopes each obligation to
@@ -1472,7 +1530,7 @@ let private strongerApplicability left right =
 let private strongerWaiver left right =
     if waiverRank left >= waiverRank right then left else right
 
-// Section 19.2: an overlay may add or strengthen structured policy but may not
+// an overlay may add or strengthen structured policy but may not
 // mechanically weaken it; a weakening overlay fails resolution.
 let private mergeProfileGuard (shared: ProfileGuardSpec) (overlay: ProfileGuardSpec) =
     result {
@@ -1655,7 +1713,7 @@ let private definitionFromOverlay (overlay: ProfileOverlay) =
 
     validateProfileDefinition definition
 
-// Section 19: project profile files are strict JSON read from
+// project profile files are strict JSON read from
 // <project-root>/.opencode/task/profiles. A file whose id matches an existing
 // shared profile is an overlay; an unknown id introduces a project profile.
 module private ProfileSource =
@@ -1924,7 +1982,7 @@ module private ProfileSource =
                   SemanticGuidance = guidance }
         }
 
-// Section 19.1: deterministic ordinal file order. A missing directory means only
+// deterministic ordinal file order. A missing directory means only
 // the compiled-in builtins are active. Malformed files, duplicate IDs, invalid
 // new profiles, and weakening same-ID overlays all fail resolution; the platform
 // composition.json is never consulted here.
@@ -2027,7 +2085,7 @@ let private guardSignature (guard: Guard) =
       waiverToString guard.Waiver ]
     |> String.concat "|"
 
-// Section 15.5: the profile guard Key is its stable policy identity. Two specs
+// the profile guard Key is its stable policy identity. Two specs
 // that share structured content but carry different keys are distinct
 // obligations, so Key/TaskKind participate in the identity signature.
 let private profileGuardSignature (spec: ProfileGuardSpec) =
@@ -2055,7 +2113,7 @@ let private profileGuardMatches (guard: Guard) (spec: ProfileGuardSpec) =
            waiverToString spec.Waiver ]
          |> String.concat "|")
 
-// Section 15.5: profile guards are regenerated from the Effective Profile before
+// profile guards are regenerated from the Effective Profile before
 // baseline. After baseline they are synced monotonically: existing profile guards
 // are never deleted and only new/stronger signatures are added. TaskKind scopes
 // each spec to one Kind, so a Kind change filters which obligations materialize.
@@ -2153,7 +2211,7 @@ let private syncProfileGuards
     else
         reused @ created
 
-// Section 25.1: a baselined Profile change may proceed under Coordinator
+// a baselined Profile change may proceed under Coordinator
 // authority only when it does not weaken the capability envelope.
 let private profileWeakening (current: EffectiveProfile) (target: EffectiveProfile) =
     let targetRequired = target.Definition.CapabilityEnvelope.Required
@@ -2161,7 +2219,7 @@ let private profileWeakening (current: EffectiveProfile) (target: EffectiveProfi
     current.Definition.CapabilityEnvelope.Required
     |> List.exists (fun capability -> not (List.contains capability targetRequired))
 
-// Section 18: effective capabilities are required + applicable defaults +
+// effective capabilities are required + applicable defaults +
 // the explicitly activated subset of allowed.
 let effectiveCapabilities (profile: EffectiveProfile) (activated: string list) =
     let envelope = profile.Definition.CapabilityEnvelope
@@ -3219,7 +3277,7 @@ module private Domain =
             return { Id = id; Text = text; State = state }
         }
 
-    // Section 30: ownership is a durable logical role plus an optional concrete
+    // ownership is a durable logical role plus an optional concrete
     // identity. Shape only; platform route existence belongs to integration.
     let private validateOwner (owner: Owner) : Result<Owner, RuntimeError> =
         result {
@@ -3237,7 +3295,7 @@ module private Domain =
                 else
                     Some dto.AgentId }
 
-    // Section 27.1: handoff prose is structurally validated, never semantically.
+    // handoff prose is structurally validated, never semantically.
     let private validateTerminalHandoff (handoff: TerminalHandoff) : Result<TerminalHandoff, RuntimeError> =
         result {
             let! state = nonEmpty "terminal handoff state" handoff.State
@@ -3265,7 +3323,7 @@ module private Domain =
     let private findDecision id (decisions: Decision list) =
         decisions |> List.tryFind (fun decision -> decision.Id = id)
 
-    // Section 5.2: every reopen target must name an existing entity so the
+    // every reopen target must name an existing entity so the
     // invalidation is explicit rather than a bare lifecycle flip.
     let private validateReopenTarget (task: TaskModel) target =
         match target with
@@ -3312,10 +3370,10 @@ module private Domain =
             return { request with Reason = reason; Targets = targets }
         }
 
-    // Section 9.2/15.4: a Decision authorizes only when its trusted authority
-    // satisfies the required minimum and a typed target exactly matches. User
-    // authority has no trusted ingress until #13, and ProfilePolicy never
-    // participates in ExplicitDecision checks, so both fail closed.
+    // A Decision authorizes only when its trusted authority satisfies the
+    // required minimum and a typed target exactly matches. User authority has no
+    // trusted ingress, and ProfilePolicy never participates in ExplicitDecision
+    // checks, so both fail closed.
     let private decisionAuthorizes (decision: Decision) (minimumAuthority: MinimumAuthority) (target: DecisionTarget) =
         let authoritySatisfied =
             match decision.Authority with
@@ -3325,7 +3383,7 @@ module private Domain =
 
         authoritySatisfied && decision.Targets |> List.contains target
 
-    // Section 15.3: the Guard's own policy decides which authority a
+    // the Guard's own policy decides which authority a
     // non-Applicable disposition requires.
     let private dispositionAuthority (guard: Guard) =
         match guard.Disposition with
@@ -3339,7 +3397,7 @@ module private Domain =
             | NotWaivable -> None
         | GuardDisposition.Applicable -> None
 
-    // Section 9.2/15.3: each disposition is authorized only by its own Decision
+    // each disposition is authorized only by its own Decision
     // kind. A same-target Decision of the wrong kind (for example an
     // ApplicabilityDecision reused for a waiver) never authorizes the disposition.
     let private dispositionDecisionKind (guard: Guard) =
@@ -3364,6 +3422,13 @@ module private Domain =
                 | None -> false
         | _ -> false
 
+    // The recorded disposition identifies which command must be re-authorized.
+    let private dispositionOperation (guard: Guard) =
+        match guard.Disposition with
+        | GuardDisposition.NotApplicable _ -> "task_apply.mark-not-applicable"
+        | GuardDisposition.Waived _
+        | GuardDisposition.Applicable -> "task_apply.waive-guard"
+
     let private dispositionError (task: TaskModel) (guard: Guard) (reference: string) =
         match dispositionAuthority guard with
         | None ->
@@ -3373,13 +3438,27 @@ module private Domain =
             | Error error -> error
             | Ok referenceId ->
                 match findDecision referenceId task.Decisions with
-                | None -> InvalidInput $"guard '{guard.Id}' disposition references unknown Decision '{referenceId}'"
+                | None ->
+                    AuthorityDenied(
+                        { RequiredAuthority = authority
+                          Operation = dispositionOperation guard
+                          DecisionKind = dispositionDecisionKind guard
+                          Target = Some(GuardDispositionTarget guard.Id)
+                          DecisionRefStatus = DecisionRefStatus.Absent },
+                        $"guard '{guard.Id}' disposition references unknown Decision '{referenceId}'"
+                    )
                 | Some decision ->
                     let requiredKind =
                         dispositionDecisionKind guard |> Option.defaultValue ApplicabilityDecision
 
-                    InvalidInput
+                    AuthorityDenied(
+                        { RequiredAuthority = authority
+                          Operation = dispositionOperation guard
+                          DecisionKind = Some requiredKind
+                          Target = Some(GuardDispositionTarget guard.Id)
+                          DecisionRefStatus = DecisionRefStatus.Mismatched },
                         $"guard '{guard.Id}' disposition Decision '{referenceId}' has kind {decisionKindToString decision.Kind} and does not authorize the exact Guard target at {minimumAuthorityToString authority} authority as kind {decisionKindToString requiredKind}"
+                    )
 
     let private validateGuardDisposition (task: TaskModel) (guard: Guard) =
         match guard.Disposition with
@@ -3391,7 +3470,7 @@ module private Domain =
             else
                 Error(dispositionError task guard reference)
 
-    // Section 9: targets are typed and must reference existing entities. A
+    // targets are typed and must reference existing entities. A
     // Decision is provenance-only here, so this validates structure, not authority.
     let private validateDecisionTarget (task: TaskModel) target =
         match target with
@@ -3466,7 +3545,7 @@ module private Domain =
         | OtherDecisionTarget text ->
             nonEmpty "decision target" text |> Result.map OtherDecisionTarget
 
-    // Section 10: WorkItem-scoped impact references existing, unique WorkItems.
+    // WorkItem-scoped impact references existing, unique WorkItems.
     let private validateQuestionImpact (task: TaskModel) (questionIdText: string) (impact: QuestionImpact) =
         match impact with
         | TaskWide -> Ok TaskWide
@@ -3642,7 +3721,7 @@ module private Domain =
 
     let private descendantItems (item: WorkItem) = flattenItems item.Children
 
-    // Section 30: a WorkItem without an explicit owner inherits the nearest
+    // a WorkItem without an explicit owner inherits the nearest
     // ancestor owner; a root with no owner has no effective owner.
     let effectiveOwner (task: TaskModel) (workItemIdText: string) =
         match itemPath workItemIdText task.WorkItems with
@@ -3819,15 +3898,21 @@ module private Domain =
             let! authority = parseDecisionAuthority dto.Authority
 
             // Sidecar JSON is untrusted: only Coordinator provenance is accepted.
-            // User and ProfilePolicy Decisions cannot be verified without the #13
+            // User and ProfilePolicy Decisions cannot be verified without a
             // signed-attestation bridge, so they are rejected explicitly rather
             // than silently demoted.
             do!
                 match authority with
                 | User ->
                     Error(
-                        InvalidInput
+                        AuthorityDenied(
+                            { RequiredAuthority = MinimumAuthority.UserAuthority
+                              Operation = "task_apply.add-decision"
+                              DecisionKind = None
+                              Target = None
+                              DecisionRefStatus = DecisionRefStatus.Absent },
                             $"decision '{dto.Id}' claims User authority, which is rejected until the #13 signed-attestation bridge verifies it"
+                        )
                     )
                 | ProfilePolicy ->
                     Error(InvalidInput $"decision '{dto.Id}' claims ProfilePolicy provenance, which serialized state cannot establish")
@@ -3864,8 +3949,14 @@ module private Domain =
                 match confirmationRef with
                 | Some _ ->
                     Error(
-                        InvalidInput
+                        AuthorityDenied(
+                            { RequiredAuthority = MinimumAuthority.UserAuthority
+                              Operation = "task_apply.add-decision"
+                              DecisionKind = None
+                              Target = None
+                              DecisionRefStatus = DecisionRefStatus.Absent },
                             $"decision '{dto.Id}' carries an unverifiable confirmationRef, which is rejected until the #13 signed-attestation bridge verifies it"
+                        )
                     )
                 | None -> Ok()
 
@@ -3925,7 +4016,7 @@ module private Domain =
                 | false, _ -> Error (InvalidInput "created must be an ISO-8601 timestamp")
             let! kind = parseKind dto.Kind
 
-            // Section 20: production reads tolerate a fingerprint mismatch so
+            // production reads tolerate a fingerprint mismatch so
             // drift can be surfaced and reconciled; the strict built-in reader
             // still rejects unknown profiles and mismatched fingerprints.
             do!
@@ -4166,7 +4257,7 @@ module private Domain =
     let private allWorkTerminal (task: TaskModel) =
         flattenItems task.WorkItems |> List.forall (fun item -> isTerminalState item.State)
 
-    // Section 8.1 Guard scope: a WorkItemTarget Guard sees only Valid Evidence the
+    // Guard scope: a WorkItemTarget Guard sees only Valid Evidence the
     // WorkItem explicitly references; a TaskTarget Guard sees task-level Evidence.
     let private guardEvidence (task: TaskModel) target =
         match target with
@@ -4179,7 +4270,7 @@ module private Domain =
                 |> List.choose (fun reference ->
                     task.Evidence |> List.tryFind (fun record -> record.Evidence.Id = reference))
 
-    // Section 15.4: independent production needs concrete, distinct producer
+    // independent production needs concrete, distinct producer
     // identities. Independence is proven against the guarded WorkItem's effective
     // owner; a TaskTarget guard has no owner identity and stays unsatisfied.
     let private guardSatisfied (task: TaskModel) (guard: Guard) =
@@ -4196,7 +4287,7 @@ module private Domain =
                         && record.Evidence.Kind = requirement.Kind
                         && (requirement.ProducerRole
                             |> Option.forall (fun role -> record.Evidence.ProducerRole = Some role)))
-                    // Section 15.4: a WorkItem may reference the same Evidence more
+                    // a WorkItem may reference the same Evidence more
                     // than once; each distinct Evidence counts once toward
                     // MinimumCount and independent-producer satisfaction.
                     |> List.distinctBy (fun record -> record.Evidence.Id)
@@ -4249,7 +4340,7 @@ module private Domain =
                 |> List.filter (fun guard -> not (guardSatisfied task guard))
                 |> List.map (fun guard -> UnmetGuard guard.Id)
 
-            // Section 10: an open TaskWide question blocks every pending WorkItem;
+            // an open TaskWide question blocks every pending WorkItem;
             // a WorkItems-scoped question blocks only its listed WorkItems.
             let openQuestions =
                 task.Questions
@@ -4366,9 +4457,7 @@ module private Domain =
             return validRefs
         }
 
-    // Section 27: purely mechanical completion invariant. CONTRACT_DRIFT,
-    // TaskWide Questions, requirement waivers, and child-Task correlation are
-    // deferred to later slices; the Guard/AC/terminal checks here are canonical.
+    // The canonical mechanical completion invariant for CompleteTask.
     let canCompleteTask (task: TaskModel) =
         allAcceptanceVerified task
         && allWorkTerminal task
@@ -4377,8 +4466,8 @@ module private Domain =
             |> List.filter (fun guard -> guard.Checkpoint = BeforeComplete)
             |> List.forall (guardSatisfied task))
 
-    // Section 5.2: reopening invalidates exactly the named targets, clears the
-    // current handoff into immutable history, and returns the task to Open. Prior
+    // reopening invalidates exactly the named targets, clears the
+    // current handoff into immutable history, and returns the task to Open. Existing
     // Evidence/Decisions remain untouched history.
     let private applyReopen (task: TaskModel) (request: ReopenRequest) =
         let targets = request.Targets
@@ -4467,7 +4556,7 @@ module private Domain =
 
         items |> List.map fix
 
-    // Section 8.2 steps 3-6: deterministic Evidence invalidation cascade.
+    // Cascade steps 3-6: deterministic Evidence invalidation cascade.
     let private invalidationCascade (task: TaskModel) =
         let workItems =
             reopenNonTerminalParents (reopenInvalidWorkItems task)
@@ -4479,11 +4568,10 @@ module private Domain =
         else
             next
 
-    // Section 9.2: one canonical authorization resolver. Every semantic operation
-    // declares its exact typed target and minimum authority. With the #13 ingress
-    // removed the only invocation authority is the Coordinator, so User-required
-    // operations fail closed; a referenced Decision must still authorize the
-    // exact target at the required authority.
+    // One canonical authorization resolver. Every semantic operation declares
+    // its exact typed target and minimum authority. The only invocation authority
+    // is the Coordinator, so User-required operations fail closed; a referenced
+    // Decision must still authorize the exact target at the required authority.
     type private AuthorizationOutcome =
         | ReuseDecision of DecisionRef
         | NewDecision of Decision
@@ -4491,6 +4579,7 @@ module private Domain =
     let private authorize
         (now: DateTimeOffset)
         (task: TaskModel)
+        (operation: string)
         (decisionKind: DecisionKind)
         (operationTarget: DecisionTarget)
         (minimumAuthority: MinimumAuthority)
@@ -4502,6 +4591,22 @@ module private Domain =
             match decisionRef with
             | Some (DecisionRef referenceId) ->
                 match findDecision referenceId task.Decisions with
+                | None when minimumAuthority <> MinimumAuthority.CoordinatorAuthority ->
+                    // a User-required operation whose supplied DecisionRef
+                    // does not exist is an absent authorization, not a text-only
+                    // NotFound; report the exact missing authority so the caller can
+                    // distinguish a missing ref from a mismatched one.
+                    return!
+                        Error(
+                            AuthorityDenied(
+                                { RequiredAuthority = minimumAuthority
+                                  Operation = operation
+                                  DecisionKind = Some decisionKind
+                                  Target = Some target
+                                  DecisionRefStatus = DecisionRefStatus.Absent },
+                                $"operation requires {minimumAuthorityToString minimumAuthority} authority and Decision '{referenceId}' was not found; ordinary Coordinator invocation cannot authorize it"
+                            )
+                        )
                 | None -> return! Error(NotFound $"Decision '{referenceId}' was not found")
                 | Some decision when
                     decision.Kind = decisionKind
@@ -4509,23 +4614,35 @@ module private Domain =
                     ->
                     return ReuseDecision(DecisionRef referenceId)
                 | Some decision ->
-                    // Section 9.2: reuse must match both the exact typed target and
+                    // reuse must match both the exact typed target and
                     // the operation's Decision kind; a Decision for another kind
                     // (for example a waiver) never authorizes a different operation.
                     return!
                         Error(
-                            InvalidInput
+                            AuthorityDenied(
+                                { RequiredAuthority = minimumAuthority
+                                  Operation = operation
+                                  DecisionKind = Some decisionKind
+                                  Target = Some target
+                                  DecisionRefStatus = DecisionRefStatus.Mismatched },
                                 $"Decision '{referenceId}' has kind {decisionKindToString decision.Kind} and does not authorize the exact operation {decisionTargetToString target} as kind {decisionKindToString decisionKind} at {minimumAuthorityToString minimumAuthority} authority"
+                            )
                         )
             | None ->
                 if minimumAuthority <> MinimumAuthority.CoordinatorAuthority then
                     return!
                         Error(
-                            InvalidInput
+                            AuthorityDenied(
+                                { RequiredAuthority = minimumAuthority
+                                  Operation = operation
+                                  DecisionKind = Some decisionKind
+                                  Target = Some target
+                                  DecisionRefStatus = DecisionRefStatus.Absent },
                                 $"operation requires {minimumAuthorityToString minimumAuthority} authority; ordinary Coordinator invocation cannot authorize it"
+                            )
                         )
                 else
-                    // Section 9.2: runtime creates the durable target-bound Decision
+                    // runtime creates the durable target-bound Decision
                     // atomically instead of requiring the model to manufacture it.
                     let decision: Decision =
                         { Id = nextDecisionId task
@@ -4539,7 +4656,7 @@ module private Domain =
                     return NewDecision decision
         }
 
-    // Section 22: one operation-based patch model. Validation normalizes every
+    // one operation-based patch model. Validation normalizes every
     // payload so evolve persists exactly the values decide authorized.
     let private validateContractPatch (task: TaskModel) (patch: ContractPatch) : Result<ContractPatch, RuntimeError> =
         match patch with
@@ -4597,7 +4714,7 @@ module private Domain =
         | ContractPatch.SetNonGoals text ->
             nonEmpty "contract nonGoals" text |> Result.map ContractPatch.SetNonGoals
 
-    // Section 22.1: a Draft guard removal is limited to task-design guards;
+    // a Draft guard removal is limited to task-design guards;
     // profile-materialized obligations are never manually deleted.
     let private validateDraftGuardRemoval (task: TaskModel) (patch: ContractPatch) =
         match patch with
@@ -4608,7 +4725,7 @@ module private Domain =
             | _ -> Ok()
         | _ -> Ok()
 
-    // Section 22.2: post-baseline authority is fixed per operation. RemoveGuard is
+    // post-baseline authority is fixed per operation. RemoveGuard is
     // forbidden after baseline; weakening prose/AC operations require User.
     let private baselinedPatchAuthority (patch: ContractPatch) : Result<MinimumAuthority, RuntimeError> =
         match patch with
@@ -4646,7 +4763,7 @@ module private Domain =
         | ContractPatch.RemoveGuard id ->
             { task with Guards = task.Guards |> List.filter (fun guard -> guard.Id <> id) }
         | ContractPatch.UpdateAcceptanceCriterion (id, text) ->
-            // Section 22.2/8.2: a Verified criterion is bound to its prior text, so
+            // a Verified criterion is bound to its recorded text, so
             // a text change invalidates that verification and returns the criterion
             // to Pending. Evidence history itself is retained, not superseded.
             { task with
@@ -4661,7 +4778,7 @@ module private Domain =
                         else
                             criterion) }
         | ContractPatch.RemoveAcceptanceCriterion id ->
-            // Section 7: acceptanceRefs are traceability only. Removing the
+            // acceptanceRefs are traceability only. Removing the
             // criterion must prune the now-dangling references from every
             // WorkItem; otherwise the persisted sidecar fails to re-read.
             let rec pruneAcceptanceRefs (items: WorkItem list) =
@@ -4686,7 +4803,7 @@ module private Domain =
             | Some _ when task.Lifecycle <> "open" -> Error [ InvalidTransition "a complete task cannot start work" ]
             | Some item when item.State <> PendingWork -> Error [ InvalidTransition $"WorkItem '{id}' must be pending before it starts" ]
             | Some item ->
-                // Section 12.2: a child may start only under a Pending/Active ancestry;
+                // a child may start only under a Pending/Active ancestry;
                 // activatePath then promotes the still-Pending ancestors atomically.
                 match readiness task item with
                 | NotReady reasons -> Error [ InvalidTransition $"WorkItem '{id}' is not ready: {describeReadiness reasons}" ]
@@ -4700,7 +4817,7 @@ module private Domain =
                             [ InvalidTransition
                                   $"WorkItem '{id}' cannot start while ancestor '{ancestor.Id}' is {stateName ancestor.State}" ]
                     | None ->
-                        // Section 12.2: activation promotes still-Pending ancestors, so a
+                        // activation promotes still-Pending ancestors, so a
                         // question-blocked ancestor must also reject the descendant start.
                         match
                             ancestorItems id task.WorkItems
@@ -4711,7 +4828,7 @@ module private Domain =
                                 [ InvalidTransition
                                       $"WorkItem '{id}' cannot start while ancestor '{ancestor.Id}' is blocked by an open question" ]
                         | None ->
-                            // Section 21.2: the first material start establishes the
+                            // the first material start establishes the
                             // baseline and records the contract fingerprint immediately
                             // before the WorkItem starts.
                             match task.ContractState with
@@ -4726,7 +4843,7 @@ module private Domain =
             | Some _ when task.Lifecycle <> "open" -> Error [ InvalidTransition "a complete task cannot complete work" ]
             | Some item when item.State <> ActiveWork -> Error [ InvalidTransition $"WorkItem '{id}' must be active before completion" ]
             | Some item ->
-                // Section 14: a parent is never implicitly Done; it may complete only
+                // a parent is never implicitly Done; it may complete only
                 // once every direct child is terminal, which recursively clears the subtree.
                 match item.Children |> List.tryFind (fun child -> not (isTerminalState child.State)) with
                 | Some child ->
@@ -4740,7 +4857,7 @@ module private Domain =
                         match validatedCompletionEvidence task completion.EvidenceRefs with
                         | Error error -> Error [ error ]
                         | Ok evidenceRefs ->
-                            // Section 14: BeforeComplete Guards are evaluated against the
+                            // BeforeComplete Guards are evaluated against the
                             // completion payload, so the newly attached refs are visible.
                             let prospectiveItem = { item with EvidenceRefs = evidenceRefs }
 
@@ -4826,13 +4943,14 @@ module private Domain =
                         else
                             MinimumAuthority.CoordinatorAuthority
 
-                    // Section 5.2: reopening must leave the completion predicate
+                    // reopening must leave the completion predicate
                     // false; a no-op reopen would silently rewrite terminal state.
                     if not (canCompleteTask (applyReopen task validRequest)) then
                         match
                             authorize
                                 now
                                 task
+                                "task_apply.reopen"
                                 DesignDecision
                                 target
                                 minimumAuthority
@@ -4858,7 +4976,7 @@ module private Domain =
                 | Ok validPatch ->
                     match task.ContractState with
                     | Draft ->
-                        // Section 21.1: ordinary Coordinator invocation is sufficient
+                        // ordinary Coordinator invocation is sufficient
                         // before baseline; draft edits create no contractRevision history.
                         match validateDraftGuardRemoval task validPatch with
                         | Error error -> Error [ error ]
@@ -4867,7 +4985,7 @@ module private Domain =
                         match baselinedPatchAuthority validPatch with
                         | Error error -> Error [ error ]
                         | Ok minimumAuthority ->
-                            // Section 22.2: the exact patch payload is the authorization
+                            // the exact patch payload is the authorization
                             // target, not the revision the patch will create.
                             let target = ContractPatchTarget(contractPatchIdOf validPatch)
 
@@ -4875,6 +4993,7 @@ module private Domain =
                                 authorize
                                     now
                                     task
+                                    "task_apply.apply-contract-patch"
                                     ContractRevision
                                     target
                                     minimumAuthority
@@ -4895,7 +5014,7 @@ module private Domain =
             else
                 match plan with
                 | ReconciliationPlan.RestoreCanonicalContract content ->
-                    // Section 23: restoring the recorded canonical contract is
+                    // restoring the recorded canonical contract is
                     // Coordinator-authorized and fingerprint-verified.
                     if contractFingerprintOf content <> task.ContractFingerprint then
                         Error [ InvalidInput "restore payload does not match the recorded contract fingerprint" ]
@@ -4906,6 +5025,7 @@ module private Domain =
                             authorize
                                 now
                                 task
+                                "task_apply.reconcile-contract-drift"
                                 ContractRevision
                                 target
                                 MinimumAuthority.CoordinatorAuthority
@@ -4916,14 +5036,16 @@ module private Domain =
                         | Ok (NewDecision decision) ->
                             Ok [ DecisionAdded decision; ContractDriftReconciled plan ]
                 | ReconciliationPlan.AcceptExternalContract ->
-                    // Section 23: accepting an out-of-band rewrite is a material
-                    // User-authorized change; it fails closed until #13.
+                    // Accepting an out-of-band rewrite is a material
+                    // User-authorized change; it fails closed without a trusted
+                    // User ingress.
                     let target = ContractPatchTarget(contractReconciliationId plan)
 
                     match
                         authorize
                             now
                             task
+                            "task_apply.reconcile-contract-drift"
                             ContractRevision
                             target
                             MinimumAuthority.UserAuthority
@@ -5005,6 +5127,7 @@ module private Domain =
                             authorize
                                 now
                                 task
+                                "task_apply.mark-not-applicable"
                                 ApplicabilityDecision
                                 (GuardDispositionTarget id)
                                 minimumAuthority
@@ -5033,6 +5156,7 @@ module private Domain =
                             authorize
                                 now
                                 task
+                                "task_apply.waive-guard"
                                 WaiverDecision
                                 (GuardDispositionTarget id)
                                 minimumAuthority
@@ -5049,7 +5173,7 @@ module private Domain =
             if task.Lifecycle <> "open" then
                 Error [ InvalidTransition "a complete task cannot add a decision" ]
             else
-                // Section 9: ordinary input is Coordinator-only; the runtime assigns
+                // ordinary input is Coordinator-only; the runtime assigns
                 // Id/Authority/CreatedAt so authority is never self-declared.
                 match validateDecisionDraft now task draft with
                 | Error error -> Error [ error ]
@@ -5075,14 +5199,26 @@ module private Domain =
                 | Some question ->
                     let (DecisionRef referenceId) = reference
 
-                    // Section 10: resolution requires an existing Decision whose typed
+                    // resolution requires an existing Decision whose typed
                     // target exactly matches this question.
                     match findDecision referenceId task.Decisions with
                     | None -> Error [ NotFound $"Decision '{referenceId}' was not found" ]
                     | Some decision when decision.Targets |> List.contains (QuestionResolutionTarget question.Id) ->
                         Ok [ QuestionResolved(id, reference) ]
                     | Some _ ->
-                        Error [ InvalidInput $"Decision '{referenceId}' does not target Question '{id}'" ]
+                        // A present DecisionRef that does not target this question
+                        // is a mismatch, not a syntax error; report the canonical
+                        // User/UserDecision remediation. The signed User path is the
+                        // durable authorization but has no trusted ingress.
+                        Error
+                            [ AuthorityDenied(
+                                  { RequiredAuthority = MinimumAuthority.UserAuthority
+                                    Operation = "task_apply.resolve-question"
+                                    DecisionKind = Some UserDecision
+                                    Target = Some(QuestionResolutionTarget question.Id)
+                                    DecisionRefStatus = DecisionRefStatus.Mismatched },
+                                  $"Decision '{referenceId}' does not target Question '{id}'"
+                              ) ]
         | QuestionResolved _ ->
             Error [ InvalidInput "question resolution events are produced by decide and cannot be applied as commands" ]
         | ReclassifyTask _ ->
@@ -5120,7 +5256,7 @@ module private Domain =
                     else
                         Ok [ CompleteTask validHandoff ]
 
-    // Section 17.5/20: the registry is required for reclassification and profile
+    // the registry is required for reclassification and profile
     // reconciliation; a task whose profile is no longer registered cannot mutate.
     // The bare messages are shared with read-only validation so the drift markers
     // stay a single reporting protocol; mutation errors append the remedy.
@@ -5139,7 +5275,7 @@ module private Domain =
     let private profileDriftError (task: TaskModel) =
         InvalidTransition (profileDriftMessage task + "; reconcile before mutating state")
 
-    // Section 20/23: read-only validation findings. Structural parsing stays
+    // read-only validation findings. Structural parsing stays
     // lenient so getTask can always surface state; validateTask must still fail
     // explicitly on a missing/drifted profile and on contract drift. Empty means
     // the persisted state is consistent with the current registry and its own
@@ -5154,7 +5290,7 @@ module private Domain =
     let private reclassificationTarget (kind: Kind) (profileIdText: string) =
         ReclassificationTarget($"{kindToString kind}|{profileIdText}")
 
-    // Section 25.1: Draft reclassification is ordinary design; a baselined change
+    // Draft reclassification is ordinary design; a baselined change
     // is Coordinator-only while it stays non-weakening, otherwise it needs User
     // authority (which has no trusted ingress yet and therefore fails closed).
     let private decideReclassification
@@ -5206,6 +5342,7 @@ module private Domain =
                     authorize
                         now
                         task
+                        "task_apply.reclassify-task"
                         ContractRevision
                         (reclassificationTarget kind targetProfileId)
                         minimumAuthority
@@ -5216,7 +5353,7 @@ module private Domain =
                 | Ok (NewDecision decision) -> return DecisionAdded decision :: syncEvents
         }
 
-    // Section 20.2: baselined profile drift reconciles monotonically toward the
+    // baselined profile drift reconciles monotonically toward the
     // current registry profile; removed requirements are never deleted.
     let private decideProfileReconciliation
         (profiles: Map<string, EffectiveProfile>)
@@ -5235,6 +5372,7 @@ module private Domain =
                     authorize
                         now
                         task
+                        "task_apply.reconcile-profile-drift"
                         ContractRevision
                         (ReclassificationTarget($"profileDrift:{task.Profile}"))
                         MinimumAuthority.CoordinatorAuthority
@@ -5255,7 +5393,7 @@ module private Domain =
                               syncProfileGuards task.Guards task.ProfileGuardKeys profile task.Kind true
                           ) ]
 
-    // Section 20: profile availability/drift gates every mutation. Draft absorbs
+    // profile availability/drift gates every mutation. Draft absorbs
     // the current profile by replacement, baselined drift blocks until explicit
     // reconciliation, and reopening syncs atomically with the current profile.
     let private decideCore (profiles: Map<string, EffectiveProfile>) (now: DateTimeOffset) (task: TaskModel) command =
@@ -5271,7 +5409,7 @@ module private Domain =
 
                 match command with
                 | ReopenTask request when drift ->
-                    // Section 20.3: reopen re-resolves the profile and materializes
+                    // reopen re-resolves the profile and materializes
                     // new/stronger requirements in the same apply as the reopen.
                     match decideCommand now task command with
                     | Error errors -> Error errors
@@ -5293,7 +5431,7 @@ module private Domain =
                 | _ when drift && task.ContractState = Baselined ->
                     Error [ profileDriftError task ]
                 | _ when drift ->
-                    // Section 20.1/21.2: a Draft contract absorbs the current
+                    // a Draft contract absorbs the current
                     // Profile, and its mandatory guards must be materialized before
                     // the command is validated so the command cannot bypass the
                     // newly materialized obligations.
@@ -5319,7 +5457,7 @@ module private Domain =
                     | Error errors -> Error errors
                     | Ok events -> Ok events
 
-    // Section 23: while the persisted contract no longer matches its recorded
+    // while the persisted contract no longer matches its recorded
     // fingerprint, material mutations are rejected; only reconciliation may
     // proceed. Read-only analysis uses getTask/validateTask, not decide. The
     // decision instant is an explicit input so decide stays pure and
@@ -5338,7 +5476,7 @@ module private Domain =
                 match event with
                 | StartWorkItem id -> { current with WorkItems = activatePath id current.WorkItems }
                 | ContractBaselined fingerprint ->
-                    // Section 21.2: the fingerprint recorded at baseline anchors the
+                    // the fingerprint recorded at baseline anchors the
                     // canonical contract; the initial revision established at create
                     // is retained, so no revision bump occurs here.
                     { current with
@@ -5394,8 +5532,8 @@ module private Domain =
                         |> List.filter (fun record -> record.Validity = Valid)
                         |> List.map (fun record -> record.Evidence.Id)
 
-                    // Section 8.2 cascade step 2: a Verified AC keeps only still-Valid
-                    // references and returns to Pending when none remain.
+                    // Cascade step 2: a Verified AC keeps only still-Valid references
+                    // and returns to Pending when none remain.
                     let acceptanceCriteria =
                         current.AcceptanceCriteria
                         |> List.map (fun criterion ->
@@ -5409,7 +5547,7 @@ module private Domain =
                                     { criterion with State = Verified remaining }
                             | Pending -> criterion)
 
-                    // Section 8.2 steps 3-6: the mechanical cascade reopens affected
+                    // Cascade steps 3-6: the mechanical cascade reopens affected
                     // WorkItems/parents and the Task lifecycle after the Evidence flips.
                     // Superseded Evidence no longer counts as attached to a WorkItem,
                     // so stale refs are pruned before the cascade evaluates Guards.
@@ -5482,7 +5620,7 @@ module private Domain =
                     let next = applyContractPatch current patch
 
                     if baselined then
-                        // Section 22.2: an accepted post-baseline patch creates a new
+                        // an accepted post-baseline patch creates a new
                         // contractRevision and refreshes the fingerprint.
                         { next with
                             ContractRevision = current.ContractRevision + 1
@@ -5495,7 +5633,7 @@ module private Domain =
                 | ContractDriftReconciled plan ->
                     match plan with
                     | ReconciliationPlan.RestoreCanonicalContract content ->
-                        // Section 23: restore prose and AC ids/text, preserving the
+                        // restore prose and AC ids/text, preserving the
                         // verification state of criteria that survive by id.
                         let acceptanceCriteria =
                             content.AcceptanceCriteria
@@ -5511,7 +5649,7 @@ module private Domain =
                             AcceptanceCriteria = acceptanceCriteria
                             ContractRevision = current.ContractRevision + 1 }
                     | ReconciliationPlan.AcceptExternalContract ->
-                        // Section 23: adopt the current content as the new canonical
+                        // adopt the current content as the new canonical
                         // contract, clearing drift without discarding history.
                         { current with
                             ContractFingerprint = contractFingerprintOf (contractContentOf current)
@@ -5529,7 +5667,7 @@ module private Domain =
                     current
                 | ProfileDriftReconciled fingerprint -> { current with ProfileFingerprint = fingerprint }
                 | ProfileGuardsSynced synced ->
-                    // Section 15.5: replace only profile-materialized guards so
+                    // replace only profile-materialized guards so
                     // task-design guards and their dispositions survive, and
                     // persist the stable key provenance that sync correlated on.
                     let guards = synced |> List.map _.Guard
@@ -5554,10 +5692,10 @@ module private Domain =
                             | None -> current.CompletionHistory })
             task
 
-// Section 24: pure decide receives the decision instant explicitly. This public
-// variant is the explicit-time entry used by the imperative apply boundary
-// (see applyTask); passing time as an argument keeps decide deterministic with
-// no ambient clock read inside the domain.
+// Pure decide receives the decision instant explicitly. This public variant is
+// the explicit-time entry used by the imperative apply boundary (see applyTask);
+// passing time as an argument keeps decide deterministic with no ambient clock
+// read inside the domain.
 let decideAt (profiles: Map<string, EffectiveProfile>) (now: DateTimeOffset) (task: TaskModel) command =
     Domain.decide profiles now task command
 
@@ -5571,9 +5709,9 @@ let evolve task events = Domain.evolve task events
 
 let canCompleteTask task = Domain.canCompleteTask task
 
-// Section 30.1: the #11 Assignment adapter consumes a WorkItem's durable
-// effective owner (including inheritance) through this boundary instead of
-// re-deriving ownership. A WorkItem with no effective owner cannot be assigned.
+// The Assignment adapter consumes a WorkItem's durable effective owner
+// (including inheritance) through this boundary instead of re-deriving ownership.
+// A WorkItem with no effective owner cannot be assigned.
 let resolveWorkItemOwner (task: TaskModel) (workItemIdText: string) : Result<WorkItem * Owner, RuntimeError> =
     match Domain.findWorkItem workItemIdText task.WorkItems with
     | None -> Error(NotFound $"WorkItem '{workItemIdText}' was not found")
@@ -5857,7 +5995,7 @@ let private loadTaskLenient path = readTaskLenient path
 let private loadTaskWith (profiles: Map<string, EffectiveProfile>) path = readTaskWith profiles path
 
 // A task directory has one supported layout: the runtime sidecar at its root.
-// Historical TASK.md/references layouts and persisted locks are not inputs.
+// TASK.md/references layouts and persisted locks are not inputs.
 let private validateTaskDirectory (taskDirectory: string) : Result<unit, RuntimeError> =
     let comparison =
         if OperatingSystem.IsWindows() then StringComparison.OrdinalIgnoreCase else StringComparison.Ordinal
@@ -5890,29 +6028,32 @@ let private validateTaskDirectory (taskDirectory: string) : Result<unit, Runtime
         Error(PersistenceFailure $"could not inspect task directory: {error.Message}")
 
 let private withExistingSidecar root taskDirectory (path: string) action =
-
-    withLock path (fun () ->
-        let withinDirectoryBoundary action =
-            if OperatingSystem.IsWindows() then
-                withWindowsDirectoryBoundaries root taskDirectory false action
-            else
-                action ()
-
-        withinDirectoryBoundary (fun () ->
-            result {
-                do! validateTaskDirectory taskDirectory
-
-                if not (File.Exists path) then
-                    return! Error(NotFound $"runtime sidecar does not exist: {path}")
-
-                let! result = action ()
-
-                if File.Exists path then
-                    return result
+    // A missing task directory fails closed before any Windows handle is opened so
+    // the not-found contract is identical on every platform.
+    if not (Directory.Exists taskDirectory) then
+        Error(NotFound $"runtime sidecar does not exist: {path}")
+    else
+        withLock path (fun () ->
+            let withinDirectoryBoundary action =
+                if OperatingSystem.IsWindows() then
+                    withWindowsDirectoryBoundaries root taskDirectory false action
                 else
-                    return! Error(NotFound $"runtime sidecar does not exist: {path}")
-            })
-        )
+                    action ()
+
+            withinDirectoryBoundary (fun () ->
+                result {
+                    do! validateTaskDirectory taskDirectory
+
+                    if not (File.Exists path) then
+                        return! Error(NotFound $"runtime sidecar does not exist: {path}")
+
+                    let! result = action ()
+
+                    if File.Exists path then
+                        return result
+                    else
+                        return! Error(NotFound $"runtime sidecar does not exist: {path}")
+                }))
 
 let private atomicWrite (path: string) (content: string) =
     let directory = Path.GetDirectoryName path
@@ -5942,7 +6083,7 @@ let private atomicWrite (path: string) (content: string) =
 
 let private persist path task = atomicWrite path (serialize task)
 
-// Section 17: the caller may name an explicit active profile; an omitted profile
+// the caller may name an explicit active profile; an omitted profile
 // falls back to general and an unknown id fails before any sidecar is written.
 let createTaskWithProfile root profileId request =
     result {
@@ -5999,8 +6140,7 @@ let getTask root id =
 
 // Ordinary CLI/model apply boundary. Invocation is Coordinator-only: there is no
 // authority parameter, receipt factory, or User ingress, so User-required
-// operations fail closed inside decide until #13 supplies a signed-attestation
-// bridge.
+// operations fail closed inside decide without a signed-attestation bridge.
 let applyTask root id expectedRevision command =
     result {
         let! path, taskDirectory = sidecarPath root id
@@ -6017,7 +6157,20 @@ let applyTask root id expectedRevision command =
                     let! events =
                         match decideAt profiles DateTimeOffset.UtcNow task command with
                         | Ok events -> Ok events
-                        | Error errors -> Error(InvalidInput(errors |> List.map errorMessage |> String.concat "; "))
+                        | Error errors ->
+                            // carry the structured authority remediation
+                            // through unchanged instead of flattening it into a
+                            // text-only InvalidInput. Every other error list keeps
+                            // its existing flattened envelope.
+                            match
+                                errors
+                                |> List.tryPick (fun error ->
+                                    match error with
+                                    | AuthorityDenied _ -> Some error
+                                    | _ -> None)
+                            with
+                            | Some authorityError -> Error authorityError
+                            | None -> Error(InvalidInput(errors |> List.map errorMessage |> String.concat "; "))
 
                     let next = evolve task events
                     let next = { next with StateRevision = task.StateRevision + 1 }
@@ -6032,7 +6185,7 @@ let validateTask root id =
         let! profiles = resolveProfiles root
         let! task = withExistingSidecar root taskDirectory path (fun () -> loadTaskWith profiles path)
 
-        // Section 20/23: validation is read-only but truthful. getTask stays
+        // validation is read-only but truthful. getTask stays
         // lenient; validate fails explicitly when the recorded profile is missing
         // or drifted, or when the persisted contract no longer matches its
         // recorded fingerprint.

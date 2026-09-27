@@ -63,7 +63,7 @@ module AuthorizedInvocation =
     let private validateExecutable workspaceRoot candidate : Result<string, VerificationError> =
         try
             if String.IsNullOrWhiteSpace candidate then
-                Error(ProcessStartFailure "the verifier requires an injected .NET host")
+                Error(ProcessStartFailure "the dotnet MCP requires an injected .NET host")
             elif candidate.StartsWith("\\\\", StringComparison.Ordinal) || candidate.StartsWith("//", StringComparison.Ordinal) then
                 Error(ProcessStartFailure "the injected .NET host must be a local absolute path")
             elif not (Path.IsPathFullyQualified candidate) then
@@ -107,38 +107,11 @@ module Invocation =
         | Some path -> [ Path.GetFullPath path ]
         | None -> [ root ]
 
-    let private validateConfiguration configuration =
-        match configuration with
-        | None -> Ok "Release"
-        | Some value when String.IsNullOrWhiteSpace value -> Error(InvalidInput "configuration must be non-empty")
-        | Some value when value.Length > 64 -> Error(InvalidInput "configuration is too long")
-        | Some value when
-            value
-            |> Seq.exists (fun character ->
-                not (
-                    Char.IsLetterOrDigit character
-                    || character = '-'
-                    || character = '_'
-                    || character = '.'
-                ))
-            ->
-            Error(InvalidInput "configuration contains unsupported characters")
-        | Some value -> Ok value
-
-    let private validateFilter filter =
-        match filter with
-        | None -> Ok None
-        | Some value when String.IsNullOrWhiteSpace value ->
-            Error(InvalidInput "filter must be non-empty when supplied")
-        | Some value when value.Length > 512 || value.IndexOf('\u0000') >= 0 ->
-            Error(InvalidInput "filter is invalid or too long")
-        | Some value -> Ok(Some value)
-
     let build workspaceRoot (dotnetHost: string) budgets (options: BuildOptions) (paths: ArtifactPaths) =
         result {
             let! authorized = PathAuthorization.authorize workspaceRoot options.Target
             let! executable = AuthorizedInvocation.validateInjectedHost authorized.WorkspaceRoot dotnetHost
-            let! configuration = validateConfiguration options.Configuration
+            let! configuration = ConfigurationName.validate options.Configuration
             let! timeout = Budgets.validateTimeout budgets options.Timeout
             let noRestore = options.NoRestore |> Option.defaultValue false
             let target = targetArgument authorized.WorkspaceRoot authorized.Target
@@ -164,8 +137,8 @@ module Invocation =
         result {
             let! authorized = PathAuthorization.authorize workspaceRoot options.Target
             let! executable = AuthorizedInvocation.validateInjectedHost authorized.WorkspaceRoot dotnetHost
-            let! configuration = validateConfiguration options.Configuration
-            let! filter = validateFilter options.Filter
+            let! configuration = ConfigurationName.validate options.Configuration
+            let! filter = TestFilter.validate options.Filter
             let! timeout = Budgets.validateTimeout budgets options.Timeout
             let noBuild = options.NoBuild |> Option.defaultValue false
             let target = targetArgument authorized.WorkspaceRoot authorized.Target

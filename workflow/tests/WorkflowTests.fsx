@@ -296,8 +296,8 @@ try
         mutateJson (fun node ->
             node.["workItems"].AsArray().[0].AsObject().["children"].AsArray().Add(JsonNode.Parse """{"id":"W2","title":"Child","state":"pending","result":"","acceptanceRefs":[],"dependsOn":[],"evidenceRefs":[],"children":[]}"""))
 
-    // Strict schema-v1 rejections: non-v1 and legacy fingerprints are no longer
-    // accepted, and every required v3 field must be present.
+    // Strict schema-v1 rejections: non-v1 versions and mismatched fingerprints
+    // are rejected, and every required schema-v1 field must be present.
     let schemaV2 = mutateJson (fun node -> node.["schemaVersion"] <- JsonValue.Create 2)
 
     let legacyGeneralFingerprint =
@@ -970,8 +970,8 @@ try
 
     assertEqual "terminal rejections are no-ops" 5 (expectOk "get terminal task" (getTask tempRoot terminalTask)).StateRevision
 
-    // Supersession stays available after terminal so the Section 8.2 cascade can
-    // reopen a Complete task that no longer satisfies CanCompleteTask.
+    // Supersession stays available after terminal so the cascade can reopen a
+    // Complete task that no longer satisfies CanCompleteTask.
     let terminalReopened =
         expectOk "supersede after terminal" (applyTask tempRoot terminalTask 5 (SupersedeEvidence("E1", "late")))
 
@@ -1680,8 +1680,8 @@ try
     let dispositionOpen = expectOk "get disposition task" (getTask tempRoot dispositionTask)
     assertTrue "disposition guard unmet predicate false" (not (canCompleteTask dispositionOpen))
 
-    // Section 9.2: a disposition is authorized only by its own Decision kind, so
-    // the fixture emits the matching kind for each disposition under test.
+    // A disposition is authorized only by its own Decision kind, so the fixture
+    // emits the matching kind for each disposition under test.
     let dispositionJson (dispositionText: string) (applicabilityText: string) (waiverText: string) (decisionKind: string) =
         let node = JsonNode.Parse(serialize dispositionOpen).AsObject()
         let guard = node.["guards"].AsArray().[0].AsObject()
@@ -1881,10 +1881,10 @@ try
     assertEqual "unrelated supersede keeps AC" (Verified [ "E1" ]) afterUnrelatedSupersede.AcceptanceCriteria.Head.State
     assertEqual "unrelated supersede keeps work done" DoneWork afterUnrelatedSupersede.WorkItems.Head.State
 
-    // --- Scenario 19: Decisions and Open Questions (slice 6) -----------------
-    // Section 9/10: strict Decision/Question DTOs, decision-graph validation,
-    // typed target matching, TaskWide vs WorkItem-scoped blocking, resolution,
-    // and revision/no-op/persistence behavior.
+    // --- Scenario 19: Decisions and Open Questions -------------------------
+    // Strict Decision/Question DTOs, decision-graph validation, typed target
+    // matching, TaskWide vs WorkItem-scoped blocking, resolution, and
+    // revision/no-op/persistence behavior.
     let decisionNode (mutate: JsonObject -> unit) =
         let node =
             JsonNode.Parse(
@@ -2515,11 +2515,11 @@ try
     assertEqual "persisted cascade parent reopened" PendingWork persistedCascade.WorkItems.Head.State
     assertEqual "persisted cascade parent result cleared" None persistedCascade.WorkItems.Head.Result
 
-    // --- Scenario 23: Coordinator-only invocation authority (slice 6) -------
-    // Sections 9.1-9.5/25: authority is derived from a trusted invocation
-    // context, never from command input. The #13 User/ProfilePolicy ingress and
-    // confirmation receipts are removed, so ordinary applyTask/CLI is
-    // Coordinator-only and User-required operations fail closed. Sidecar JSON is
+    // --- Scenario 23: Coordinator-only invocation authority ----------------
+    // Authority is derived from a trusted invocation context, never from command
+    // input. There is no User/ProfilePolicy ingress or confirmation receipt, so
+    // ordinary applyTask/CLI is Coordinator-only and User-required operations
+    // fail closed. Sidecar JSON is
     // untrusted: forged User/ProfilePolicy provenance and confirmationRef claims
     // are rejected on load, and a persisted Guard disposition must be backed by
     // an exact target-bound Decision at the required authority.
@@ -2731,7 +2731,7 @@ try
     assertEqual "CLI rejection preserves G2" GuardDisposition.Applicable (afterCli.Guards |> List.find (fun g -> g.Id = "G2")).Disposition
 
     // --- Scenario 24: WorkItem ownership, rebind, and inheritance ----------
-    // Section 30: ownership is a durable design-time responsibility; children
+    // Ownership is a durable design-time responsibility; children
     // inherit the nearest ancestor owner unless explicitly overridden.
     let ownerTask = "TST-400"
 
@@ -2872,7 +2872,7 @@ try
         (applyTask tempRoot noOwnerTask 3 (CompleteWorkItem("W1.1", { Result = "done"; EvidenceRefs = [ "E2" ] })))
 
     // --- Scenario 25: terminal handoff persistence, history, validation -----
-    // Section 27.1: CompleteTask accepts a structurally validated handoff; the
+    // CompleteTask accepts a structurally validated handoff; the
     // current handoff is retained and superseded handoffs move to history.
     let handoffTask = "TST-410"
     expectOk "create handoff task" (createTask tempRoot (createRequest handoffTask "Handoff task")) |> ignore
@@ -2958,7 +2958,7 @@ try
         (expectOk "get after handoff rejections" (getTask tempRoot handoffValidationTask)).StateRevision
 
     // --- Scenario 26: targeted ReopenTask -----------------------------------
-    // Section 5.2: reopening must name the state it invalidates and leave
+    // Reopening must name the state it invalidates and leave
     // CanCompleteTask false; Complete -> Open is Coordinator-authorizable.
     let completeForReopen id =
         expectOk $"create {id}" (createTask tempRoot (createRequest id "Reopen task")) |> ignore

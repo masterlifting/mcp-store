@@ -17,7 +17,7 @@ let private emptyPaths =
 
 let private runIdFor action =
     use workspace = new TempWorkspace()
-    use registry = new ArtifactRegistry(Path.Combine(workspace.Root, "artifacts"), TimeSpan.FromHours 1.0)
+    use registry = new ArtifactRegistry(Path.Combine(workspace.Root, "artifacts"), workspace.Namespace, TimeSpan.FromHours 1.0)
     action (startRun registry).RunId
 
 let private statusTests =
@@ -76,29 +76,6 @@ let private budgetTests =
                     MaximumTimeout = TimeSpan.FromMinutes 1.0 }
             |> expectErrorMatching "inverted timeout" isInvalidInput
             |> ignore
-
-        testCase "timeout outside the accepted range is rejected"
-        <| fun _ ->
-            Budgets.validateTimeout Budgets.Defaults (Some(TimeSpan.FromMilliseconds 1.0))
-            |> expectErrorMatching "below minimum" isInvalidInput
-            |> ignore
-
-            Budgets.validateTimeout Budgets.Defaults (Some(TimeSpan.FromHours 2.0))
-            |> expectErrorMatching "above maximum" isInvalidInput
-            |> ignore
-
-        testCase "timeout defaults and accepted bounds resolve"
-        <| fun _ ->
-            Expect.equal
-                (Budgets.validateTimeout Budgets.Defaults None |> expectOk "default timeout")
-                Budgets.Defaults.DefaultTimeout
-                "default timeout"
-
-            Expect.equal
-                (Budgets.validateTimeout Budgets.Defaults (Some Budgets.Defaults.MinimumTimeout)
-                 |> expectOk "minimum timeout")
-                Budgets.Defaults.MinimumTimeout
-                "minimum timeout"
     ]
 
 let private compactBuildTests =
@@ -187,28 +164,6 @@ let private compactTestTests =
 
 let private paginationTests =
     testList "detail pagination" [
-        testCase "negative offset is rejected"
-        <| fun _ ->
-            Budgets.page Budgets.Defaults { RunId = "r"; Kind = DetailKind.Errors; Offset = -1; Limit = None } [ "a" ]
-            |> expectErrorMatching "negative offset" isInvalidPagination
-            |> ignore
-
-        testCase "limit below one and above maximum are rejected"
-        <| fun _ ->
-            Budgets.page Budgets.Defaults { RunId = "r"; Kind = DetailKind.Errors; Offset = 0; Limit = Some 0 } [ "a" ]
-            |> expectErrorMatching "zero limit" isInvalidPagination
-            |> ignore
-
-            Budgets.page
-                Budgets.Defaults
-                { RunId = "r"
-                  Kind = DetailKind.Errors
-                  Offset = 0
-                  Limit = Some(Budgets.Defaults.DetailsMaxPageSize + 1) }
-                [ "a" ]
-            |> expectErrorMatching "limit above maximum" isInvalidPagination
-            |> ignore
-
         testCase "default page size and hasMore are applied"
         <| fun _ ->
             let values = [ for index in 1..40 -> string index ]

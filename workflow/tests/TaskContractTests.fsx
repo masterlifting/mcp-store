@@ -1,6 +1,6 @@
 // Focused deterministic coverage for the strict schema-v1 persistence boundary.
-// Legacy readers, aliases, co-located layouts, and persisted locks are not part
-// of the Workflow contract.
+// No alternative readers, aliases, co-located layouts, or persisted locks are
+// part of the Workflow contract.
 
 #load "../ComputationExpressions.fs"
 #load "../Workflow.fs"

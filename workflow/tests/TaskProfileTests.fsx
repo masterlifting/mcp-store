@@ -1,4 +1,4 @@
-// Focused deterministic coverage for the slice-8 generic Profile resolver:
+// Focused deterministic coverage for the generic Profile resolver:
 // no-overlay general default, strict project-profile JSON/duplicate/weakening
 // rejection, deterministic same-ID overlay merge with mandatory Guard
 // materialization, missing-profile mutation blocking with lenient get,
@@ -159,8 +159,8 @@ try
 
     let general = builtins.[GeneralProfileId]
     assertEqual "general origin" BuiltIn general.Origin
-    // D1: every effective profile uses the same content-derived fingerprint,
-    // including built-in general; the legacy stable label is retired.
+    // Every effective profile uses the same content-derived fingerprint,
+    // including built-in general; no stable label is special-cased.
     assertTrue "general fingerprint is content-derived" (general.Fingerprint <> "general-v1")
     assertTrue "general fingerprint is a 64-hex digest" (general.Fingerprint.Length = 64)
     assertTrue "general has no profile guards" general.Definition.Policy.Guards.IsEmpty
@@ -672,10 +672,10 @@ try
     assertEqual "draft reclass research kind" Research researchOnly.Kind
     assertEqual "draft reclass drops execution gates" 0 researchOnly.Guards.Length
 
-    // --- Scenario A (architecture Section 41): materialized software execution
-    //     gates are enforced end-to-end, not merely declared. Task completion
-    //     stays blocked until role-scoped Build/Test/Review Evidence exists, and
-    //     wrong-role Review Evidence does not satisfy the review gate. ---
+    // Materialized software execution gates are enforced end-to-end, not merely
+    // declared. Task completion stays blocked until role-scoped Build/Test/Review
+    // Evidence exists, and wrong-role Review Evidence does not satisfy the review
+    // gate.
     let softwareExecStarted =
         expectOk "start software execution work" (applyTask rootG "TST-910" 0 (StartWorkItem "W1"))
 

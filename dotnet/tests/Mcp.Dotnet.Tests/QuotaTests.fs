@@ -15,7 +15,7 @@ let private smallQuotas =
       MaxAggregateBytes = 4096L }
 
 let private registryFor (workspace: TempWorkspace) quotas =
-    new ArtifactRegistry(Path.Combine(workspace.Root, "artifacts"), TimeSpan.FromHours 1.0, quotas = quotas)
+    new ArtifactRegistry(Path.Combine(workspace.Root, "artifacts"), workspace.Namespace, TimeSpan.FromHours 1.0, quotas = quotas)
 
 let private evidenceFor (handle: RunHandle) =
     { Operation = VerificationOperation.Build
@@ -91,9 +91,10 @@ let private enforcementTests =
         <| fun _ ->
             use workspace = new TempWorkspace()
             let artifactRoot = Path.Combine(workspace.Root, "artifacts")
-            Directory.CreateDirectory artifactRoot |> ignore
-            File.WriteAllBytes(Path.Combine(artifactRoot, "seed.bin"), Array.zeroCreate 8192)
-            use registry = new ArtifactRegistry(artifactRoot, TimeSpan.FromHours 1.0, quotas = smallQuotas)
+            let namespaceDirectory = Path.Combine(artifactRoot, workspace.Namespace)
+            Directory.CreateDirectory namespaceDirectory |> ignore
+            File.WriteAllBytes(Path.Combine(namespaceDirectory, "seed.bin"), Array.zeroCreate 8192)
+            use registry = new ArtifactRegistry(artifactRoot, workspace.Namespace, TimeSpan.FromHours 1.0, quotas = smallQuotas)
 
             registry.Start VerificationOperation.Build
             |> expectErrorMatching "aggregate exhausted" isArtifactQuotaExceeded

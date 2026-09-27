@@ -132,23 +132,22 @@ let private argumentTests =
             let invocation = buildInvocation workspace { defaultBuildOptions with Configuration = Some "Debug" }
             Expect.isTrue (AuthorizedInvocation.arguments invocation |> List.contains "Debug") "explicit configuration"
 
-            Invocation.build
-                workspace.Root
-                (dotnetHost ())
-                Budgets.Defaults
-                { defaultBuildOptions with Configuration = Some "Release; rm -rf /" }
-                (pathsFor workspace)
-            |> expectErrorMatching "configuration injection" isInvalidInput
-            |> ignore
+            let asciiInvocation =
+                buildInvocation workspace { defaultBuildOptions with Configuration = Some "Release_1.0-x" }
 
-            Invocation.build
-                workspace.Root
-                (dotnetHost ())
-                Budgets.Defaults
-                { defaultBuildOptions with Configuration = Some(String('a', 65)) }
-                (pathsFor workspace)
-            |> expectErrorMatching "configuration length" isInvalidInput
-            |> ignore
+            Expect.isTrue
+                (AuthorizedInvocation.arguments asciiInvocation |> List.contains "Release_1.0-x")
+                "ASCII configuration accepted"
+
+            for invalid in [ "Release; rm -rf /"; String('a', 65); "Ünïcode"; "a b"; ""; "   " ] do
+                Invocation.build
+                    workspace.Root
+                    (dotnetHost ())
+                    Budgets.Defaults
+                    { defaultBuildOptions with Configuration = Some invalid }
+                    (pathsFor workspace)
+                |> expectErrorMatching $"configuration {invalid}" isInvalidInput
+                |> ignore
 
         testCase "invalid filters are rejected"
         <| fun _ ->
@@ -171,6 +170,15 @@ let private argumentTests =
                 { defaultTestOptions with Filter = Some(String('a', 513)) }
                 (pathsFor workspace)
             |> expectErrorMatching "long filter" isInvalidInput
+            |> ignore
+
+            Invocation.test
+                workspace.Root
+                (dotnetHost ())
+                Budgets.Defaults
+                { defaultTestOptions with Filter = Some "bad\u0000filter" }
+                (pathsFor workspace)
+            |> expectErrorMatching "nul filter" isInvalidInput
             |> ignore
     ]
 
@@ -291,7 +299,7 @@ let private trustedHostTests =
 
             Invocation.build
                 workspace.Root
-                (Path.Combine(Path.GetTempPath(), "mcp-verifier-host", "missing-dotnet.exe"))
+                (Path.Combine(Path.GetTempPath(), "mcp-dotnet-host", "missing-dotnet.exe"))
                 Budgets.Defaults
                 defaultBuildOptions
                 (pathsFor workspace)
@@ -316,7 +324,7 @@ let private trustedHostTests =
             use workspace = new TempWorkspace()
             workspace.CreateClassLibrary("lib", validClassSource) |> ignore
             let host = dotnetHost ()
-            let outsideRoot = Path.Combine(Path.GetTempPath(), "mcp-verifier-host", Guid.NewGuid().ToString("N"))
+            let outsideRoot = Path.Combine(Path.GetTempPath(), "mcp-dotnet-host", Guid.NewGuid().ToString("N"))
             Directory.CreateDirectory outsideRoot |> ignore
             let link = Path.Combine(outsideRoot, "host-link")
 

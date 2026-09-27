@@ -2,6 +2,8 @@ namespace Mcp.Dotnet
 
 open System
 open System.IO
+open System.Security.Cryptography
+open System.Text
 
 type AuthorizedPath =
     { WorkspaceRoot: string
@@ -35,6 +37,9 @@ module PathAuthorization =
 
         candidate.Equals(root, comparison) || candidate.StartsWith(prefix, comparison)
 
+    let private isNetworkPath (path: string) =
+        path.StartsWith("\\\\", StringComparison.Ordinal) || path.StartsWith("//", StringComparison.Ordinal)
+
     let private isReparse (path: string) =
         try
             (File.GetAttributes path).HasFlag FileAttributes.ReparsePoint
@@ -42,6 +47,19 @@ module PathAuthorization =
         | :? FileNotFoundException
         | :? DirectoryNotFoundException -> false
         | _ -> true
+
+    let workspaceNamespace (canonicalWorkspace: string) : string =
+        // Windows path comparison is case-insensitive, so one workspace must not
+        // hash to two namespaces because of a case difference.
+        let identity =
+            if OperatingSystem.IsWindows() then
+                canonicalWorkspace.ToLowerInvariant()
+            else
+                canonicalWorkspace
+
+        SHA256.HashData(Encoding.UTF8.GetBytes identity)
+        |> Convert.ToHexString
+        |> fun value -> value.ToLowerInvariant()
 
     let private validateAncestors containmentRoot target =
         let mutable current =
@@ -66,16 +84,6 @@ module PathAuthorization =
         match failure with
         | Some error -> Error error
         | None -> Ok()
-
-    let private ensureDirectory path : Result<unit, VerificationError> =
-        try
-            if File.Exists path then
-                Error(UnauthorizedPath "artifact root must be a directory")
-            else
-                Directory.CreateDirectory path |> ignore
-                Ok()
-        with error ->
-            Error(ArtifactFailure $"artifact root could not be created: {error.Message}")
 
     let validateWorkspace workspaceRoot : Result<string, VerificationError> =
         try
@@ -102,36 +110,44 @@ module PathAuthorization =
                     return! Error(InvalidInput "artifact root must be non-empty")
                 elif artifactRoot.IndexOf('\u0000') >= 0 then
                     return! Error(InvalidInput "artifact root contains an invalid character")
+                elif not (Path.IsPathFullyQualified artifactRoot) then
+                    return! Error(UnauthorizedPath "artifact root must be an absolute path")
+                elif OperatingSystem.IsWindows() && isNetworkPath artifactRoot then
+                    return! Error(UnauthorizedPath "artifact root must be a local path")
+                else
+                    let normalized = normalize artifactRoot
 
-                let candidate =
-                    if Path.IsPathRooted artifactRoot then
-                        artifactRoot
+                    if within root normalized then
+                        return! Error(UnauthorizedPath "artifact root must be outside the trusted workspace")
+                    elif File.Exists normalized then
+                        return! Error(UnauthorizedPath "artifact root must be a directory")
                     else
-                        Path.Combine(root, artifactRoot)
-
-                let normalized = normalize candidate
-
-                let external = not (within root normalized)
-
-                if external && not (Path.IsPathFullyQualified artifactRoot) then
-                    return! Error(UnauthorizedPath "an external artifact root must be an absolute path")
-                elif external
-                     && OperatingSystem.IsWindows()
-                     && (artifactRoot.StartsWith("\\\\", StringComparison.Ordinal)
-                         || artifactRoot.StartsWith("//", StringComparison.Ordinal)) then
-                    return! Error(UnauthorizedPath "an external artifact root must be a local path")
-                elif external && not (Path.IsPathRooted artifactRoot) then
-                    return! Error(UnauthorizedPath "artifact root is outside the trusted workspace")
-
-                // Check existing hops before creation. Creating first would allow a
-                // missing path below a junction to be materialized outside the root.
-                do! validateAncestors (if external then None else Some root) normalized
-                do! ensureDirectory normalized
-                do! validateAncestors (if external then None else Some root) normalized
-                return normalized
+                        // A missing path below a junction must be rejected before the
+                        // root is created so it can never be materialized outside the
+                        // caller-selected local directory.
+                        do! validateAncestors None normalized
+                        return normalized
             }
         with error ->
             Error(InvalidInput $"artifact root is invalid: {error.Message}")
+
+    let ensureArtifactRoot (artifactRoot: string) : Result<unit, VerificationError> =
+        try
+            result {
+                let normalized = normalize artifactRoot
+
+                if File.Exists normalized then
+                    return! Error(UnauthorizedPath "artifact root must be a directory")
+                else
+                    // Re-check ancestors at creation so a reparse point introduced
+                    // after startup validation cannot redirect the root.
+                    do! validateAncestors None normalized
+                    Directory.CreateDirectory normalized |> ignore
+                    do! validateAncestors None normalized
+                    return ()
+            }
+        with error ->
+            Error(ArtifactFailure $"artifact root could not be created: {error.Message}")
 
     let private authorizeTarget root value : Result<AuthorizedPath, VerificationError> =
         try

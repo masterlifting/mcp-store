@@ -147,26 +147,30 @@ let private targetTests =
 
 let private artifactRootTests =
     testList "artifact root authorization" [
-        testCase "relative artifact root inside the workspace is created"
+        testCase "an external absolute local root is canonicalized without eager creation"
         <| fun _ ->
             use workspace = new TempWorkspace()
-            let root = PathAuthorization.validateArtifactRoot workspace.Root ".mcp-store/dotnet-verification" |> expectOk "artifact root"
-            Expect.isTrue (Directory.Exists root) "artifact directory created"
-            Expect.isTrue (root.StartsWith(workspace.Root, StringComparison.OrdinalIgnoreCase)) "contained artifact root"
-
-        testCase "an explicitly configured external artifact root is canonicalized and created"
-        <| fun _ ->
-            use workspace = new TempWorkspace()
-            let outside = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"))
+            let outside = Path.Combine(Path.GetTempPath(), "mcp-dotnet-artifacts", Guid.NewGuid().ToString("N"))
 
             try
                 let root = PathAuthorization.validateArtifactRoot workspace.Root outside |> expectOk "external artifact root"
-                Expect.isTrue (Directory.Exists root) "external artifact directory created"
-                Expect.isFalse (root.StartsWith(workspace.Root, StringComparison.OrdinalIgnoreCase)) "external artifact root is not workspace-local"
-                Expect.equal root (Path.GetFullPath outside) "external artifact root is canonical"
+                Expect.isFalse (Directory.Exists root) "validation does not create the external root"
+                Expect.isFalse (root.StartsWith(workspace.Root, StringComparison.OrdinalIgnoreCase)) "external root is not workspace-local"
+                Expect.equal root (Path.GetFullPath outside) "external root is canonical"
+                Expect.isOk (PathAuthorization.ensureArtifactRoot root) "the root is materialized on first allocation"
+                Expect.isTrue (Directory.Exists root) "external root created lazily"
             finally
                 if Directory.Exists outside then
                     Directory.Delete(outside, true)
+
+        testCase "relative artifact roots are rejected without resolution"
+        <| fun _ ->
+            use workspace = new TempWorkspace()
+
+            for candidate in [ ".mcp-store/dotnet"; "artifacts"; "..\\outside" ] do
+                PathAuthorization.validateArtifactRoot workspace.Root candidate
+                |> expectErrorMatching $"relative artifact root {candidate}" isUnauthorizedPath
+                |> ignore
 
         testCase "relative traversal cannot opt into an external artifact root"
         <| fun _ ->
@@ -178,41 +182,134 @@ let private artifactRootTests =
             |> expectErrorMatching "relative external artifact root" isUnauthorizedPath
             |> ignore
 
+        testCase "empty and whitespace artifact roots are rejected"
+        <| fun _ ->
+            use workspace = new TempWorkspace()
+
+            for candidate in [ ""; "   " ] do
+                PathAuthorization.validateArtifactRoot workspace.Root candidate
+                |> expectErrorMatching "blank artifact root" isInvalidInput
+                |> ignore
+
+        testCase "the workspace root and its descendants are rejected"
+        <| fun _ ->
+            use workspace = new TempWorkspace()
+
+            PathAuthorization.validateArtifactRoot workspace.Root workspace.Root
+            |> expectErrorMatching "workspace root" isUnauthorizedPath
+            |> ignore
+
+            PathAuthorization.validateArtifactRoot workspace.Root (Path.Combine(workspace.Root, "artifacts"))
+            |> expectErrorMatching "workspace descendant" isUnauthorizedPath
+            |> ignore
+
+        testCase "an existing file is rejected as an artifact root"
+        <| fun _ ->
+            use workspace = new TempWorkspace()
+            let directory = Path.Combine(Path.GetTempPath(), "mcp-dotnet-file-root")
+            Directory.CreateDirectory directory |> ignore
+            let file = Path.Combine(directory, Guid.NewGuid().ToString("N") + ".txt")
+            File.WriteAllText(file, "not a directory")
+
+            try
+                PathAuthorization.validateArtifactRoot workspace.Root file
+                |> expectErrorMatching "file artifact root" isUnauthorizedPath
+                |> ignore
+            finally
+                if File.Exists file then
+                    File.Delete file
+
+        testCase "a Windows UNC or network path is rejected"
+        <| fun _ ->
+            use workspace = new TempWorkspace()
+
+            if OperatingSystem.IsWindows() then
+                for candidate in [ "\\\\server\\share\\artifacts"; "//server/share/artifacts" ] do
+                    PathAuthorization.validateArtifactRoot workspace.Root candidate
+                    |> expectErrorMatching "network artifact root" isUnauthorizedPath
+                    |> ignore
+
         testCase "external artifact ancestors must not be reparse points"
         <| fun _ ->
             use workspace = new TempWorkspace()
-            let real = Path.Combine(workspace.Root, "external-real")
+            let parent = Path.Combine(Path.GetTempPath(), "mcp-dotnet-reparse", Guid.NewGuid().ToString("N"))
+            let real = Path.Combine(parent, "real")
             Directory.CreateDirectory real |> ignore
-            let link = workspace.CreateJunction("external-link", "external-real")
-            let external = Path.Combine(link, "artifacts")
+            let link = Path.Combine(parent, "link")
+            createDirectoryLink link real |> ignore
 
-            PathAuthorization.validateArtifactRoot workspace.Root external
-            |> expectErrorMatching "external reparse ancestor" isUnauthorizedPath
-            |> ignore
+            try
+                PathAuthorization.validateArtifactRoot workspace.Root (Path.Combine(link, "artifacts"))
+                |> expectErrorMatching "external reparse ancestor" isUnauthorizedPath
+                |> ignore
+            finally
+                if Directory.Exists link then
+                    try
+                        Directory.Delete(link, false)
+                    with _ ->
+                        ()
+
+                if Directory.Exists parent then
+                    try
+                        Directory.Delete(parent, true)
+                    with _ ->
+                        ()
 
         testCase "reparse artifact ancestors are rejected"
         <| fun _ ->
             use workspace = new TempWorkspace()
-            Directory.CreateDirectory(Path.Combine(workspace.Root, "artreal")) |> ignore
-            workspace.CreateJunction("artlink", "artreal") |> ignore
+            let parent = Path.Combine(Path.GetTempPath(), "mcp-dotnet-reparse", Guid.NewGuid().ToString("N"))
+            let real = Path.Combine(parent, "real")
+            Directory.CreateDirectory real |> ignore
+            let link = Path.Combine(parent, "link")
+            createDirectoryLink link real |> ignore
 
-            PathAuthorization.validateArtifactRoot workspace.Root "artlink/artifacts"
-            |> expectErrorMatching "reparse artifact root" isUnauthorizedPath
-            |> ignore
+            try
+                PathAuthorization.validateArtifactRoot workspace.Root link
+                |> expectErrorMatching "reparse artifact root" isUnauthorizedPath
+                |> ignore
+            finally
+                if Directory.Exists link then
+                    try
+                        Directory.Delete(link, false)
+                    with _ ->
+                        ()
+
+                if Directory.Exists parent then
+                    try
+                        Directory.Delete(parent, true)
+                    with _ ->
+                        ()
 
         testCase "a missing artifact root below a reparse point is rejected before creation"
         <| fun _ ->
             use workspace = new TempWorkspace()
-            Directory.CreateDirectory(Path.Combine(workspace.Root, "real")) |> ignore
-            workspace.CreateJunction("jlink", "real") |> ignore
+            let parent = Path.Combine(Path.GetTempPath(), "mcp-dotnet-reparse", Guid.NewGuid().ToString("N"))
+            let real = Path.Combine(parent, "real")
+            Directory.CreateDirectory real |> ignore
+            let link = Path.Combine(parent, "link")
+            createDirectoryLink link real |> ignore
 
-            PathAuthorization.validateArtifactRoot workspace.Root "jlink/new/artifacts"
-            |> expectErrorMatching "reparse pre-creation" isUnauthorizedPath
-            |> ignore
+            try
+                PathAuthorization.validateArtifactRoot workspace.Root (Path.Combine(link, "new", "artifacts"))
+                |> expectErrorMatching "reparse pre-creation" isUnauthorizedPath
+                |> ignore
 
-            Expect.isFalse
-                (Directory.Exists(Path.Combine(workspace.Root, "real", "new")))
-                "no directory was materialized through the junction"
+                Expect.isFalse
+                    (Directory.Exists(Path.Combine(real, "new")))
+                    "no directory was materialized through the junction"
+            finally
+                if Directory.Exists link then
+                    try
+                        Directory.Delete(link, false)
+                    with _ ->
+                        ()
+
+                if Directory.Exists parent then
+                    try
+                        Directory.Delete(parent, true)
+                    with _ ->
+                        ()
 
         testCase "artifact root with an invalid character returns typed invalid input"
         <| fun _ ->
@@ -221,6 +318,55 @@ let private artifactRootTests =
             PathAuthorization.validateArtifactRoot workspace.Root "bad\u0000root"
             |> expectErrorMatching "nul artifact root" isInvalidInput
             |> ignore
+    ]
+
+let private namespaceTests =
+    testList "workspace namespace" [
+        testCase "the same workspace maps to a stable single-segment identifier"
+        <| fun _ ->
+            use workspace = new TempWorkspace()
+            let first = PathAuthorization.workspaceNamespace workspace.Root
+            let second = PathAuthorization.workspaceNamespace workspace.Root
+
+            Expect.equal first second "namespace is stable for the same workspace"
+            Expect.equal first.Length 64 "namespace is a full SHA-256 hex digest"
+            Expect.isTrue (first |> Seq.forall Uri.IsHexDigit) "namespace is hexadecimal"
+            Expect.equal first (first.ToLowerInvariant()) "namespace is lowercase"
+            Expect.isFalse (first.Contains(workspace.Root, StringComparison.OrdinalIgnoreCase)) "raw workspace path is not embedded"
+            Expect.isFalse (first.Contains '/') "namespace has no directory separator"
+            Expect.isFalse (first.Contains '\\') "namespace has no alternate separator"
+
+        testCase "distinct workspaces map to distinct namespaces"
+        <| fun _ ->
+            use firstWorkspace = new TempWorkspace()
+            use secondWorkspace = new TempWorkspace()
+
+            Expect.notEqual
+                (PathAuthorization.workspaceNamespace firstWorkspace.Root)
+                (PathAuthorization.workspaceNamespace secondWorkspace.Root)
+                "distinct workspace roots"
+
+        testCase "case variants of one Windows workspace map to one namespace"
+        <| fun _ ->
+            use workspace = new TempWorkspace()
+
+            if OperatingSystem.IsWindows() then
+                Expect.equal
+                    (PathAuthorization.workspaceNamespace (workspace.Root.ToUpperInvariant()))
+                    (PathAuthorization.workspaceNamespace workspace.Root)
+                    "Windows path comparison is case-insensitive"
+
+        testCase "the registry rejects a namespace that is not a single path segment"
+        <| fun _ ->
+            use workspace = new TempWorkspace()
+            let artifactRoot = Path.Combine(workspace.Root, "artifacts")
+
+            let segmented = [ "a/b" ] @ (if OperatingSystem.IsWindows() then [ "a\\b" ] else [])
+
+            for invalid in [ ""; "   "; "."; ".." ] @ segmented do
+                Expect.throws
+                    (fun () -> new ArtifactRegistry(artifactRoot, invalid, TimeSpan.FromHours 1.0) |> ignore)
+                    $"namespace '{invalid}' is rejected"
     ]
 
 let private noLaunchTests =
@@ -261,7 +407,7 @@ let private registryTests =
         testCase "run identifiers are opaque base64url and independent of directory names"
         <| fun _ ->
             use workspace = new TempWorkspace()
-            use registry = new ArtifactRegistry(Path.Combine(workspace.Root, "artifacts"), TimeSpan.FromHours 1.0)
+            use registry = new ArtifactRegistry(Path.Combine(workspace.Root, "artifacts"), workspace.Namespace, TimeSpan.FromHours 1.0)
             let handle = startRun registry
             let runIdText = RunId.value handle.RunId
             let directoryName = Path.GetFileName handle.Paths.Directory
@@ -271,11 +417,23 @@ let private registryTests =
             Expect.notEqual directoryName runIdText "directory name is independent"
             Expect.isFalse (handle.Paths.Directory.Contains(runIdText, StringComparison.Ordinal)) "path does not embed run id"
 
+        testCase "each run is namespaced under the workspace identity"
+        <| fun _ ->
+            use workspace = new TempWorkspace()
+            let artifactRoot = workspace.ExternalArtifactRoot
+            use registry = new ArtifactRegistry(artifactRoot, workspace.Namespace, TimeSpan.FromHours 1.0)
+            let handle = startRun registry
+            let namespaceDirectory = Path.Combine(artifactRoot, workspace.Namespace)
+
+            Expect.isTrue (Directory.Exists namespaceDirectory) "workspace namespace exists"
+            Expect.equal (Path.GetDirectoryName handle.Paths.Directory) namespaceDirectory "run directory is one level under the namespace"
+            Expect.isFalse (handle.Paths.Directory.Contains(workspace.Root, StringComparison.OrdinalIgnoreCase)) "raw workspace path is not exposed"
+
         testCase "each run receives a unique isolated directory"
         <| fun _ ->
             use workspace = new TempWorkspace()
             let artifactRoot = Path.Combine(workspace.Root, "artifacts")
-            use registry = new ArtifactRegistry(artifactRoot, TimeSpan.FromHours 1.0)
+            use registry = new ArtifactRegistry(artifactRoot, workspace.Namespace, TimeSpan.FromHours 1.0)
             let first = startRun registry
             let second = startRun registry
 
@@ -287,7 +445,7 @@ let private registryTests =
         testCase "unknown and incomplete run ids resolve to actionable errors"
         <| fun _ ->
             use workspace = new TempWorkspace()
-            use registry = new ArtifactRegistry(Path.Combine(workspace.Root, "artifacts"), TimeSpan.FromHours 1.0)
+            use registry = new ArtifactRegistry(Path.Combine(workspace.Root, "artifacts"), workspace.Namespace, TimeSpan.FromHours 1.0)
             let handle = startRun registry
 
             registry.Get "not-a-run-id"
@@ -305,7 +463,7 @@ let private registryTests =
         testCase "completion rejects foreign evidence paths and double completion"
         <| fun _ ->
             use workspace = new TempWorkspace()
-            use registry = new ArtifactRegistry(Path.Combine(workspace.Root, "artifacts"), TimeSpan.FromHours 1.0)
+            use registry = new ArtifactRegistry(Path.Combine(workspace.Root, "artifacts"), workspace.Namespace, TimeSpan.FromHours 1.0)
             let handle = startRun registry
 
             let foreign =
@@ -329,7 +487,7 @@ let private registryTests =
         testCase "abort and session end remove owned artifacts"
         <| fun _ ->
             use workspace = new TempWorkspace()
-            use registry = new ArtifactRegistry(Path.Combine(workspace.Root, "artifacts"), TimeSpan.FromHours 1.0)
+            use registry = new ArtifactRegistry(Path.Combine(workspace.Root, "artifacts"), workspace.Namespace, TimeSpan.FromHours 1.0)
             let first = startRun registry
             let firstDirectory = first.Paths.Directory
             registry.Abort first
@@ -346,11 +504,72 @@ let private registryTests =
             |> expectErrorMatching "expired run id" isUnknownRunId
             |> ignore
 
+        testCase "cleanup removes only owned run state and preserves siblings and unrelated entries"
+        <| fun _ ->
+            use workspace = new TempWorkspace()
+            let artifactRoot = Path.Combine(workspace.Root, "artifacts")
+            let sibling = Path.Combine(artifactRoot, "sibling-workspace")
+            Directory.CreateDirectory sibling |> ignore
+            let siblingFile = Path.Combine(sibling, "keep.txt")
+            File.WriteAllText(siblingFile, "sibling state")
+            let unrelated = Path.Combine(artifactRoot, "consumer-data.txt")
+            File.WriteAllText(unrelated, "consumer data")
+
+            use registry = new ArtifactRegistry(artifactRoot, workspace.Namespace, TimeSpan.FromHours 1.0)
+            let handle = startRun registry
+            let runDirectory = handle.Paths.Directory
+            let namespaceDirectory = Path.Combine(artifactRoot, workspace.Namespace)
+            File.WriteAllText(Path.Combine(runDirectory, "stdout.log"), "output")
+
+            registry.EndSession()
+
+            Expect.isFalse (Directory.Exists runDirectory) "owned run directory removed"
+            Expect.isFalse (Directory.Exists namespaceDirectory) "emptied owned namespace removed"
+            Expect.isTrue (Directory.Exists sibling) "sibling workspace namespace preserved"
+            Expect.isTrue (File.Exists siblingFile) "sibling content preserved"
+            Expect.isTrue (File.Exists unrelated) "unrelated root entry preserved"
+            Expect.isTrue (Directory.Exists artifactRoot) "shared consumer root preserved"
+
+        testCase "a non-empty owned namespace is not removed"
+        <| fun _ ->
+            use workspace = new TempWorkspace()
+            let artifactRoot = Path.Combine(workspace.Root, "artifacts")
+            use registry = new ArtifactRegistry(artifactRoot, workspace.Namespace, TimeSpan.FromHours 1.0)
+            let handle = startRun registry
+            let namespaceDirectory = Path.Combine(artifactRoot, workspace.Namespace)
+            let retained = Path.Combine(namespaceDirectory, "retained.txt")
+            File.WriteAllText(retained, "retained")
+
+            registry.EndSession()
+
+            Expect.isFalse (Directory.Exists handle.Paths.Directory) "owned run directory removed"
+            Expect.isTrue (File.Exists retained) "unowned namespace content preserved"
+            Expect.isTrue (Directory.Exists namespaceDirectory) "non-empty namespace preserved"
+
+        testCase "the namespace is retained while another owned run remains"
+        <| fun _ ->
+            use workspace = new TempWorkspace()
+            let artifactRoot = Path.Combine(workspace.Root, "artifacts")
+            use registry = new ArtifactRegistry(artifactRoot, workspace.Namespace, TimeSpan.FromHours 1.0)
+            let namespaceDirectory = Path.Combine(artifactRoot, workspace.Namespace)
+            let first = startRun registry
+            let second = startRun registry
+
+            registry.Abort first
+
+            Expect.isFalse (Directory.Exists first.Paths.Directory) "aborted run directory removed"
+            Expect.isTrue (Directory.Exists second.Paths.Directory) "sibling owned run retained"
+            Expect.isTrue (Directory.Exists namespaceDirectory) "namespace retained while an owned run remains"
+
+            registry.Abort second
+
+            Expect.isFalse (Directory.Exists namespaceDirectory) "emptied namespace removed after the last run"
+
         testCaseTask "concurrent runs allocate unique isolated artifacts" (fun () ->
             task {
                 use workspace = new TempWorkspace()
                 let artifactRoot = Path.Combine(workspace.Root, "artifacts")
-                use registry = new ArtifactRegistry(artifactRoot, TimeSpan.FromHours 1.0)
+                use registry = new ArtifactRegistry(artifactRoot, workspace.Namespace, TimeSpan.FromHours 1.0)
 
                 let! handles =
                     [ for _ in 1..64 -> Task.Run(fun () -> startRun registry) ]
@@ -376,5 +595,6 @@ let tests =
         [ workspaceTests
           targetTests
           artifactRootTests
+          namespaceTests
           noLaunchTests
           registryTests ]
