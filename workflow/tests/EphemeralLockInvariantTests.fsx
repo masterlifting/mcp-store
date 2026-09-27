@@ -1,8 +1,7 @@
-// Source-level ephemeral-lock invariant coverage (AC11/AC21). Every normal
-// Workflow operation must leave .tasks/<id>/ containing only runtime.json. A
-// background sampler watches for any sub-second runtime.lock appearance while
-// task_create, task_get, task_apply, and task_validate run against one real
-// task directory.
+// Source-level ephemeral-lock invariant coverage. Every normal Workflow
+// operation must leave .tasks/<id>/ containing only runtime.json. A background
+// sampler watches for any sub-second runtime.lock appearance while task_create,
+// task_get, task_apply, and task_validate run against one real task directory.
 
 #load "../ComputationExpressions.fs"
 #load "../Workflow.fs"

@@ -1,19 +1,6 @@
-// Process-boundary proof for the packaged Workflow distribution (AC20/AC21).
-//
-// Coverage:
-//   1. Resolves a packaged Mcp.Workflow.dll. A fresh local install is used when
-//      present; otherwise the repository package is published with the exact
-//      BuildDistributions.fsx publish profile. MCP_WORKFLOW_PACKAGED_DLL can
-//      override the target explicitly.
-//   2. Verifies the packaged binary publishes the OS mutex name and contains no
-//      runtime.lock artifact string or legacy file-lock diagnostic.
-//   3. Spawns two real `dotnet exec <packaged-dll>` MCP processes that race a
-//      task_create and then a non-overlapping task_apply (start vs block) on the
-//      same projectRoot/taskId, polling the task directory for transient locks.
-//   4. Recovers from an abandoned mutex owner: a helper subprocess acquires the
-//      named runtime mutex and is killed while holding it; a packaged Workflow
-//      process must then acquire the abandoned mutex and complete the CAS.
-//
+// Process-boundary proof for the packaged Workflow distribution: the packaged
+// runtime coordinates cross-process work with an OS mutex, so a task directory
+// stays free of runtime.lock while two processes race and an owner is killed.
 // The test never mutates the installed MCP; it only reads it.
 
 open System
@@ -25,7 +12,6 @@ open System.Text
 open System.Text.Json.Nodes
 open System.Threading
 
-// --- assertions -------------------------------------------------------------
 
 let assertTrue name condition =
     if not condition then failwithf "%s: expected true" name
@@ -37,7 +23,6 @@ let assertContains name (fragment: string) (text: string) =
     if not (text.Contains(fragment, StringComparison.Ordinal)) then
         failwithf "%s: expected '%s' in '%s'" name fragment text
 
-// --- byte-level string scanning --------------------------------------------
 
 // .NET stores user string literals in the metadata #US heap as UTF-16LE, so a
 // naive ASCII scan misses them. Search the raw bytes for both encodings.
@@ -65,7 +50,6 @@ let sha256File path =
     use stream = File.OpenRead path
     SHA256.HashData stream |> Convert.ToHexString |> fun value -> value.ToLowerInvariant()
 
-// --- packaged entry resolution ---------------------------------------------
 
 let repoRoot = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", ".."))
 let userProfile = Environment.GetFolderPath Environment.SpecialFolder.UserProfile
@@ -163,7 +147,6 @@ let entryDll, entrySource =
 let cleanupDirectories = ResizeArray<string>()
 cleanupDirectories.Add publishRoot
 
-// --- packaged binary string verification -----------------------------------
 
 let verifyPackagedBinary (path: string) =
     if not (File.Exists path) then
@@ -189,7 +172,6 @@ let verifyPackagedBinary (path: string) =
             (sprintf "packaged binary must not contain legacy lock message '%s'" message)
             (occurrencesUtf16 message bytes = 0)
 
-// --- stdio MCP transport ----------------------------------------------------
 
 let jstr (value: string) : JsonNode = JsonValue.Create value
 let jint (value: int) : JsonNode = JsonValue.Create value
@@ -277,7 +259,6 @@ let toolErrorCode (response: JsonNode) = (toolStructured response).["error"].["c
 let toolErrorMessage (response: JsonNode) = (toolStructured response).["error"].["message"].GetValue<string>()
 let taskOf (response: JsonNode) = (toolStructured response).["task"]
 
-// --- task directory snapshots ----------------------------------------------
 
 let enumerateEntries directory =
     try
@@ -312,7 +293,6 @@ type DirectorySampler(directory: string) =
         if not (isNull thread) then thread.Join()
         snapshots.ToArray() |> Array.toList
 
-// --- request payloads -------------------------------------------------------
 
 let createArgs root id =
     jobj
@@ -350,7 +330,6 @@ let capture (label: string) (taskDirectory: string) =
     printfn "directory %-24s -> [%s]" label (String.concat ", " entries)
     entries
 
-// --- coverage 3: two packaged processes race create + apply ----------------
 
 let runRaceTest () =
     let root, catalog, catalogHash = prepareWorkspace "workflow-packaged-race"
@@ -438,7 +417,6 @@ let runRaceTest () =
         try first.Close() with _ -> ()
         try second.Close() with _ -> ()
 
-// --- coverage 4: abandoned-owner mutex recovery -----------------------------
 
 let runAbandonedOwnerTest () =
     let root, catalog, catalogHash = prepareWorkspace "workflow-packaged-abandoned"
@@ -502,7 +480,6 @@ let runAbandonedOwnerTest () =
     printfn "helper stdout: %s" (try helperStdout.Result.Trim() with _ -> "")
     printfn "helper stderr: %s" (try helperStderr.Result.Trim() with _ -> "")
 
-// --- main -------------------------------------------------------------------
 
 printfn "packaged entry: %s (source=%s)" entryDll entrySource
 
@@ -516,7 +493,7 @@ let installedStatus =
 
         if mutexCount = 0 || lockCount > 0 then
             printfn "WARNING STALE-INSTALL: the local install predates the ephemeral-mutex coordination."
-            printfn "  W6 owns installing the regenerated v1.0.3 distribution; this run verified the repo-built package instead."
+            printfn "  this run verified the repo-built package instead."
             Some false
         else
             Some true
@@ -532,7 +509,7 @@ try
     printfn "OK packaged runtime coordination proof: ephemeral mutex, no runtime.lock, cross-process serialization, abandoned-owner recovery"
 
     match installedStatus with
-    | Some false -> printfn "NOTE: installed-package verification deferred to W6 (stale local install)."
+    | Some false -> printfn "NOTE: installed-package verification skipped for the stale local install."
     | _ -> ()
 finally
     for directory in cleanupDirectories do

@@ -1,13 +1,11 @@
-// W3/AC17 recursive schema/parser parity guard.
+// Recursive schema/parser parity guard.
 //
 // This script parses the inline `tools` JSON literal published by
 // workflow/WorkflowMcp.fs and proves the published schemas stay
-// parser-equivalent for the live-usage gaps:
+// parser-equivalent for every machine-expressible call structure:
 //
 //   1. every object that declares `additionalProperties:false` together with a
-//      `required` list names every required property in its `properties`
-//      (the resolve-question class of defect that made an instance
-//      unconstructible);
+//      `required` list names every required property in its `properties`;
 //   2. the discriminated command, contract-patch, and reconciliation-plan
 //      variant sets are complete and recurse to every nested schema;
 //   3. every published finite vocabulary round-trips through the public parser
