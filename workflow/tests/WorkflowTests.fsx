@@ -296,8 +296,8 @@ try
         mutateJson (fun node ->
             node.["workItems"].AsArray().[0].AsObject().["children"].AsArray().Add(JsonNode.Parse """{"id":"W2","title":"Child","state":"pending","result":"","acceptanceRefs":[],"dependsOn":[],"evidenceRefs":[],"children":[]}"""))
 
-    // Strict schema-v1 rejections: non-v1 and mismatched fingerprints are
-    // rejected, and every required v3 field must be present.
+    // Strict schema-v1 rejections: non-v1 versions and mismatched fingerprints
+    // are rejected, and every required schema-v1 field must be present.
     let schemaV2 = mutateJson (fun node -> node.["schemaVersion"] <- JsonValue.Create 2)
 
     let legacyGeneralFingerprint =

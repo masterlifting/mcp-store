@@ -89,8 +89,8 @@ let build (request: Request) =
     Directory.CreateDirectory destination |> ignore
     let publishRoot = Path.Combine(destination, "publish")
 
-    // Only this run's staging and generated files are replaceable; stored
-    // archives and manifests remain available for inspection.
+    // This run owns its staging directory and generated component files; clear
+    // any prior copies before regenerating them.
     if Directory.Exists publishRoot then
         Directory.Delete(publishRoot, true)
 
