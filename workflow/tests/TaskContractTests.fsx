@@ -54,10 +54,19 @@ try
     assertTrue "serializer emits no schema alias" (not (raw.ContainsKey "version"))
     assertTrue "serializer emits no legacy task document" (not (File.Exists(Path.Combine(Path.GetDirectoryName(sidecar tempRoot "CON-1"), "TASK.md"))))
 
-    for version in [ 2; 3 ] do
+    for version in [ 0; 2; 3 ] do
         let changed = JsonNode.Parse(raw.ToJsonString()).AsObject()
         changed["schemaVersion"] <- JsonValue.Create version
         expectRejected ($"schema {version} rejected") ($"unsupported schemaVersion {version}") (deserialize (changed.ToJsonString()))
+
+    let aliased = JsonNode.Parse(raw.ToJsonString()).AsObject()
+    aliased["version"] <- JsonValue.Create 1
+    expectRejected "persisted version alias rejected" "unknown property 'version'" (deserialize (aliased.ToJsonString()))
+
+    let canonicalRoundTrip =
+        expectOk "canonical sidecar round trips" (task |> serialize |> deserialize)
+    assertEqual "canonical round trip kind" task.Kind canonicalRoundTrip.Kind
+    assertEqual "canonical round trip state revision" task.StateRevision canonicalRoundTrip.StateRevision
 
     let missingSidecarDirectory = Path.Combine(tempRoot, ".tasks", "MIS-1")
     Directory.CreateDirectory missingSidecarDirectory |> ignore
@@ -84,6 +93,11 @@ try
     assertEqual "updated state revision" 1 updated.StateRevision
     assertEqual "updated persisted schema" 1 ((JsonNode.Parse(File.ReadAllText(sidecar tempRoot "CON-1"))).["schemaVersion"].GetValue<int>())
     assertTrue "apply leaves no lock" (not (File.Exists(runtimeLock tempRoot "CON-1")))
+
+    expectOk "get leaves persisted state" (getTask tempRoot "CON-1") |> ignore
+    expectOk "validate leaves persisted state" (validateTask tempRoot "CON-1") |> ignore
+    assertTrue "get leaves no lock" (not (File.Exists(runtimeLock tempRoot "CON-1")))
+    assertTrue "validate leaves no lock" (not (File.Exists(runtimeLock tempRoot "CON-1")))
 
     printfn "OK schema-v1 contract: strict version, serializer/parser parity, legacy-layout rejection, and ephemeral locking"
 finally
