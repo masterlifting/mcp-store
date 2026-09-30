@@ -15,21 +15,3 @@ exclude =
     telegram_mcp.egg-info,
     .pytest_cache,
     .github
-# Per-file ignores address the star-import cascade. Stock flake8 (no
-# Flake8-pyproject plugin installed) cannot trace names through `import *`,
-# so F401 (re-export), F403 (the import-* line itself), and F405 (every
-# downstream name reference) report as false positives in the consumer files.
-# This is the narrowest config-only fix that preserves every meaningful
-# finding: F401 in main.py and tools/*.py is left unmuted so real direct
-# unused imports stay visible (main.py:_main, tools/groups.py:1145 unused
-# exception imports, tests/test_runtime.py:json/pathlib.Path, etc.).
-# Unmuted meaningful rules: C901 (complexity), F841 (unused locals),
-# F541 (f-string without placeholder), and direct F401.
-per-file-ignores =
-    # Re-export package: re-exports 9 tool submodules via `from X import *`;
-    # every name is re-exported, so the F401 re-export is a false positive.
-    telegram_mcp/tools/__init__.py: F401,F403
-    # Star-import consumers: cascade false positives only.
-    main.py: F403
-    telegram_mcp/runner.py: F403,F405
-    telegram_mcp/tools/*.py: F403,F405
