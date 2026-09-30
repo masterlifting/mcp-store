@@ -388,6 +388,24 @@ let runRaceTest () =
         let finalEntries = capture "final" taskDirectory
         assertEqual "task directory contains only runtime.json" [ "runtime.json" ] finalEntries
 
+        // Byte-level atomicity / contention assertion: the surviving sidecar
+        // is a single complete document from one writer. A torn or interleaved
+        // write would fail JSON parsing or duplicate fields; the final bytes
+        // must parse as exactly one coherent schema-v1 task carrying the
+        // racing id and the post-apply state revision.
+        let sidecarFile = Path.Combine(taskDirectory, "runtime.json")
+        let finalBytes = File.ReadAllBytes sidecarFile
+        let finalText = Encoding.UTF8.GetString finalBytes
+        let finalDocument =
+            try JsonNode.Parse(finalText).AsObject()
+            with error -> failwithf "atomic sidecar is not valid JSON (%s): %s" error.Message finalText
+
+        assertEqual "atomic sidecar id" taskId (finalDocument.["id"].GetValue<string>())
+        assertEqual "atomic sidecar schema version" 1 (finalDocument.["schemaVersion"].GetValue<int>())
+        assertEqual "atomic sidecar state revision" 1 (finalDocument.["stateRevision"].GetValue<int>())
+        assertEqual "atomic sidecar kind" "execution" (finalDocument.["kind"].GetValue<string>())
+        assertEqual "atomic sidecar lifecycle" "open" (finalDocument.["lifecycle"].GetValue<string>())
+
         let observed = sampler.Stop()
         let observedEntries = observed |> List.collect id |> List.distinct |> List.sort
 
@@ -410,7 +428,7 @@ let runRaceTest () =
         assertTrue "packaged stderr must not mention a file lock" (not (combinedStderr.Contains "file lock"))
         assertTrue "packaged stderr must not mention runtime.lock" (not (combinedStderr.Contains lockArtifact))
 
-        printfn "OK packaged race: one create and one apply serialized; directory stayed ephemeral"
+        printfn "OK packaged race: one create and one apply serialized; byte-level atomic sidecar; directory stayed ephemeral"
         printfn "observed task-directory snapshots (%d samples, %d distinct): %A" observed.Length observedEntries.Length observedEntries
     finally
         try sampler.Stop() |> ignore with _ -> ()

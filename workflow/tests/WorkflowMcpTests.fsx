@@ -149,6 +149,33 @@ let runFsi name script arguments =
 
     stdout, stderr
 
+// Variant for asserting TaskApply CLI fail-closed exit behavior: the spawn
+// is the same process boundary, but the helper returns the exit code and
+// stderr instead of failing so the test can pin the exact failure path
+// (unknown flag, missing authority surface, etc.) at a genuine subprocess
+// boundary rather than only at the in-process CLI parser layer.
+let runFsiReturnExit name script arguments =
+    let startInfo = ProcessStartInfo()
+    startInfo.FileName <- "dotnet"
+    startInfo.ArgumentList.Add "fsi"
+    startInfo.ArgumentList.Add "--nologo"
+    startInfo.ArgumentList.Add script
+    arguments |> List.iter startInfo.ArgumentList.Add
+    startInfo.RedirectStandardOutput <- true
+    startInfo.RedirectStandardError <- true
+    startInfo.UseShellExecute <- false
+    startInfo.CreateNoWindow <- true
+    startInfo.WorkingDirectory <- repoRoot
+    use child = Process.Start startInfo
+    let stdout = child.StandardOutput.ReadToEnd()
+    let stderr = child.StandardError.ReadToEnd()
+
+    if not (child.WaitForExit(60000)) then
+        child.Kill true
+        failwithf "%s: child FSI process did not exit" name
+
+    child.ExitCode, stdout, stderr
+
 // ARCH-INFRA005-001 binds projectRoot to the MCP process working directory, so
 // the harness anchors the host at its own task workspace rather than the repo.
 let startMcp (workingDirectory: string) =
@@ -381,6 +408,19 @@ try
     assertTrue "CLI get equals library serialize" (JsonNode.DeepEquals(JsonNode.Parse libraryJson, JsonNode.Parse cliJson))
     assertTrue "CLI get equals MCP task_get" (JsonNode.DeepEquals(fetchedStructured.["task"], JsonNode.Parse cliJson))
 
+    // Representative TaskApply CLI unknown-flag / authority boundary proof at
+    // a genuine process boundary. The CLI exposes no surface to inject User
+    // authority, rejects unknown flags with usage exit code 2, and stderr
+    // carries the usage message instead of accepting the flag silently.
+    let cliAuthorityExit, _, cliAuthorityStderr =
+        runFsiReturnExit
+            "TaskApply authority flag"
+            (Path.Combine(scriptDirectory, "TaskApply.fsx"))
+            [ tempRoot; "MCP-1"; "0"; "start"; "W1"; "--authority"; "user" ]
+
+    assertEqual "TaskApply rejects unknown authority flag" 2 cliAuthorityExit
+    assertContains "TaskApply authority usage on stderr" "usage:" cliAuthorityStderr
+
     let validated = callTool mcp "task_validate" 6 "task_validate" (getArgs tempRoot)
     expectToolOk "task_validate" validated |> ignore
 
@@ -571,7 +611,7 @@ try
     assertTrue "MCP stderr carries no protocol responses" (not (stderr.Contains("\"jsonrpc\"", StringComparison.Ordinal)))
 
     printfn
-        "OK platform-internal task runtime MCP boundary: stdio handshake, tools/list, structured results, library/CLI parity, workspace rejection, CAS preservation, authority/receipt/effect rejection, bounded failures, and stdout cleanliness"
+        "OK platform-internal task runtime MCP boundary: stdio handshake, tools/list, structured results, library/CLI parity, TaskApply CLI unknown-flag/authority fail-closed exit, workspace rejection, CAS preservation, authority/receipt/effect rejection, bounded failures, and stdout cleanliness"
 finally
     if not (isNull mcp) then
         try
