@@ -1,6 +1,7 @@
 namespace Mcp.Dotnet
 
 open System
+open System.IO
 
 module Budgets =
     [<Literal>]
@@ -235,5 +236,7 @@ module Budgets =
                       Total = total
                       Items = items
                       HasMore = request.Offset + items.Length < total }
-            with error ->
+            with
+            | :? IOException as error -> Error(MissingArtifact $"detail artifact could not be paged: {error.Message}")
+            | :? UnauthorizedAccessException as error ->
                 Error(MissingArtifact $"detail artifact could not be paged: {error.Message}")

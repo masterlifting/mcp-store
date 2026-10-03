@@ -24,15 +24,19 @@ module private DetailSource =
                 return Error(MissingArtifact "captured output artifact is missing")
             else
                 try
-                    let! stdoutLines = File.ReadAllLinesAsync stdoutPath |> Async.AwaitTask
-                    let! stderrLines = File.ReadAllLinesAsync stderrPath |> Async.AwaitTask
+                    let! stdoutLines = TaskAwait.operational (File.ReadAllLinesAsync stdoutPath)
+                    let! stderrLines = TaskAwait.operational (File.ReadAllLinesAsync stderrPath)
 
                     return
                         Ok(
                             [ yield! stdoutLines |> Array.map (fun line -> $"stdout: {line}")
                               yield! stderrLines |> Array.map (fun line -> $"stderr: {line}") ]
                         )
-                with error ->
+                with
+                | :? OperationCanceledException as error -> return raise error
+                | :? IOException as error ->
+                    return Error(MissingArtifact $"captured output artifact could not be read: {error.Message}")
+                | :? UnauthorizedAccessException as error ->
                     return Error(MissingArtifact $"captured output artifact could not be read: {error.Message}")
         }
 

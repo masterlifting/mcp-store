@@ -46,8 +46,10 @@ module ProcessRunner =
         try
             if not child.HasExited then
                 child.Kill(true)
-        with _ ->
-            ()
+        with
+        | :? InvalidOperationException -> ()
+        | :? System.ComponentModel.Win32Exception -> ()
+        | :? NotSupportedException -> ()
 
     let runWithQuotas invocation paths cancellationToken quotas (quotaCheck: unit -> Result<unit, VerificationError>) : Task<Result<CapturedProcess, VerificationError>> =
         task {
@@ -111,7 +113,7 @@ module ProcessRunner =
                             if obj.ReferenceEquals(winner, quotaTask) && quotaFailure.IsSome then
                                 try
                                     do! waitTask
-                                with _ ->
+                                with :? OperationCanceledException ->
                                     ()
                             else
                                 try
@@ -133,7 +135,7 @@ module ProcessRunner =
 
                             try
                                 do! quotaTask
-                            with _ ->
+                            with :? OperationCanceledException ->
                                 ()
 
                             if quotaFailure.IsSome then

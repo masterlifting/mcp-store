@@ -8,11 +8,6 @@ open Expecto
 open Mcp.Dotnet
 open Mcp.Dotnet.Tests.Support
 
-// These tests pin the typed async error contract: every failure surface
-// reachable from the producer's async effects returns a typed
-// `Result<_, VerificationError>` whose case names the canonical reason.
-// Exceptions never escape the async boundary as normal control flow.
-
 let private serviceFor (workspace: TempWorkspace) =
     new DotnetService(
         workspace.Root,
@@ -83,6 +78,32 @@ let private artifactReadsTests =
                 Expect.isTrue (File.Exists handle.Paths.Metadata) "metadata written"
                 Expect.isTrue (File.Exists handle.Paths.ParsedEvidence) "parsed evidence written"
             })
+
+        testCaseTask "writeEvidence classifies a metadata write failure" (fun () ->
+            task {
+                use workspace = new TempWorkspace()
+                use registry =
+                    new ArtifactRegistry(
+                        Path.Combine(workspace.Root, "artifacts"),
+                        workspace.Namespace,
+                        TimeSpan.FromHours 1.0
+                    )
+
+                let handle = startRun registry
+                let blockedHandle =
+                    { handle with
+                        Paths = { handle.Paths with Metadata = workspace.Root } }
+                let evidence =
+                    { Operation = VerificationOperation.Build
+                      Process = capturedProcess (ProcessStatus.Completed 0) (TimeSpan.FromSeconds 1.0) handle.Paths
+                      Diagnostics = []
+                      Tests = None
+                      MetadataPath = blockedHandle.Paths.Metadata
+                      ParsedEvidencePath = blockedHandle.Paths.ParsedEvidence }
+
+                let! result = ArtifactFiles.writeEvidence blockedHandle evidence
+                result |> expectErrorMatching "metadata write failure" isArtifactFailure |> ignore
+            })
     ]
 
 let private detailsAsyncTests =
@@ -124,11 +145,21 @@ let private detailsAsyncTests =
         testCaseTask "Details returns typed UnavailableTestDetail for failed-tests without TRX" (fun () ->
             task {
                 use workspace = new TempWorkspace()
+                workspace.CreateClassLibrary("lib", validClassSource) |> ignore
                 use service = serviceFor workspace
 
+                let! runResult =
+                    service.VerifyTest
+                        { Target = Some "lib.csproj"
+                          Configuration = None
+                          Filter = None
+                          NoBuild = Some true
+                          Timeout = None }
+
+                let run = runResult |> expectOk "test run without retained TRX"
                 let! result =
                     service.Details
-                        { RunId = "n/a"
+                        { RunId = run.RunId
                           Kind = DetailKind.FailedTests
                           Offset = 0
                           Limit = None }
@@ -161,6 +192,9 @@ let private cancellationAsyncTests =
                 let compact = result |> expectOk "cancelled build"
                 Expect.equal compact.Status VerificationStatus.Cancelled "typed cancellation"
                 Expect.equal compact.ExitCode None "no exit code on cancellation"
+                Expect.equal service.ArtifactCount 1 "completed cancellation evidence remains owned until session end"
+                service.EndSession()
+                Expect.equal service.ArtifactCount 0 "session end cleans cancellation artifacts"
             })
 
         testCaseTask "a pre-cancelled VerifyTest reports a typed Cancelled status" (fun () ->
@@ -227,11 +261,20 @@ let private typedHostFailureTests =
         testCaseTask "an oversized limit returns typed InvalidPagination" (fun () ->
             task {
                 use workspace = new TempWorkspace()
+                workspace.CreateClassLibrary("lib", validClassSource) |> ignore
                 use service = serviceFor workspace
 
+                let! runResult =
+                    service.VerifyBuild
+                        { Target = Some "lib.csproj"
+                          Configuration = None
+                          NoRestore = None
+                          Timeout = None }
+
+                let run = runResult |> expectOk "build before pagination check"
                 let! result =
                     service.Details
-                        { RunId = "missing-run"
+                        { RunId = run.RunId
                           Kind = DetailKind.Errors
                           Offset = 0
                           Limit = Some(Budgets.Defaults.DetailsMaxPageSize + 1) }

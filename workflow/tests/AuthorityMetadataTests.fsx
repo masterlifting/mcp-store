@@ -188,4 +188,5 @@ async {
         if Directory.Exists tempRoot then
             Directory.Delete(tempRoot, true)
 }
+// Standalone entry bridge: FSI needs one synchronous script entry.
 |> Async.RunSynchronously

@@ -11,6 +11,7 @@ open System.Security.Cryptography
 open System.Text
 open System.Text.Json.Nodes
 open System.Threading
+open System.Threading.Tasks
 
 
 let assertTrue name condition =
@@ -73,54 +74,60 @@ let hasFreshCoordination (path: string) =
     with _ ->
         false
 
-let runDotnet (arguments: string list) =
-    let info = ProcessStartInfo("dotnet")
-    info.WorkingDirectory <- repoRoot
-    info.UseShellExecute <- false
-    info.RedirectStandardOutput <- true
-    info.RedirectStandardError <- true
-    arguments |> List.iter info.ArgumentList.Add
-    use child = Process.Start info
-    let stdout = child.StandardOutput.ReadToEndAsync()
-    let stderr = child.StandardError.ReadToEndAsync()
-    child.WaitForExit()
-
-    if child.ExitCode <> 0 then
-        failwithf "dotnet %s failed (%d): %s" (String.concat " " arguments) child.ExitCode (stderr.Result.Trim())
-
-    stdout.Result
+let runDotnet (arguments: string list) : Async<string> =
+    async {
+        let info = ProcessStartInfo("dotnet")
+        info.WorkingDirectory <- repoRoot
+        info.UseShellExecute <- false
+        info.RedirectStandardOutput <- true
+        info.RedirectStandardError <- true
+        arguments |> List.iter info.ArgumentList.Add
+        use child = Process.Start info
+        let stdoutTask = child.StandardOutput.ReadToEndAsync()
+        let stderrTask = child.StandardError.ReadToEndAsync()
+        do! child.WaitForExitAsync() |> Async.AwaitTask
+        let! stdout = stdoutTask |> Async.AwaitTask
+        let! stderr = stderrTask |> Async.AwaitTask
+        if child.ExitCode <> 0 then
+            return failwithf "dotnet %s failed (%d): %s" (String.concat " " arguments) child.ExitCode (stderr.Trim())
+        return stdout
+    }
 
 let publishRoot =
     Path.Combine(Path.GetTempPath(), "opencode", $"workflow-packaged-{Guid.NewGuid():N}")
 
-let publishPackage () =
-    Directory.CreateDirectory publishRoot |> ignore
+let publishPackage () : Async<unit> =
+    async {
+        Directory.CreateDirectory publishRoot |> ignore
+        let! _ =
+            runDotnet
+                [ "publish"
+                  "workflow/Mcp.Workflow.fsproj"
+                  "--configuration"
+                  "Release"
+                  "--framework"
+                  "net11.0"
+                  "--self-contained"
+                  "false"
+                  "-p:UseAppHost=false"
+                  "-p:DebugType=None"
+                  "-p:DebugSymbols=false"
+                  "-p:SatelliteResourceLanguages=none"
+                  "--output"
+                  publishRoot ]
+        return ()
+    }
 
-    runDotnet
-        [ "publish"
-          "workflow/Mcp.Workflow.fsproj"
-          "--configuration"
-          "Release"
-          "--framework"
-          "net11.0"
-          "--self-contained"
-          "false"
-          "-p:UseAppHost=false"
-          "-p:DebugType=None"
-          "-p:DebugSymbols=false"
-          "-p:SatelliteResourceLanguages=none"
-          "--output"
-          publishRoot ]
-    |> ignore
-
-let tryPublishPackage () =
-    try
-        publishPackage ()
-        Some(Path.Combine(publishRoot, "Mcp.Workflow.dll"))
-    with error ->
-        printfn "WARNING: publishing the current tree failed; falling back to an existing fresh package."
-        printfn "  publish error: %s" error.Message
-        None
+let tryPublishPackage () : Async<string option> =
+    async {
+        try
+            do! publishPackage ()
+            return Some(Path.Combine(publishRoot, "Mcp.Workflow.dll"))
+        with error ->
+            printfn "WARNING: publishing the current tree failed; falling back to an existing fresh package."
+            printfn "  publish error: %s" error.Message
+            return None
+    }
 
 // Prebuilt package locations used only when the current tree cannot publish
 // (for example, a concurrent uncommitted edit). A fresh fallback still carries
@@ -130,19 +137,51 @@ let fallbackEntryDlls =
     [ Path.Combine(repoRoot, "workflow", "dist", "workflow", "Mcp.Workflow.dll")
       Path.Combine(repoRoot, "workflow", "bin", "Release", "net11.0", "Mcp.Workflow.dll") ]
 
-let entryDll, entrySource =
-    match Environment.GetEnvironmentVariable "MCP_WORKFLOW_PACKAGED_DLL" with
-    | value when not (String.IsNullOrWhiteSpace value) -> Path.GetFullPath value, "env:MCP_WORKFLOW_PACKAGED_DLL"
-    | _ when hasFreshCoordination installedEntry -> installedEntry, "installed"
-    | _ ->
-        match tryPublishPackage () with
-        | Some path -> path, "repo-publish"
-        | None ->
-            match fallbackEntryDlls |> List.tryFind hasFreshCoordination with
-            | Some path -> path, "repo-package-fallback"
-            | None ->
-                failwith
-                    "no fresh packaged Workflow binary is available: the current tree does not publish and no fresh package exists"
+let mutable entryDll = ""
+let mutable entrySource = ""
+
+let repositoryIsDirty () : Async<bool> =
+    async {
+        let startInfo = ProcessStartInfo("git")
+        startInfo.ArgumentList.Add "status"
+        startInfo.ArgumentList.Add "--porcelain"
+        startInfo.WorkingDirectory <- repoRoot
+        startInfo.UseShellExecute <- false
+        startInfo.RedirectStandardOutput <- true
+        startInfo.RedirectStandardError <- true
+        use child = Process.Start startInfo
+        let stdoutTask = child.StandardOutput.ReadToEndAsync()
+        let stderrTask = child.StandardError.ReadToEndAsync()
+        do! child.WaitForExitAsync() |> Async.AwaitTask
+        let! stdout = stdoutTask |> Async.AwaitTask
+        let! stderr = stderrTask |> Async.AwaitTask
+        if child.ExitCode <> 0 then return failwithf "git status failed: %s" (stderr.Trim())
+        return not (String.IsNullOrWhiteSpace stdout)
+    }
+
+let initializePackage () : Async<unit> =
+    async {
+        match Environment.GetEnvironmentVariable "MCP_WORKFLOW_PACKAGED_DLL" with
+        | value when not (String.IsNullOrWhiteSpace value) ->
+            entryDll <- Path.GetFullPath value
+            entrySource <- "env:MCP_WORKFLOW_PACKAGED_DLL"
+        | _ when hasFreshCoordination installedEntry ->
+            entryDll <- installedEntry
+            entrySource <- "installed"
+        | _ ->
+            let! dirty = repositoryIsDirty ()
+            if dirty then
+                return failwith "packaged coordination test requires a clean source tree for repository publishing; refusing to test an artifact with dirty-tree provenance"
+            else
+                let! published = tryPublishPackage ()
+                match published with
+                | Some path -> entryDll <- path; entrySource <- "repo-publish"
+                | None ->
+                    match fallbackEntryDlls |> List.tryFind hasFreshCoordination with
+                    | Some path -> entryDll <- path; entrySource <- "repo-package-fallback"
+                    | None ->
+                        return failwith "no fresh packaged Workflow binary is available: the current tree does not publish and no fresh package exists"
+    }
 
 let cleanupDirectories = ResizeArray<string>()
 cleanupDirectories.Add publishRoot
@@ -186,21 +225,15 @@ let jarr (items: JsonNode list) =
     items |> List.iter (fun item -> array.Add item)
     array
 
-let readProtocolLine (child: Process) name =
-    let task = child.StandardOutput.ReadLineAsync()
-
-    if not (task.Wait 240000) then
-        failwithf "%s: timed out waiting for a protocol response" name
-
-    if isNull task.Result then
-        failwithf "%s: protocol stdout closed before a response arrived" name
-
-    let node = JsonNode.Parse task.Result
-
-    if isNull node || isNull node.["jsonrpc"] || node.["jsonrpc"].GetValue<string>() <> "2.0" then
-        failwithf "%s: protocol stdout line is not JSON-RPC 2.0: %s" name task.Result
-
-    node
+let readProtocolLine (child: Process) name : Async<JsonNode> =
+    async {
+        let! line = child.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromMilliseconds 240000.0) |> Async.AwaitTask
+        if isNull line then return failwithf "%s: protocol stdout closed before a response arrived" name
+        let node = JsonNode.Parse line
+        if isNull node || isNull node.["jsonrpc"] || node.["jsonrpc"].GetValue<string>() <> "2.0" then
+            return failwithf "%s: protocol stdout line is not JSON-RPC 2.0: %s" name line
+        return node
+    }
 
 let startMcpProcess (root: string) (catalog: string) (catalogHash: string) =
     let startInfo = ProcessStartInfo("dotnet")
@@ -228,30 +261,36 @@ type McpSession(host: Process) =
     member _.ExitCode = exitCode
     member _.Stderr = stderrText
 
-    member _.Write(request: JsonNode) =
-        host.StandardInput.WriteLine(request.ToJsonString())
-        host.StandardInput.Flush()
+    member _.Write(request: JsonNode) : Async<unit> =
+        async {
+            do! host.StandardInput.WriteLineAsync(request.ToJsonString()) |> Async.AwaitTask
+            do! host.StandardInput.FlushAsync() |> Async.AwaitTask
+        }
 
     member _.Read(name: string) = readProtocolLine host name
 
-    member this.Call(name: string, id: int, tool: string, arguments: JsonNode) =
-        this.Write(jobj [ "jsonrpc", jstr "2.0"; "id", jint id; "method", jstr "tools/call"; "params", jobj [ "name", jstr tool; "arguments", arguments ] ])
-        this.Read name
+    member this.Call(name: string, id: int, tool: string, arguments: JsonNode) : Async<JsonNode> =
+        async {
+            do! this.Write(jobj [ "jsonrpc", jstr "2.0"; "id", jint id; "method", jstr "tools/call"; "params", jobj [ "name", jstr tool; "arguments", arguments ] ])
+            return! this.Read name
+        }
 
-    member _.Close() =
-        if not closed then
-            closed <- true
-
-            if not host.HasExited then
-                try host.StandardInput.Close() with _ -> ()
-
-                if not (host.WaitForExit 30000) then
-                    try host.Kill() with _ -> ()
-                    host.WaitForExit 5000 |> ignore
-
-            exitCode <- host.ExitCode
-            stderrText <- try stderrTask.Result with _ -> ""
-            host.Dispose()
+    member _.Close() : Async<unit> =
+        async {
+            if not closed then
+                closed <- true
+                if not host.HasExited then
+                    try host.StandardInput.Close() with _ -> ()
+                    try do! host.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds 30.0) |> Async.AwaitTask
+                    with _ ->
+                        if not host.HasExited then host.Kill true
+                        do! host.WaitForExitAsync() |> Async.AwaitTask
+                let! stderr = stderrTask |> Async.AwaitTask
+                let! _ = host.StandardOutput.ReadToEndAsync() |> Async.AwaitTask
+                exitCode <- host.ExitCode
+                stderrText <- stderr
+                host.Dispose()
+        }
 
 let isToolError (response: JsonNode) = response.["result"].["isError"].GetValue<bool>()
 let toolStructured (response: JsonNode) = response.["result"].["structuredContent"]
@@ -276,22 +315,28 @@ let enumerateEntries directory =
 type DirectorySampler(directory: string) =
     let snapshots = ConcurrentQueue<string list>()
     let cancellation = new CancellationTokenSource()
+    let stopped = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
     let mutable thread = Unchecked.defaultof<Thread>
 
     member _.Start() =
         let loop () =
-            while not cancellation.IsCancellationRequested do
-                snapshots.Enqueue(enumerateEntries directory)
-                Thread.Sleep 1
+            try
+                while not cancellation.IsCancellationRequested do
+                    snapshots.Enqueue(enumerateEntries directory)
+                    Thread.Sleep 1
+            finally
+                stopped.TrySetResult(()) |> ignore
 
         thread <- Thread(ThreadStart loop)
         thread.IsBackground <- true
         thread.Start()
 
-    member _.Stop() =
+    member _.Stop() : Async<string list list> =
         cancellation.Cancel()
-        if not (isNull thread) then thread.Join()
-        snapshots.ToArray() |> Array.toList
+        async {
+            if not (isNull thread) then do! stopped.Task |> Async.AwaitTask
+            return snapshots.ToArray() |> Array.toList
+        }
 
 
 let createArgs root id =
@@ -331,7 +376,8 @@ let capture (label: string) (taskDirectory: string) =
     entries
 
 
-let runRaceTest () =
+let runRaceTest () : Async<unit> =
+    async {
     let root, catalog, catalogHash = prepareWorkspace "workflow-packaged-race"
     let taskId = "PKG-1"
     let taskDirectory = Path.Combine(root, ".tasks", taskId)
@@ -339,7 +385,8 @@ let runRaceTest () =
     let mutable first = Unchecked.defaultof<McpSession>
     let mutable second = Unchecked.defaultof<McpSession>
 
-    try
+    let! outcome =
+        async {
         sampler.Start()
         first <- McpSession(startMcpProcess root catalog catalogHash)
         second <- McpSession(startMcpProcess root catalog catalogHash)
@@ -347,10 +394,10 @@ let runRaceTest () =
 
         // Both processes receive task_create before either response is read, so
         // the two creates genuinely race through the runtime mutex.
-        first.Write(jobj [ "jsonrpc", jstr "2.0"; "id", jint 1; "method", jstr "tools/call"; "params", jobj [ "name", jstr "task_create"; "arguments", createArgs root taskId ] ])
-        second.Write(jobj [ "jsonrpc", jstr "2.0"; "id", jint 1; "method", jstr "tools/call"; "params", jobj [ "name", jstr "task_create"; "arguments", createArgs root taskId ] ])
-        let createA = first.Read "task_create A"
-        let createB = second.Read "task_create B"
+        do! first.Write(jobj [ "jsonrpc", jstr "2.0"; "id", jint 1; "method", jstr "tools/call"; "params", jobj [ "name", jstr "task_create"; "arguments", createArgs root taskId ] ])
+        do! second.Write(jobj [ "jsonrpc", jstr "2.0"; "id", jint 1; "method", jstr "tools/call"; "params", jobj [ "name", jstr "task_create"; "arguments", createArgs root taskId ] ])
+        let! createA = first.Read "task_create A"
+        let! createB = second.Read "task_create B"
         printfn "create A: isError=%b code=%s" (isToolError createA) (if isToolError createA then toolErrorCode createA else "-")
         printfn "create B: isError=%b code=%s" (isToolError createB) (if isToolError createB then toolErrorCode createB else "-")
         capture "after task_create" taskDirectory |> ignore
@@ -362,10 +409,10 @@ let runRaceTest () =
 
         // Non-overlapping mutating commands against revision 0: one start, one
         // block. The CAS must let exactly one win.
-        first.Write(jobj [ "jsonrpc", jstr "2.0"; "id", jint 2; "method", jstr "tools/call"; "params", jobj [ "name", jstr "task_apply"; "arguments", applyArgs root taskId 0 (startCommand ()) ] ])
-        second.Write(jobj [ "jsonrpc", jstr "2.0"; "id", jint 2; "method", jstr "tools/call"; "params", jobj [ "name", jstr "task_apply"; "arguments", applyArgs root taskId 0 (blockCommand ()) ] ])
-        let applyStart = first.Read "task_apply start"
-        let applyBlock = second.Read "task_apply block"
+        do! first.Write(jobj [ "jsonrpc", jstr "2.0"; "id", jint 2; "method", jstr "tools/call"; "params", jobj [ "name", jstr "task_apply"; "arguments", applyArgs root taskId 0 (startCommand ()) ] ])
+        do! second.Write(jobj [ "jsonrpc", jstr "2.0"; "id", jint 2; "method", jstr "tools/call"; "params", jobj [ "name", jstr "task_apply"; "arguments", applyArgs root taskId 0 (blockCommand ()) ] ])
+        let! applyStart = first.Read "task_apply start"
+        let! applyBlock = second.Read "task_apply block"
         printfn "apply start: isError=%b code=%s" (isToolError applyStart) (if isToolError applyStart then toolErrorCode applyStart else "-")
         printfn "apply block: isError=%b code=%s" (isToolError applyBlock) (if isToolError applyBlock then toolErrorCode applyBlock else "-")
         capture "after task_apply" taskDirectory |> ignore
@@ -375,7 +422,7 @@ let runRaceTest () =
         assertEqual "losing apply code" "CONFLICT" (toolErrorCode applyErrors.Head)
         assertContains "losing apply message" "state revision conflict" (toolErrorMessage applyErrors.Head)
 
-        let finalGet = first.Call("task_get", 3, "task_get", taskGetArgs root taskId)
+        let! finalGet = first.Call("task_get", 3, "task_get", taskGetArgs root taskId)
         let finalTask = taskOf finalGet
         assertEqual "final state revision" 1 (finalTask.["stateRevision"].GetValue<int>())
 
@@ -406,7 +453,7 @@ let runRaceTest () =
         assertEqual "atomic sidecar kind" "execution" (finalDocument.["kind"].GetValue<string>())
         assertEqual "atomic sidecar lifecycle" "open" (finalDocument.["lifecycle"].GetValue<string>())
 
-        let observed = sampler.Stop()
+        let! observed = sampler.Stop()
         let observedEntries = observed |> List.collect id |> List.distinct |> List.sort
 
         let observedLocks =
@@ -417,8 +464,8 @@ let runRaceTest () =
             (sprintf "sampler never observed %s (observed: %A)" lockArtifact observedEntries)
             observedLocks.IsEmpty
 
-        first.Close()
-        second.Close()
+        do! first.Close()
+        do! second.Close()
         let stderrA = first.Stderr
         let stderrB = second.Stderr
         assertEqual "race process A exit code" 0 first.ExitCode
@@ -430,13 +477,21 @@ let runRaceTest () =
 
         printfn "OK packaged race: one create and one apply serialized; byte-level atomic sidecar; directory stayed ephemeral"
         printfn "observed task-directory snapshots (%d samples, %d distinct): %A" observed.Length observedEntries.Length observedEntries
-    finally
-        try sampler.Stop() |> ignore with _ -> ()
-        try first.Close() with _ -> ()
-        try second.Close() with _ -> ()
+        return ()
+        } |> Async.Catch
+
+    do! sampler.Stop() |> Async.Ignore
+    if not (obj.ReferenceEquals(first, null)) then do! first.Close()
+    if not (obj.ReferenceEquals(second, null)) then do! second.Close()
+
+    match outcome with
+    | Choice1Of2 () -> return ()
+    | Choice2Of2 error -> return raise error
+    }
 
 
-let runAbandonedOwnerTest () =
+let runAbandonedOwnerTest () : Async<unit> =
+    async {
     let root, catalog, catalogHash = prepareWorkspace "workflow-packaged-abandoned"
     let taskId = "ABN-1"
     let taskDirectory = Path.Combine(root, ".tasks", taskId)
@@ -446,12 +501,17 @@ let runAbandonedOwnerTest () =
     // Seed the task so the reclaimer has something to mutate.
     let creator = McpSession(startMcpProcess root catalog catalogHash)
 
-    try
-        let created = creator.Call("task_create", 1, "task_create", createArgs root taskId)
+    let! createOutcome =
+        async {
+        let! created = creator.Call("task_create", 1, "task_create", createArgs root taskId)
         assertTrue "abandoned-test seed create succeeded" (not (isToolError created))
         assertEqual "abandoned-test seed revision" 0 ((taskOf created).["stateRevision"].GetValue<int>())
-    finally
-        creator.Close()
+        return ()
+        } |> Async.Catch
+    do! creator.Close()
+    match createOutcome with
+    | Choice1Of2 () -> ()
+    | Choice2Of2 error -> return raise error
 
     // A helper subprocess acquires the exact named runtime mutex for this
     // sidecar path and then blocks. Killing it abandons the mutex.
@@ -472,65 +532,74 @@ let runAbandonedOwnerTest () =
     let deadline = DateTime.UtcNow.AddSeconds 60.0
 
     while not (File.Exists readyMarker) && DateTime.UtcNow < deadline && not helper.HasExited do
-        Thread.Sleep 25
+        do! Task.Delay 25 |> Async.AwaitTask
 
-    assertTrue "mutex holder signalled acquisition" (File.Exists readyMarker)
-
+    let acquired = File.Exists readyMarker
+    if not helper.HasExited then helper.Kill true
+    do! helper.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds 30.0) |> Async.AwaitTask
+    let! helperStdoutText = helperStdout |> Async.AwaitTask
+    let! helperStderrText = helperStderr |> Async.AwaitTask
+    assertTrue "mutex holder signalled acquisition" acquired
     printfn "abandoned-owner helper pid=%d acquired the runtime mutex" helper.Id
-    try helper.Kill() with _ -> ()
-    helper.WaitForExit 30000 |> ignore
 
     let reclaimer = McpSession(startMcpProcess root catalog catalogHash)
 
-    try
-        let applied = reclaimer.Call("task_apply", 1, "task_apply", applyArgs root taskId 0 (startCommand ()))
+    let! reclaimOutcome =
+        async {
+        let! applied = reclaimer.Call("task_apply", 1, "task_apply", applyArgs root taskId 0 (startCommand ()))
         printfn "reclaimer: isError=%b code=%s" (isToolError applied) (if isToolError applied then toolErrorCode applied else "-")
         assertTrue "packaged process acquired the abandoned mutex and applied" (not (isToolError applied))
         assertEqual "reclaimer revision" 1 ((taskOf applied).["stateRevision"].GetValue<int>())
         assertEqual "abandoned run directory contents" [ "runtime.json" ] (enumerateEntries taskDirectory)
         assertTrue "abandoned run leaves no runtime.lock" (not (File.Exists(Path.Combine(taskDirectory, lockArtifact))))
-        reclaimer.Close()
-        assertEqual "reclaimer exit code" 0 reclaimer.ExitCode
-        printfn "OK abandoned-owner recovery: packaged process acquired the abandoned OS mutex"
-    finally
-        reclaimer.Close()
+        return ()
+        } |> Async.Catch
+    do! reclaimer.Close()
+    match reclaimOutcome with
+    | Choice1Of2 () -> assertEqual "reclaimer exit code" 0 reclaimer.ExitCode
+    | Choice2Of2 error -> return raise error
+    printfn "OK abandoned-owner recovery: packaged process acquired the abandoned OS mutex"
 
-    printfn "helper stdout: %s" (try helperStdout.Result.Trim() with _ -> "")
-    printfn "helper stderr: %s" (try helperStderr.Result.Trim() with _ -> "")
+    printfn "helper stdout: %s" (helperStdoutText.Trim())
+    printfn "helper stderr: %s" (helperStderrText.Trim())
+    }
 
 
-printfn "packaged entry: %s (source=%s)" entryDll entrySource
+// FSI needs one synchronous top-level entry for the asynchronous script.
+async {
+    do! initializePackage ()
+    printfn "packaged entry: %s (source=%s)" entryDll entrySource
 
-let installedStatus =
-    if File.Exists installedEntry then
-        let bytes = File.ReadAllBytes installedEntry
-        let mutexCount = occurrencesUtf16 mutexNamePattern bytes
-        let lockCount = occurrencesUtf16 lockArtifact bytes
-        printfn "installed package: %s" installedEntry
-        printfn "  mutex-name utf16=%d runtime.lock utf16=%d" mutexCount lockCount
+    let installedStatus =
+        if File.Exists installedEntry then
+            let bytes = File.ReadAllBytes installedEntry
+            let mutexCount = occurrencesUtf16 mutexNamePattern bytes
+            let lockCount = occurrencesUtf16 lockArtifact bytes
+            printfn "installed package: %s" installedEntry
+            printfn "  mutex-name utf16=%d runtime.lock utf16=%d" mutexCount lockCount
 
-        if mutexCount = 0 || lockCount > 0 then
-            printfn "WARNING STALE-INSTALL: the local install predates the ephemeral-mutex coordination."
-            printfn "  this run verified the repo-built package instead."
-            Some false
+            if mutexCount = 0 || lockCount > 0 then
+                printfn "WARNING STALE-INSTALL: the local install predates the ephemeral-mutex coordination."
+                printfn "  this run verified the repo-built package instead."
+                Some false
+            else
+                Some true
         else
-            Some true
-    else
-        printfn "installed package: not present at %s" installedEntry
-        None
+            printfn "installed package: not present at %s" installedEntry
+            None
 
-verifyPackagedBinary entryDll
-
-try
-    runRaceTest ()
-    runAbandonedOwnerTest ()
+    verifyPackagedBinary entryDll
+    do! runRaceTest ()
+    do! runAbandonedOwnerTest ()
     printfn "OK packaged runtime coordination proof: ephemeral mutex, no runtime.lock, cross-process serialization, abandoned-owner recovery"
 
     match installedStatus with
     | Some false -> printfn "NOTE: installed-package verification skipped for the stale local install."
     | _ -> ()
-finally
+
     for directory in cleanupDirectories do
         if Directory.Exists directory
-           && (directory.Contains("workflow-packaged-", StringComparison.Ordinal)) then
+           && directory.Contains("workflow-packaged-", StringComparison.Ordinal) then
             try Directory.Delete(directory, true) with _ -> ()
+}
+|> Async.RunSynchronously

@@ -154,9 +154,9 @@ let resolveWith label files =
 let profilePath profileRoot name =
     Path.Combine(profileRoot, ".opencode", "task", "profiles", name)
 
-// One entry bridge: the entire suite composes asynchronously.
+// Standalone entry bridge: FSI needs one synchronous script entry.
 async {
-try
+    try
         // --- No-overlay default: only the built-in general profile is active ---
         let rootA = root "no-overlay"
 
@@ -189,7 +189,7 @@ try
 
         do! expectRejected "unsupported profile schema version" "schemaVersion must be 1" (resolveWith "b-schema" [ "p.json", """{"schemaVersion":2,"id":"x","description":"d"}""" ])
 
-        do! expectRejected "duplicate project profile id" "duplicate project profile id 'dup'" (resolveWith "b-duplicate" [ "a.json", profileJson "dup" (Some "first") [] [] "b.json", profileJson "dup" (Some "second") [] [] ])
+        do! expectRejected "duplicate project profile id" "duplicate project profile id 'dup'" (resolveWith "b-duplicate" [ "a.json", profileJson "dup" (Some "first") [] []; "b.json", profileJson "dup" (Some "second") [] [] ])
 
         // A same-ID overlay targets a shared (builtin) profile; project files with
         // duplicate IDs are rejected before merge. Within an overlay, a later
@@ -258,8 +258,6 @@ try
         // A same-ID overlay may add role defaults but cannot rebind a purpose the
         // shared profile already resolved.
         let! addedRole = expectOk "overlay adds a new role default" (resolveWith "b-role-add" [ "overlay.json", roleDefaultOverlayJson SoftwareProfileId "documentation" "writer" ])
-                "overlay adds a new role default"
-                (resolveWith "b-role-add" [ "overlay.json", roleDefaultOverlayJson SoftwareProfileId "documentation" "writer" ])
 
         let addedRoleDefaults = addedRole.[SoftwareProfileId].Definition.Policy.RoleDefaults
 
@@ -283,8 +281,6 @@ try
             [ "widget.json", profileJson "widget" (Some "Widget") [] [ guardJson "review" "review" 1 ] ]
 
         let! missingTask = expectOk "create missing-profile task" (createTaskWithProfile rootD (Some "widget") (createRequest "TST-904" "Widget"))
-                "create missing-profile task"
-                (createTaskWithProfile rootD (Some "widget") (createRequest "TST-904" "Widget"))
 
         File.Delete(profilePath rootD "widget.json")
 
@@ -305,8 +301,6 @@ try
             [ "widget.json", profileJson "widget" (Some "Widget") [] [ guardJson "review" "review" 1 ] ]
 
         let! draftTask = expectOk "create draft-drift task" (createTaskWithProfile rootE1 (Some "widget") (createRequest "TST-905" "Widget"))
-                "create draft-drift task"
-                (createTaskWithProfile rootE1 (Some "widget") (createRequest "TST-905" "Widget"))
 
         assertEqual "draft task materializes one guard" 1 draftTask.Guards.Length
 
@@ -320,8 +314,6 @@ try
         assertTrue "profile change produces drift" (e1Fingerprint <> draftTask.ProfileFingerprint)
 
         let! absorbed = expectOk "draft absorbs profile drift" (applyTask rootE1 "TST-905" 0 (AddEvidence(makeEvidence "E1" EvidenceKind.Test "absorbed")))
-                "draft absorbs profile drift"
-                (applyTask rootE1 "TST-905" 0 (AddEvidence(makeEvidence "E1" EvidenceKind.Test "absorbed")))
 
         assertEqual "draft drift absorbed fingerprint" e1Fingerprint absorbed.ProfileFingerprint
         assertEqual "draft drift stays draft" Draft absorbed.ContractState
@@ -345,8 +337,6 @@ try
             [ "widget.json", profileJson "widget" (Some "Widget") [] [ guardJson "review" "review" 1 ] ]
 
         let! baselineTask = expectOk "create baselined-drift task" (createTaskWithProfile rootE2 (Some "widget") (createRequest "TST-906" "Widget"))
-                "create baselined-drift task"
-                (createTaskWithProfile rootE2 (Some "widget") (createRequest "TST-906" "Widget"))
 
         let! baselined = expectOk "baseline drift task" (applyTask rootE2 "TST-906" 0 (StartWorkItem "W1"))
         assertEqual "drift task baselined" Baselined baselined.ContractState
@@ -382,12 +372,6 @@ try
             (hasRequirement EvidenceKind.Test 2 reconciled.Guards)
 
         let! afterReconcile = expectOk "mutation proceeds after reconcile" (applyTask rootE2 "TST-906" reconciled.StateRevision (AddEvidence(makeEvidence "E1" EvidenceKind.Test "now allowed")))
-                "mutation proceeds after reconcile"
-                (applyTask
-                    rootE2
-                    "TST-906"
-                    reconciled.StateRevision
-                    (AddEvidence(makeEvidence "E1" EvidenceKind.Test "now allowed")))
 
         assertEqual "post-reconcile evidence recorded" 1 afterReconcile.Evidence.Length
 
@@ -403,30 +387,19 @@ try
         let! fProfiles = expectOk "resolve reclassification profiles" (resolveProfiles rootF)
 
         let! reclassTask = expectOk "create reclassification task" (createTaskWithProfile rootF (Some "base") (createRequest "TST-907" "Reclass"))
-                "create reclassification task"
-                (createTaskWithProfile rootF (Some "base") (createRequest "TST-907" "Reclass"))
 
         let! reclassBaselined = expectOk "baseline reclassification task" (applyTask rootF "TST-907" 0 (StartWorkItem "W1"))
         assertEqual "reclassification task baselined" Baselined reclassBaselined.ContractState
 
-        do! expectRejected "baselined weakening reclassification fails closed" "operation requires user authority; ordinary Coordinator invocation cannot authorize it" (applyTask rootF "TST-907" reclassBaselined.StateRevision (ReclassifyTask { Kind = None Profile = Some "lean" Reason = "drop required capability" }))
+        do! expectRejected "baselined weakening reclassification fails closed" "operation requires user authority; ordinary Coordinator invocation cannot authorize it" (applyTask rootF "TST-907" reclassBaselined.StateRevision (ReclassifyTask { Kind = None; Profile = Some "lean"; Reason = "drop required capability" }))
 
-        do! expectRejected "baselined kind reclassification fails closed" "operation requires user authority; ordinary Coordinator invocation cannot authorize it" (applyTask rootF "TST-907" reclassBaselined.StateRevision (ReclassifyTask { Kind = Some Research Profile = None Reason = "change kind" }))
+        do! expectRejected "baselined kind reclassification fails closed" "operation requires user authority; ordinary Coordinator invocation cannot authorize it" (applyTask rootF "TST-907" reclassBaselined.StateRevision (ReclassifyTask { Kind = Some Research; Profile = None; Reason = "change kind" }))
 
         let! unchanged = expectOk "get after rejected reclassification" (getTask rootF "TST-907")
         assertEqual "rejected reclassification does not mutate profile" "base" unchanged.Profile
         assertEqual "rejected reclassification does not mutate revision" reclassBaselined.StateRevision unchanged.StateRevision
 
-        let! strengthened = expectOk "non-weakening reclassification succeeds" (applyTask rootF "TST-907" reclassBaselined.StateRevision (ReclassifyTask { Kind = None Profile = Some "base-plus" Reason = "add capability" }))
-                "non-weakening reclassification succeeds"
-                (applyTask
-                    rootF
-                    "TST-907"
-                    reclassBaselined.StateRevision
-                    (ReclassifyTask
-                        { Kind = None
-                          Profile = Some "base-plus"
-                          Reason = "add capability" }))
+        let! strengthened = expectOk "non-weakening reclassification succeeds" (applyTask rootF "TST-907" reclassBaselined.StateRevision (ReclassifyTask { Kind = None; Profile = Some "base-plus"; Reason = "add capability" }))
 
         assertEqual "reclassified profile" "base-plus" strengthened.Profile
         assertEqual "reclassified fingerprint" fProfiles.["base-plus"].Fingerprint strengthened.ProfileFingerprint
@@ -445,8 +418,6 @@ try
               profileJson "keyed-reordered" (Some "Keyed reordered") [] [ keyedGuardJson "beta"; keyedGuardJson "alpha" ] ]
 
         let! keyedTask = expectOk "create keyed guard task" (createTaskWithProfile rootJ (Some "keyed") (createRequest "TST-923" "Keyed"))
-                "create keyed guard task"
-                (createTaskWithProfile rootJ (Some "keyed") (createRequest "TST-923" "Keyed"))
 
         assertEqual "keyed task materializes two guards" 2 keyedTask.Guards.Length
 
@@ -463,22 +434,11 @@ try
         assertTrue "same-content keys materialize distinct guards" (alphaGuardId <> betaGuardId)
 
         let! disposedKeyed = expectOk "dispose keyed alpha guard" (applyTask rootJ "TST-923" keyedTask.StateRevision (MarkGuardNotApplicable(alphaGuardId, None)))
-                "dispose keyed alpha guard"
-                (applyTask rootJ "TST-923" keyedTask.StateRevision (MarkGuardNotApplicable(alphaGuardId, None)))
 
         assertEqual "alpha disposition recorded" (GuardDisposition.NotApplicable "D1") (guardForKey "alpha" disposedKeyed).Disposition
         assertEqual "beta stays applicable" GuardDisposition.Applicable (guardForKey "beta" disposedKeyed).Disposition
 
-        let! reorderedKeyed = expectOk "reclassify keyed guards reordered" (applyTask rootJ "TST-923" disposedKeyed.StateRevision (ReclassifyTask { Kind = None Profile = Some "keyed-reordered" Reason = "reorder same-content guards" }))
-                "reclassify keyed guards reordered"
-                (applyTask
-                    rootJ
-                    "TST-923"
-                    disposedKeyed.StateRevision
-                    (ReclassifyTask
-                        { Kind = None
-                          Profile = Some "keyed-reordered"
-                          Reason = "reorder same-content guards" }))
+        let! reorderedKeyed = expectOk "reclassify keyed guards reordered" (applyTask rootJ "TST-923" disposedKeyed.StateRevision (ReclassifyTask { Kind = None; Profile = Some "keyed-reordered"; Reason = "reorder same-content guards" }))
 
         assertEqual "reorder keeps alpha guard identity" alphaGuardId (guardForKey "alpha" reorderedKeyed).Id
         assertEqual "reorder keeps alpha disposition" (GuardDisposition.NotApplicable "D1") (guardForKey "alpha" reorderedKeyed).Disposition
@@ -494,8 +454,6 @@ try
         assertEqual "software definition guard count" 3 software.Definition.Policy.Guards.Length
 
         let! softwareExec = expectOk "create software execution task" (createTaskWithProfile rootG (Some SoftwareProfileId) (createRequest "TST-910" "Software execution"))
-                "create software execution task"
-                (createTaskWithProfile rootG (Some SoftwareProfileId) (createRequest "TST-910" "Software execution"))
 
         assertEqual "software execution profile" SoftwareProfileId softwareExec.Profile
         assertEqual "software execution fingerprint" software.Fingerprint softwareExec.ProfileFingerprint
@@ -538,11 +496,6 @@ try
             (softwareExec.Guards |> List.forall (fun guard -> guard.Waiver = WaivableBy MinimumAuthority.UserAuthority))
 
         let! softwareResearch = expectOk "create software research task" (createTaskWithProfile rootG (Some SoftwareProfileId) { createRequest "TST-911" "Software research" with Kind = Research })
-                "create software research task"
-                (createTaskWithProfile
-                    rootG
-                    (Some SoftwareProfileId)
-                    { createRequest "TST-911" "Software research" with Kind = Research })
 
         assertEqual "software research profile" SoftwareProfileId softwareResearch.Profile
         assertTrue "software research materializes no gates" softwareResearch.Guards.IsEmpty
@@ -552,32 +505,14 @@ try
         assertEqual "draft reclass starts general" GeneralProfileId reclassDraft.Profile
         assertTrue "general draft has no gates" reclassDraft.Guards.IsEmpty
 
-        let! adopted = expectOk "draft reclassifies to software execution" (applyTask rootG "TST-912" 0 (ReclassifyTask { Kind = None Profile = Some SoftwareProfileId Reason = "adopt software gates" }))
-                "draft reclassifies to software execution"
-                (applyTask
-                    rootG
-                    "TST-912"
-                    0
-                    (ReclassifyTask
-                        { Kind = None
-                          Profile = Some SoftwareProfileId
-                          Reason = "adopt software gates" }))
+        let! adopted = expectOk "draft reclassifies to software execution" (applyTask rootG "TST-912" 0 (ReclassifyTask { Kind = None; Profile = Some SoftwareProfileId; Reason = "adopt software gates" }))
 
         assertEqual "draft reclass profile" SoftwareProfileId adopted.Profile
         assertEqual "draft reclass fingerprint" software.Fingerprint adopted.ProfileFingerprint
         assertEqual "draft reclass syncs software gates" 3 adopted.Guards.Length
         assertTrue "draft reclass gates are profile-materialized" (adopted.Guards |> List.forall (fun guard -> guard.Origin = ProfileMaterialized))
 
-        let! researchOnly = expectOk "draft reclassifies software execution to research" (applyTask rootG "TST-912" adopted.StateRevision (ReclassifyTask { Kind = Some Research Profile = None Reason = "research only" }))
-                "draft reclassifies software execution to research"
-                (applyTask
-                    rootG
-                    "TST-912"
-                    adopted.StateRevision
-                    (ReclassifyTask
-                        { Kind = Some Research
-                          Profile = None
-                          Reason = "research only" }))
+        let! researchOnly = expectOk "draft reclassifies software execution to research" (applyTask rootG "TST-912" adopted.StateRevision (ReclassifyTask { Kind = Some Research; Profile = None; Reason = "research only" }))
 
         assertEqual "draft reclass research kind" Research researchOnly.Kind
         assertEqual "draft reclass drops execution gates" 0 researchOnly.Guards.Length
@@ -591,61 +526,25 @@ try
         assertEqual "software execution baselines on first start" Baselined softwareExecStarted.ContractState
 
         let! softwareExecWorkDone = expectOk "complete software execution work" (applyTask rootG "TST-910" softwareExecStarted.StateRevision (CompleteWorkItem("W1", { Result = "implemented"; EvidenceRefs = [] })))
-                "complete software execution work"
-                (applyTask
-                    rootG
-                    "TST-910"
-                    softwareExecStarted.StateRevision
-                    (CompleteWorkItem("W1", { Result = "implemented"; EvidenceRefs = [] })))
 
         let roleEvidence id kind role summary =
             { makeEvidence id kind summary with
                 ProducerRole = Some role }
 
         let! softwareExecWithBuild = expectOk "add software build evidence" (applyTask rootG "TST-910" softwareExecWorkDone.StateRevision (AddEvidence(roleEvidence "E1" EvidenceKind.Build "engineer" "build passed")))
-                "add software build evidence"
-                (applyTask
-                    rootG
-                    "TST-910"
-                    softwareExecWorkDone.StateRevision
-                    (AddEvidence(roleEvidence "E1" EvidenceKind.Build "engineer" "build passed")))
 
         let! softwareExecWithTest = expectOk "add software test evidence" (applyTask rootG "TST-910" softwareExecWithBuild.StateRevision (AddEvidence(roleEvidence "E2" EvidenceKind.Test "tester" "tests passed")))
-                "add software test evidence"
-                (applyTask
-                    rootG
-                    "TST-910"
-                    softwareExecWithBuild.StateRevision
-                    (AddEvidence(roleEvidence "E2" EvidenceKind.Test "tester" "tests passed")))
 
         // A Review record produced by the wrong role cannot satisfy the review gate.
         let! softwareExecWithWrongReview = expectOk "add wrong-role review evidence" (applyTask rootG "TST-910" softwareExecWithTest.StateRevision (AddEvidence(roleEvidence "E3" EvidenceKind.Review "engineer" "self review")))
-                "add wrong-role review evidence"
-                (applyTask
-                    rootG
-                    "TST-910"
-                    softwareExecWithTest.StateRevision
-                    (AddEvidence(roleEvidence "E3" EvidenceKind.Review "engineer" "self review")))
 
         let! softwareExecVerified = expectOk "verify software acceptance" (applyTask rootG "TST-910" softwareExecWithWrongReview.StateRevision (VerifyAcceptanceCriterion("AC1", [ "E1" ])))
-                "verify software acceptance"
-                (applyTask
-                    rootG
-                    "TST-910"
-                    softwareExecWithWrongReview.StateRevision
-                    (VerifyAcceptanceCriterion("AC1", [ "E1" ])))
 
         assertTrue "software execution cannot complete without reviewer evidence" (not (canCompleteTask softwareExecVerified))
 
         do! expectRejected "software completion blocked by unsatisfied review gate" $"guard '{reviewGuard.Id}' is not satisfied" (applyTask rootG "TST-910" softwareExecVerified.StateRevision (CompleteTask defaultHandoff))
 
         let! softwareExecReady = expectOk "add reviewer evidence" (applyTask rootG "TST-910" softwareExecVerified.StateRevision (AddEvidence(roleEvidence "E4" EvidenceKind.Review "reviewer" "independent review passed")))
-                "add reviewer evidence"
-                (applyTask
-                    rootG
-                    "TST-910"
-                    softwareExecVerified.StateRevision
-                    (AddEvidence(roleEvidence "E4" EvidenceKind.Review "reviewer" "independent review passed")))
 
         assertTrue "software execution completes once all gates are satisfied" (canCompleteTask softwareExecReady)
 
@@ -685,8 +584,6 @@ try
 
         // Execution materializes only the validation/review obligations.
         let! openCodeExec = expectOk "create opencode execution task" (createTaskWithProfile rootH (Some OpenCodeProfileId) (createRequest "TST-920" "OpenCode execution"))
-                "create opencode execution task"
-                (createTaskWithProfile rootH (Some OpenCodeProfileId) (createRequest "TST-920" "OpenCode execution"))
 
         assertEqual "opencode execution profile" OpenCodeProfileId openCodeExec.Profile
         assertEqual "opencode execution fingerprint" openCode.Fingerprint openCodeExec.ProfileFingerprint
@@ -732,16 +629,7 @@ try
 
         do! expectRejected "opencode review waiver fails closed under coordinator" "operation requires user authority; ordinary Coordinator invocation cannot authorize it" (applyTask rootH "TST-920" openCodeExec.StateRevision (WaiveGuard(openCodeReview.Id, None)))
 
-        let! withCoordinatorDecision = expectOk "add coordinator decision for review guard" (applyTask rootH "TST-920" openCodeExec.StateRevision (AddDecision { Kind = ApplicabilityDecision Targets = [ GuardDispositionTarget openCodeReview.Id ] Rationale = "coordinator attempts to dispose a user-required guard" }))
-                "add coordinator decision for review guard"
-                (applyTask
-                    rootH
-                    "TST-920"
-                    openCodeExec.StateRevision
-                    (AddDecision
-                        { Kind = ApplicabilityDecision
-                          Targets = [ GuardDispositionTarget openCodeReview.Id ]
-                          Rationale = "coordinator attempts to dispose a user-required guard" }))
+        let! withCoordinatorDecision = expectOk "add coordinator decision for review guard" (applyTask rootH "TST-920" openCodeExec.StateRevision (AddDecision { Kind = ApplicabilityDecision; Targets = [ GuardDispositionTarget openCodeReview.Id ]; Rationale = "coordinator attempts to dispose a user-required guard" }))
 
         let coordinatorDecision =
             withCoordinatorDecision.Decisions
@@ -753,11 +641,6 @@ try
 
         // Research materializes only the non-waivable investigation obligation.
         let! openCodeResearch = expectOk "create opencode research task" (createTaskWithProfile rootH (Some OpenCodeProfileId) { createRequest "TST-921" "OpenCode research" with Kind = Research })
-                "create opencode research task"
-                (createTaskWithProfile
-                    rootH
-                    (Some OpenCodeProfileId)
-                    { createRequest "TST-921" "OpenCode research" with Kind = Research })
 
         assertEqual "opencode research profile" OpenCodeProfileId openCodeResearch.Profile
         assertEqual "opencode research materializes one guard" 1 openCodeResearch.Guards.Length
@@ -786,26 +669,16 @@ try
         let! researchStarted = expectOk "start opencode research work" (applyTask rootH "TST-921" openCodeResearch.StateRevision (StartWorkItem "W1"))
 
         let! researchWorkDone = expectOk "complete opencode research work" (applyTask rootH "TST-921" researchStarted.StateRevision (CompleteWorkItem("W1", { Result = "harness investigated"; EvidenceRefs = [] })))
-                "complete opencode research work"
-                (applyTask rootH "TST-921" researchStarted.StateRevision (CompleteWorkItem("W1", { Result = "harness investigated"; EvidenceRefs = [] })))
 
         let! researchSeedEvidence = expectOk "add non-research evidence for acceptance" (applyTask rootH "TST-921" researchWorkDone.StateRevision (AddEvidence(makeEvidence "E1" EvidenceKind.Test "non-research evidence")))
-                "add non-research evidence for acceptance"
-                (applyTask rootH "TST-921" researchWorkDone.StateRevision (AddEvidence(makeEvidence "E1" EvidenceKind.Test "non-research evidence")))
 
         let! researchVerified = expectOk "verify opencode research acceptance" (applyTask rootH "TST-921" researchSeedEvidence.StateRevision (VerifyAcceptanceCriterion("AC1", [ "E1" ])))
-                "verify opencode research acceptance"
-                (applyTask rootH "TST-921" researchSeedEvidence.StateRevision (VerifyAcceptanceCriterion("AC1", [ "E1" ])))
 
         do! expectRejected "opencode research completion blocked until investigation evidence exists" "is not satisfied" (applyTask rootH "TST-921" researchVerified.StateRevision (CompleteTask defaultHandoff))
 
         let! researchEvidenceAdded = expectOk "add opencode research investigation evidence" (applyTask rootH "TST-921" researchVerified.StateRevision (AddEvidence(makeEvidence "E2" EvidenceKind.Research "harness investigation recorded")))
-                "add opencode research investigation evidence"
-                (applyTask rootH "TST-921" researchVerified.StateRevision (AddEvidence(makeEvidence "E2" EvidenceKind.Research "harness investigation recorded")))
 
         let! researchCompleted = expectOk "complete opencode research task" (applyTask rootH "TST-921" researchEvidenceAdded.StateRevision (CompleteTask defaultHandoff))
-                "complete opencode research task"
-                (applyTask rootH "TST-921" researchEvidenceAdded.StateRevision (CompleteTask defaultHandoff))
 
         assertEqual "opencode research completed lifecycle" "complete" researchCompleted.Lifecycle
 
@@ -832,8 +705,6 @@ try
         assertEqual "opencode overlay retains investigation waiver" NotWaivable overlaidInvestigation.Waiver
 
         let! overlaidExec = expectOk "create overlaid opencode execution task" (createTaskWithProfile rootI (Some OpenCodeProfileId) (createRequest "TST-922" "Overlaid opencode"))
-                "create overlaid opencode execution task"
-                (createTaskWithProfile rootI (Some OpenCodeProfileId) (createRequest "TST-922" "Overlaid opencode"))
 
         assertEqual "opencode overlay execution materializes two guards" 2 overlaidExec.Guards.Length
 
@@ -848,6 +719,8 @@ try
 
         printfn
             "OK slice-8 profile resolver: no-overlay general default, strict JSON/unknown-property/schema/duplicate/weakening rejection, deterministic same-ID overlay monotonic merge, mandatory profile Guard materialization and non-removal, missing-profile mutation block with lenient get, Draft drift absorption vs Baselined drift block/monotonic reconcile, fail-closed baselined weakening reclassification, built-in software Execution gates enforced end-to-end / Research exclusion / Draft gate sync, and built-in opencode registry/policy-only capabilities / per-Kind guard isolation / fail-closed review / non-waivable satisfiable investigation / monotonic same-ID overlay"
-finally
-    if Directory.Exists parentRoot && parentRoot.Contains("taskprofile-tests-", StringComparison.Ordinal) then
-        Directory.Delete(parentRoot, true)
+    finally
+     if Directory.Exists parentRoot && parentRoot.Contains("taskprofile-tests-", StringComparison.Ordinal) then
+         Directory.Delete(parentRoot, true)
+}
+|> Async.RunSynchronously

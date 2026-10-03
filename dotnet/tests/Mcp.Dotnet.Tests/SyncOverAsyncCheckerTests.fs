@@ -4,159 +4,86 @@ open System
 open System.IO
 open Expecto
 open Mcp.Dotnet.Tests.SyncOverAsyncChecker
+open Mcp.Dotnet.Tests.Support
 
-/// Positive fixtures prove the scanner flags every documented forbidden
-/// pattern even when those patterns are written inside a script body.
-let positiveFixtures =
-    testList "positive fixtures" [
-        testCase "flags bare .Result on a Task-typed receiver" <| fun _ ->
-            let text = "let value = task.Result\n"
-            let findings = checkText "fixture.fs" text
-            let blocking = violations findings
-            Expect.equal blocking.Length 1 "blocking .Result on task"
-            Expect.equal blocking.[0].Pattern ".Result" "pattern recorded"
+let private fixtureTests =
+    testList "source scanner fixtures" [
+        testCase "task.Result and parameterless task.Wait are detected" <| fun _ ->
+            let findings = checkText "sample.fs" "let a = pendingTask.Result\nlet b = pendingTask.Wait()\n"
+            Expect.equal (violations findings |> List.map _.Pattern) [ "Task.Result"; "Task.Wait" ] "both receiver patterns match"
+            Expect.equal findings.Head.Line 1 "first line is one-based"
+            Expect.equal findings.Head.Column 9 "column is one-based"
 
-        testCase "flags sync .Wait() without timeout" <| fun _ ->
-            let text = "release.Wait()\n"
-            let findings = checkText "fixture.fs" text
-            let blocking = violations findings
-            Expect.equal blocking.Length 1 "blocking Wait()"
-            Expect.equal blocking.[0].Pattern ".Wait()" "pattern recorded"
+        testCase "blocking APIs are detected" <| fun _ ->
+            let source =
+                "task.GetAwaiter().GetResult()\nTask.WaitAll [||]\nTask.WaitAny [||]\nchild.WaitForExit(1000)\nreader.ReadToEnd()\n"
+            let findings = checkText "sample.fs" source |> violations
+            Expect.equal (findings |> List.map _.Pattern)
+                [ "GetAwaiter().GetResult"; "Task.WaitAll"; "Task.WaitAny"; "WaitForExit"; "ReadToEnd" ]
+                "all blocking forms are covered"
 
-        testCase "flags GetAwaiter().GetResult()" <| fun _ ->
-            let text = "let x = task.GetAwaiter().GetResult()\n"
-            let findings = checkText "fixture.fs" text
-            let blocking = violations findings
-            Expect.equal blocking.Length 1 "blocking GetAwaiter().GetResult"
-            Expect.equal blocking.[0].Pattern "GetAwaiter().GetResult" "pattern recorded"
+        testCase "comments, strings, and test fixture literals are not source calls" <| fun _ ->
+            let source =
+                "// task.Result\nlet text = \"task.Result and stream.ReadToEnd()\"\nlet longText = \"\"\"task.Wait()\"\"\"\n(* task.Wait() *)\n"
+            Expect.isEmpty (checkText "sample.fs" source) "non-code text is masked"
 
-        testCase "flags Task.WaitAll" <| fun _ ->
-            let text = "Task.WaitAll [||]\n"
-            let findings = checkText "fixture.fs" text
-            let blocking = violations findings
-            Expect.isGreaterThan blocking.Length 0 "blocking Task.WaitAll"
+        testCase "only reasoned non-Task Result field marker is accepted" <| fun _ ->
+            let allowed = "// Non-Task Result field: This is the Workflow WorkItem record payload.\nlet saved = workItem.Result\n"
+            Expect.isEmpty (violations (checkText "sample.fs" allowed)) "one exact reason marker permits the record field"
 
-        testCase "flags sync WaitForExit() without timeout" <| fun _ ->
-            let text = "child.WaitForExit()\n"
-            let findings = checkText "fixture.fs" text
-            let blocking = violations findings
-            Expect.equal blocking.Length 1 "blocking WaitForExit()"
-            Expect.equal blocking.[0].Pattern "WaitForExit()" "pattern recorded"
+            let unmarked = checkText "sample.fs" "let saved = workItem.Result\n"
+            Expect.equal (violations unmarked |> List.map _.Pattern) [ "Task.Result" ] "receiver names do not form an allowlist"
 
-        testCase "flags sync ReadToEnd() without timeout" <| fun _ ->
-            let text = "let text = stream.ReadToEnd()\n"
-            let findings = checkText "fixture.fs" text
-            let blocking = violations findings
-            Expect.equal blocking.Length 1 "blocking ReadToEnd()"
-            Expect.equal blocking.[0].Pattern "ReadToEnd()" "pattern recorded"
+            let emptyReason = "// Non-Task Result field:\nlet saved = workItem.Result\n"
+            Expect.equal (violations (checkText "sample.fs" emptyReason) |> List.length) 1 "empty marker is not an exemption"
+
+        testCase "only listed top-level entry bridge site is accepted" <| fun _ ->
+            let documented =
+                "// Standalone entry bridge: this script owns the process entry.\nmatch execute (GetTask { Root = args.[0]; TaskId = args.[1] }) |> Async.RunSynchronously with\n"
+            let allowed = checkText "workflow/tests/TaskGet.fsx" documented
+            Expect.isEmpty (violations allowed) "documented exact entry path is allowed"
+
+            let helper = "let bridge () = Async.RunSynchronously(work)\n"
+            Expect.equal (violations (checkText "workflow/tests/TaskGet.fsx" helper) |> List.length) 1 "helper bridge is rejected"
+
+            Expect.equal (violations (checkText "other.fsx" documented) |> List.length) 1 "unlisted flow bridge is rejected"
+
+            let duplicate = documented + "runAgain () |> Async.RunSynchronously\n"
+            Expect.equal (violations (checkText "workflow/tests/TaskGet.fsx" duplicate) |> List.length) 2 "more than one bridge in a flow is rejected"
+
+        testCase "ordinary inline comments cannot exempt blocking calls" <| fun _ ->
+            let source = "// SYNC-OVER-ASYNC-ALLOW: no suppression syntax exists\ntask.Wait()\n"
+            Expect.equal (violations (checkText "sample.fs" source) |> List.length) 1 "inline comment is not an exemption"
+
+        testCase "generated output directories are excluded, active code is scanned" <| fun _ ->
+            let root = Path.Combine(Path.GetTempPath(), "mcp-checker", Guid.NewGuid().ToString("N"))
+            try
+                let generated = Path.Combine(root, "workflow", "obj")
+                Directory.CreateDirectory generated |> ignore
+                File.WriteAllText(Path.Combine(generated, "Generated.fs"), "task.Result")
+                File.WriteAllText(Path.Combine(root, "active.fs"), "task.Result")
+                let findings = checkTree root |> violations
+                Expect.equal findings.Length 1 "only active source is scanned"
+                Expect.equal (Path.GetFileName findings.Head.Path) "active.fs" "active path is reported"
+            finally
+                if Directory.Exists root then Directory.Delete(root, true)
     ]
 
-/// Negative fixtures prove the allowlist absorbs the legitimate cases without
-/// requiring blanket exclusion of `.Result` or `.Wait`.
-let negativeFixtures =
-    testList "negative fixtures" [
-        testCase "allowlists WorkItem.Result as a record-field receiver" <| fun _ ->
-            let text = "let value = workItem.Result\n"
-            let findings = checkText "fixture.fs" text
-            Expect.isEmpty (violations findings) "WorkItem.Result is a record field"
-
-        testCase "allowlists a WorkItem.Result in assertEqual" <| fun _ ->
-            let text = "assertEqual \"r\" (Some \"x\") workItem.Result\n"
-            let findings = checkText "fixture.fs" text
-            Expect.isEmpty (violations findings) "WorkItem.Result stays allowed"
-
-        testCase "allowlists a SYNC-OVER-ASYNC-ALLOW marker" <| fun _ ->
-            let text =
-                "// SYNC-OVER-ASYNC-ALLOW: deliberate owner-thread mutex event\nreleaseRequested.Wait()\n"
-
-            let findings = checkText "fixture.fs" text
-            Expect.isEmpty (violations findings) "marked Wait() is allowed"
-
-        testCase "ignore generated dist/ and bin/ paths" <| fun _ ->
-            let tempRoot =
-                Path.Combine(
-                    Path.GetTempPath(),
-                    "mcp-dotnet-checker-excludes",
-                    Guid.NewGuid().ToString("N")
-                )
-
-            try
-                Directory.CreateDirectory tempRoot |> ignore
-                let distDirectory = Path.Combine(tempRoot, "dist")
-                Directory.CreateDirectory distDirectory |> ignore
-                File.WriteAllText(Path.Combine(distDirectory, "Generated.fs"), "let v = task.Result\n")
-                File.WriteAllText(Path.Combine(tempRoot, "Real.fs"), "let v = workItem.Result\n")
-
-                let findings = checkTree tempRoot
-                Expect.isEmpty (violations findings) "generated output excluded"
-            finally
-                if Directory.Exists tempRoot then
-                    Directory.Delete(tempRoot, true)
-
-        testCase "ignore scoped extensions" <| fun _ ->
-            let tempRoot =
-                Path.Combine(
-                    Path.GetTempPath(),
-                    "mcp-dotnet-checker-scope",
-                    Guid.NewGuid().ToString("N")
-                )
-
-            try
-                Directory.CreateDirectory tempRoot |> ignore
-                File.WriteAllText(Path.Combine(tempRoot, "notes.txt"), "let v = task.Result\n")
-                File.WriteAllText(Path.Combine(tempRoot, "code.fs"), "let v = workItem.Result\n")
-
-                let findings = checkTree tempRoot
-                Expect.isEmpty (violations findings) ".txt files are out of scope"
-            finally
-                if Directory.Exists tempRoot then
-                    Directory.Delete(tempRoot, true)
-    ]
-
-/// End-to-end invariant: the checked-in F# surface must not introduce a new
-/// unallowed blocking pattern. The check is best-effort: every block is
-/// paired with a fixture so a regression introduces a known failure mode.
-let surfaceTests =
-    testList "repository surface" [
-        testCase "active root F# helpers and dotnet tests stay clean" <| fun _ ->
+let private repositorySurfaceTests =
+    testList "repository F# surface" [
+        testCase "all active root, dotnet, and workflow source files are checked" <| fun _ ->
             let root = repositoryRoot ()
-            let checked =
-                [ Path.Combine(root, "BuildProvenance.fsx")
-                  Path.Combine(root, "DistributionBuild.fsx")
-                  Path.Combine(root, "DistributionTestHelper.fsx")
-                  Path.Combine(root, "ReleasePins.fsx")
-                  Path.Combine(root, "dotnet", "tests", "Mcp.Dotnet.Tests", "Support.fs")
-                  Path.Combine(root, "dotnet", "tests", "Mcp.Dotnet.Tests", "DomainTests.fs")
-                  Path.Combine(root, "dotnet", "tests", "Mcp.Dotnet.Tests", "SecurityTests.fs")
-                  Path.Combine(root, "dotnet", "tests", "Mcp.Dotnet.Tests", "ProcessIntegrationTests.fs")
-                  Path.Combine(root, "dotnet", "tests", "Mcp.Dotnet.Tests", "InvocationTests.fs")
-                  Path.Combine(root, "dotnet", "tests", "Mcp.Dotnet.Tests", "QuotaTests.fs")
-                  Path.Combine(root, "dotnet", "tests", "Mcp.Dotnet.Tests", "McpHostTests.fs")
-                  Path.Combine(root, "dotnet", "tests", "Mcp.Dotnet.Tests", "DotnetSchemaParityTests.fs")
-                  Path.Combine(root, "dotnet", "tests", "Mcp.Dotnet.Tests", "SyncOverAsyncChecker.fs") ]
+            let allFiles = enumerateFiles root
+            let hasRootHelpers = allFiles |> List.exists (fun path -> Path.GetFileName(path) = "BuildProvenance.fsx")
+            let hasDotnet = allFiles |> List.exists (fun path -> path.Contains("dotnet", StringComparison.OrdinalIgnoreCase))
+            let hasWorkflow = allFiles |> List.exists (fun path -> path.Contains("workflow", StringComparison.OrdinalIgnoreCase))
+            Expect.isTrue hasRootHelpers "root helper scripts are included"
+            Expect.isTrue hasDotnet "dotnet source and tests are included"
+            Expect.isTrue hasWorkflow "workflow source and tests are included"
 
-            let unallowed =
-                checked
-                |> List.collect (fun path ->
-                    if File.Exists path then
-                        checkFile path
-                    else
-                        [])
-
-            let blocking = violations unallowed
-
-            for finding in blocking do
-                failwithf
-                    "%s:%d:%d %s in %s"
-                    finding.Path
-                    finding.Line
-                    finding.Column
-                    finding.Text
-                    finding.Pattern
+            let failures = checkTree root |> violations
+            let summary = failures |> List.map formatFinding |> String.concat Environment.NewLine
+            Expect.isEmpty failures summary
     ]
 
-let tests =
-    testList "sync-over-async checker"
-        [ positiveFixtures
-          negativeFixtures
-          surfaceTests ]
+let tests = testList "sync-over-async checker" [ fixtureTests; repositorySurfaceTests ]

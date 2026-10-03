@@ -9,7 +9,10 @@
 open System
 open System.Collections.Concurrent
 open System.IO
+open System.Security.Cryptography
+open System.Text
 open System.Threading
+open System.Threading.Tasks
 open Workflow
 
 let assertTrue name condition =
@@ -38,6 +41,76 @@ let request id =
 
 let taskDirectory root id = Path.Combine(root, ".tasks", id)
 let lockPath root id = Path.Combine(taskDirectory root id, "runtime.lock")
+
+let verifyCancelledWaiterReleasesMutex root id : Async<unit> =
+    async {
+        let sidecar = Path.Combine(taskDirectory root id, SidecarFileName)
+        // Contention must use the exact path-derived mutex name used by Workflow.
+        let canonical = Path.GetFullPath sidecar
+        let canonical = if OperatingSystem.IsWindows() then canonical.ToUpperInvariant() else canonical
+        let digest = SHA256.HashData(Encoding.UTF8.GetBytes canonical) |> Convert.ToHexString
+        let mutexName = if OperatingSystem.IsWindows() then $"Local\\Mcp.Workflow.Runtime.{digest}" else $"Mcp.Workflow.Runtime.{digest}"
+        let holderAcquired = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+        let holderReleased = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+        use releaseHolder = new ManualResetEvent(false)
+        let holderThread =
+            Thread(ThreadStart(fun () ->
+                let mutex = new Mutex(false, mutexName)
+                let mutable held = false
+                try
+                    mutex.WaitOne() |> ignore
+                    held <- true
+                    holderAcquired.TrySetResult(()) |> ignore
+                    releaseHolder.WaitOne() |> ignore
+                finally
+                    try
+                        if held then mutex.ReleaseMutex()
+                    finally
+                        mutex.Dispose()
+                        holderReleased.TrySetResult(()) |> ignore))
+        holderThread.IsBackground <- true
+        holderThread.Start()
+
+        let! outcome =
+            async {
+                try
+                    do! holderAcquired.Task.WaitAsync(TimeSpan.FromSeconds 5.0) |> Async.AwaitTask
+                with :? TimeoutException -> return failwith "mutex-holder acquisition timed out"
+                use cancellation = new CancellationTokenSource()
+                let waiting = Async.StartAsTask(getTask root id, cancellationToken = cancellation.Token)
+                do! Task.Delay 100 |> Async.AwaitTask
+                cancellation.Cancel()
+                releaseHolder.Set() |> ignore
+                do! holderReleased.Task.WaitAsync(TimeSpan.FromSeconds 5.0) |> Async.AwaitTask
+                let! cancelled =
+                    async {
+                        try
+                            let! _ = waiting.WaitAsync(TimeSpan.FromSeconds 5.0) |> Async.AwaitTask
+                            return false
+                        with
+                        | :? OperationCanceledException -> return true
+                        | :? TimeoutException -> return failwith "cancelled getTask did not finish after holder release"
+                    }
+
+                assertTrue "contended getTask preserves caller cancellation" cancelled
+                let nextTask = Async.StartAsTask(getTask root id)
+                let! next =
+                    async {
+                        try return! nextTask.WaitAsync(TimeSpan.FromSeconds 5.0) |> Async.AwaitTask
+                        with :? TimeoutException -> return failwith "cancelled caller stranded the mutex owner; next getTask timed out"
+                    }
+                match next with
+                | Ok _ -> return ()
+                | Error error -> return failwithf "getTask after caller cancellation: %s" (renderError error)
+            }
+            |> Async.Catch
+
+        releaseHolder.Set() |> ignore
+        do! holderReleased.Task.WaitAsync(TimeSpan.FromSeconds 5.0) |> Async.AwaitTask
+        match outcome with
+        | Choice1Of2 () -> return ()
+        | Choice2Of2 error -> return raise error
+    }
 
 // Recursive listing relative to the task directory. Tolerant of a directory
 // that does not exist yet or is being created concurrently.
@@ -88,14 +161,27 @@ Directory.CreateDirectory tempRoot |> ignore
 let taskId = "EPH-1"
 let sampler = DirectorySampler(taskDirectory tempRoot taskId)
 
-// Standalone entry bridge: the only synchronous wait in this script's flow;
-// the entire suite composes asynchronously above.
+// Standalone entry bridge: FSI requires one synchronous top-level boundary.
 async {
     try
         sampler.Start()
 
         let! _ = expectOk "create" (createTask tempRoot (request taskId))
         assertOnlyRuntimeJson "after task_create" tempRoot taskId
+
+        let taskSidecar = Path.Combine(taskDirectory tempRoot taskId, SidecarFileName)
+        let persistedTask = File.ReadAllText taskSidecar
+        File.WriteAllText(taskSidecar, "{")
+        let! malformedRead = getTask tempRoot taskId
+
+        match malformedRead with
+        | Error _ -> ()
+        | Ok _ -> failwith "malformed task read unexpectedly succeeded"
+
+        File.WriteAllText(taskSidecar, persistedTask)
+        let! _ = expectOk "valid read after failed read releases mutex lease" (getTask tempRoot taskId)
+        assertOnlyRuntimeJson "after failed read" tempRoot taskId
+        do! verifyCancelledWaiterReleasesMutex tempRoot taskId
 
         let! _ = expectOk "get" (getTask tempRoot taskId)
         assertOnlyRuntimeJson "after task_get" tempRoot taskId
@@ -132,4 +218,5 @@ async {
            && tempRoot.Contains("workflow-ephemeral-lock-", StringComparison.Ordinal) then
             Directory.Delete(tempRoot, true)
 }
+// Standalone entry bridge: FSI needs one synchronous script entry.
 |> Async.RunSynchronously

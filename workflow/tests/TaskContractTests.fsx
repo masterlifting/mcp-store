@@ -117,4 +117,5 @@ async {
         if Directory.Exists tempRoot && tempRoot.Contains("workflow-contract-v1-", StringComparison.Ordinal) then
             Directory.Delete(tempRoot, true)
 }
+// Standalone entry bridge: FSI needs one synchronous script entry.
 |> Async.RunSynchronously

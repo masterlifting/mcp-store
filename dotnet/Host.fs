@@ -141,6 +141,7 @@ module private McpHost =
         | VerificationError.ProcessStartFailure _ -> "PROCESS_START_FAILURE"
         | VerificationError.ArtifactQuotaExceeded _ -> "ARTIFACT_QUOTA_EXCEEDED"
         | VerificationError.ArtifactFailure _ -> "ARTIFACT_FAILURE"
+        | VerificationError.InternalFailure _ -> "INTERNAL_FAILURE"
 
     let private boundedMessage (message: string) =
         let value = if isNull message then "operation failed" else message
@@ -378,7 +379,9 @@ module private McpHost =
                         let! result = service.Details request
                         match result with | Ok value -> return detailsResult value | Error error -> return failure error
                 | _ -> return failure (VerificationError.InvalidInput $"tool '{name}' is not registered")
-            with _ -> return failure (VerificationError.ArtifactFailure "dotnet operation failed")
+            with
+            | :? OperationCanceledException as error -> return raise error
+            | _ -> return failure (VerificationError.InternalFailure "dotnet operation failed")
         }
 
     let private handleImmediate id methodName parameters =
@@ -455,8 +458,10 @@ module private McpHost =
                                         |> Option.defaultValue "n/a"
 
                                     log $"{name} completed runId={runId}"
-                                with error ->
-                                    do! write (response id (failure (VerificationError.ArtifactFailure "dotnet operation failed")))
+                                with
+                                | :? OperationCanceledException -> log $"{name} cancelled"
+                                | error ->
+                                    do! write (response id (failure (VerificationError.InternalFailure "dotnet operation failed")))
                                     log $"{name} failed: {error.Message}"
                             finally
                                 let mutable removed: CancellationTokenSource = null

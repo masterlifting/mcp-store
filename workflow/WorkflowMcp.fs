@@ -159,8 +159,11 @@ let private validateProjectRoot (root: string) : Result<string, string> =
                     invalid $"project root must not traverse a reparse point: {reparse.Value}"
                 else
                     Ok candidate
-        with error ->
-            invalid $"projectRoot is not a valid path: {error.Message}"
+        with
+        | :? IOException -> invalid "projectRoot is not a valid path"
+        | :? UnauthorizedAccessException -> invalid "projectRoot is not a valid path"
+        | :? ArgumentException -> invalid "projectRoot is not a valid path"
+        | :? NotSupportedException -> invalid "projectRoot is not a valid path"
 
 let private strings label (values: JsonElement list) =
     values
@@ -539,6 +542,7 @@ let private errorCode error =
     | InvalidTransition _ -> "INVALID_TRANSITION"
     | PersistenceFailure _ -> "PERSISTENCE_FAILURE"
     | AuthorityDenied _ -> "AUTHORITY_DENIED"
+    | InternalFailure _ -> "INTERNAL_FAILURE"
 
 let private node (value: 'T) : JsonNode = JsonValue.Create<'T>(value) :> JsonNode
 
@@ -644,10 +648,12 @@ let private invokeTool name arguments : Async<JsonNode> =
                 match result with
                 | Ok task -> return success (serialize task)
                 | Error error -> return failure error
-        with error ->
+        with
+        | :? OperationCanceledException as error -> return raise error
+        | _ ->
             // Terminal host safety boundary: unexpected faults become a bounded,
             // non-sensitive internal failure rather than normal control flow.
-            return failure (PersistenceFailure $"runtime operation failed: {error.Message}")
+            return failure (InternalFailure "runtime operation failed")
     }
 
 let private handle id methodName parameters : Async<string> =
@@ -736,7 +742,9 @@ let private validateCatalog args =
                 let actual = SHA256.HashData(File.ReadAllBytes path) |> Convert.ToHexString |> fun value -> value.ToLowerInvariant()
                 if actual <> expected then Error "the canonical profile catalog hash does not match"
                 else Ok()
-        with error -> Error $"the canonical profile catalog could not be validated: {error.Message}"
+        with
+        | :? IOException -> Error "the canonical profile catalog could not be validated"
+        | :? UnauthorizedAccessException -> Error "the canonical profile catalog could not be validated"
     | _ -> Error "the Workflow requires --profile-catalog <absolute path> --profile-catalog-sha256 <sha256>"
 
 [<EntryPoint>]

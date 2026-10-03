@@ -53,8 +53,9 @@ let private attempt operation path (work: unit -> unit) : Result<unit, ReleaseEr
     try
         work ()
         Ok()
-    with error ->
-        Error(FileFailure(operation, path, error.Message))
+    with
+    | :? IOException as error -> Error(FileFailure(operation, path, error.Message))
+    | :? UnauthorizedAccessException as error -> Error(FileFailure(operation, path, error.Message))
 
 // Entry timestamps are pinned so archive bytes do not depend on the build clock.
 let private createArchive archivePath sourceRoot files : Async<Result<unit, ReleaseError>> =
@@ -68,11 +69,14 @@ let private createArchive archivePath sourceRoot files : Async<Result<unit, Rele
 
                 use source = File.OpenRead(Path.Combine(sourceRoot, relativePath))
                 use target = entry.Open()
-                do! source.CopyToAsync target |> Async.AwaitTask
+                do! awaitComplete (source.CopyToAsync target)
 
             return Ok()
-        with error ->
-            return Error(FileFailure("archive", archivePath, error.Message))
+        with
+        | :? OperationCanceledException as error -> return raise error
+        | :? IOException as error -> return Error(FileFailure("archive", archivePath, error.Message))
+        | :? UnauthorizedAccessException as error -> return Error(FileFailure("archive", archivePath, error.Message))
+        | :? NotSupportedException as error -> return Error(FileFailure("archive", archivePath, error.Message))
     }
 
 let build (request: Request) : Async<Result<DistributionResult, ReleaseError>> =

@@ -7,6 +7,29 @@ open System.IO
 open System.Security.Cryptography
 open System.Text.Json
 open System.Text.Json.Nodes
+open System.Threading.Tasks
+
+// Async.AwaitTask reports a faulted task as AggregateException; surface its
+// single operational cause so focused catches can classify it.
+let awaitOperational (work: Task<'T>) : Async<'T> =
+    async {
+        try
+            return! Async.AwaitTask work
+        with
+        | :? AggregateException as aggregate when aggregate.InnerExceptions.Count = 1 ->
+            return raise aggregate.InnerExceptions.[0]
+        | error -> return raise error
+    }
+
+let awaitComplete (work: Task) : Async<unit> =
+    async {
+        try
+            do! Async.AwaitTask work
+        with
+        | :? AggregateException as aggregate when aggregate.InnerExceptions.Count = 1 ->
+            return raise aggregate.InnerExceptions.[0]
+        | error -> return raise error
+    }
 
 // Typed expected failures for the release flow. Cases carry structured context
 // (operation, exit code, expected/actual) rather than only formatted text.
@@ -91,10 +114,12 @@ let releaseResult = ReleaseResultBuilder()
 let sha256FileAsync (path: string) : Async<Result<string, ReleaseError>> =
     async {
         try
-            let! bytes = File.ReadAllBytesAsync path |> Async.AwaitTask
+            let! bytes = awaitOperational (File.ReadAllBytesAsync path)
             return Ok(SHA256.HashData bytes |> Convert.ToHexString |> fun value -> value.ToLowerInvariant())
-        with error ->
-            return Error(FileFailure("hash", path, error.Message))
+        with
+        | :? OperationCanceledException as error -> return raise error
+        | :? IOException as error -> return Error(FileFailure("hash", path, error.Message))
+        | :? UnauthorizedAccessException as error -> return Error(FileFailure("hash", path, error.Message))
     }
 
 // Writes a JSON artifact with the shared indented formatting so manifests and
@@ -102,10 +127,12 @@ let sha256FileAsync (path: string) : Async<Result<string, ReleaseError>> =
 let writeJsonAsync (path: string) (value: JsonNode) : Async<Result<unit, ReleaseError>> =
     async {
         try
-            do! File.WriteAllTextAsync(path, value.ToJsonString(JsonSerializerOptions(WriteIndented = true))) |> Async.AwaitTask
+            do! awaitComplete (File.WriteAllTextAsync(path, value.ToJsonString(JsonSerializerOptions(WriteIndented = true))))
             return Ok()
-        with error ->
-            return Error(FileFailure("write", path, error.Message))
+        with
+        | :? OperationCanceledException as error -> return raise error
+        | :? IOException as error -> return Error(FileFailure("write", path, error.Message))
+        | :? UnauthorizedAccessException as error -> return Error(FileFailure("write", path, error.Message))
     }
 
 // Reads one small text artifact asynchronously, classifying expected absence and
@@ -116,10 +143,12 @@ let readAllTextAsync (path: string) : Async<Result<string, ReleaseError>> =
             return Error(MissingArtifact path)
         else
             try
-                let! text = File.ReadAllTextAsync path |> Async.AwaitTask
+                let! text = awaitOperational (File.ReadAllTextAsync path)
                 return Ok text
-            with error ->
-                return Error(FileFailure("read", path, error.Message))
+            with
+            | :? OperationCanceledException as error -> return raise error
+            | :? IOException as error -> return Error(FileFailure("read", path, error.Message))
+            | :? UnauthorizedAccessException as error -> return Error(FileFailure("read", path, error.Message))
     }
 
 // Runs one external process asynchronously, draining both pipes concurrently so
@@ -142,16 +171,19 @@ let runProcess (workingDirectory: string) (executable: string) (arguments: strin
             else
                 let stdoutTask = childProcess.StandardOutput.ReadToEndAsync()
                 let stderrTask = childProcess.StandardError.ReadToEndAsync()
-                do! childProcess.WaitForExitAsync() |> Async.AwaitTask
-                let! stdout = Async.AwaitTask stdoutTask
-                let! stderr = Async.AwaitTask stderrTask
+                do! awaitComplete (childProcess.WaitForExitAsync())
+                let! stdout = awaitOperational stdoutTask
+                let! stderr = awaitOperational stderrTask
 
                 if childProcess.ExitCode <> 0 then
                     return Error(ProcessFailed(operation, childProcess.ExitCode, stderr.Trim()))
                 else
                     return Ok(stdout.Trim())
-        with error ->
-            return Error(ProcessStartFailure(operation, error.Message))
+        with
+        | :? OperationCanceledException as error -> return raise error
+        | :? System.ComponentModel.Win32Exception as error -> return Error(ProcessStartFailure(operation, error.Message))
+        | :? InvalidOperationException as error -> return Error(ProcessStartFailure(operation, error.Message))
+        | :? IOException as error -> return Error(ProcessStartFailure(operation, error.Message))
     }
 
 let private gitRun (root: string) (args: string list) = runProcess root "git" args
@@ -198,8 +230,10 @@ let assertManifestRevision (manifestPath: string) (expected: string) : Async<Res
                                 Error "the 'revision' field is missing"
                             else
                                 Ok(value.GetValue<string>())
-                with error ->
-                    Error $"the manifest is not valid JSON: {error.Message}"
+                with
+                | :? System.Text.Json.JsonException as error -> Error $"the manifest is not valid JSON: {error.Message}"
+                | :? FormatException as error -> Error $"the manifest is not valid JSON: {error.Message}"
+                | :? InvalidOperationException as error -> Error $"the manifest is not valid JSON: {error.Message}"
 
             match revision with
             | Error detail -> return Error(MalformedArtifact(manifestPath, detail))

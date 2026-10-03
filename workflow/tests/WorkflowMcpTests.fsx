@@ -49,32 +49,28 @@ let resolveDotnetHost () =
     | Some host -> Path.GetFullPath host
     | None -> failwithf "the required .NET host '%s' is not on PATH" names.Head
 
-let assertRequiredSdk (host: string) =
-    let startInfo = ProcessStartInfo()
-    startInfo.FileName <- host
-    startInfo.ArgumentList.Add "--version"
-    startInfo.RedirectStandardOutput <- true
-    startInfo.RedirectStandardError <- true
-    startInfo.UseShellExecute <- false
-    startInfo.CreateNoWindow <- true
-    startInfo.WorkingDirectory <- repoRoot
-    use child = Process.Start startInfo
-    let stdout = child.StandardOutput.ReadToEnd()
-    let stderr = child.StandardError.ReadToEnd()
-    child.WaitForExit()
+let assertRequiredSdk (host: string) : Async<unit> =
+    async {
+        let startInfo = ProcessStartInfo()
+        startInfo.FileName <- host
+        startInfo.ArgumentList.Add "--version"
+        startInfo.RedirectStandardOutput <- true
+        startInfo.RedirectStandardError <- true
+        startInfo.UseShellExecute <- false
+        startInfo.CreateNoWindow <- true
+        startInfo.WorkingDirectory <- repoRoot
+        use child = Process.Start startInfo
+        let stdoutTask = child.StandardOutput.ReadToEndAsync()
+        let stderrTask = child.StandardError.ReadToEndAsync()
+        do! child.WaitForExitAsync() |> Async.AwaitTask
+        let! stdout = stdoutTask |> Async.AwaitTask
+        let! stderr = stderrTask |> Async.AwaitTask
+        if child.ExitCode <> 0 then return failwithf "could not query the .NET SDK version from '%s': %s" host (stderr.Trim())
+        let selected = stdout.Trim()
+        if selected <> requiredSdk then return failwithf "the required SDK is '%s' but '%s' reports '%s'" requiredSdk host selected
+    }
 
-    if child.ExitCode <> 0 then
-        failwithf "could not query the .NET SDK version from '%s': %s" host (stderr.Trim())
-
-    let selected = stdout.Trim()
-
-    if selected <> requiredSdk then
-        failwithf "the required SDK is '%s' but '%s' reports '%s'" requiredSdk host selected
-
-let dotnetHost =
-    let host = resolveDotnetHost ()
-    assertRequiredSdk host
-    host
+let dotnetHost = resolveDotnetHost ()
 
 let requireReleaseEntry () =
     if not (File.Exists releaseEntryDll) then
@@ -121,7 +117,8 @@ let parseJson name (text: string) =
 
 // --- fixed child-process runners -------------------------------------------
 
-let runFsi name script arguments =
+let runFsi name script arguments : Async<string * string> =
+    async {
     let startInfo = ProcessStartInfo()
     startInfo.FileName <- "dotnet"
     startInfo.ArgumentList.Add "fsi"
@@ -136,25 +133,20 @@ let runFsi name script arguments =
     use child = Process.Start startInfo
     let stdoutTask = child.StandardOutput.ReadToEndAsync()
     let stderrTask = child.StandardError.ReadToEndAsync()
-
-    if not (child.WaitForExit(240000)) then
-        child.Kill true
-        failwithf "%s: child FSI process did not exit" name
-
-    let stdout = stdoutTask.Result
-    let stderr = stderrTask.Result
-
-    if child.ExitCode <> 0 then
-        failwithf "%s: child FSI exit %d: %s" name child.ExitCode stderr
-
-    stdout, stderr
+    do! child.WaitForExitAsync().WaitAsync(TimeSpan.FromMilliseconds 240000.0) |> Async.AwaitTask
+    let! stdout = stdoutTask |> Async.AwaitTask
+    let! stderr = stderrTask |> Async.AwaitTask
+    if child.ExitCode <> 0 then return failwithf "%s: child FSI exit %d: %s" name child.ExitCode stderr
+    return stdout, stderr
+    }
 
 // Variant for asserting TaskApply CLI fail-closed exit behavior: the spawn
 // is the same process boundary, but the helper returns the exit code and
 // stderr instead of failing so the test can pin the exact failure path
 // (unknown flag, missing authority surface, etc.) at a genuine subprocess
 // boundary rather than only at the in-process CLI parser layer.
-let runFsiReturnExit name script arguments =
+let runFsiReturnExit name script arguments : Async<int * string * string> =
+    async {
     let startInfo = ProcessStartInfo()
     startInfo.FileName <- "dotnet"
     startInfo.ArgumentList.Add "fsi"
@@ -167,14 +159,13 @@ let runFsiReturnExit name script arguments =
     startInfo.CreateNoWindow <- true
     startInfo.WorkingDirectory <- repoRoot
     use child = Process.Start startInfo
-    let stdout = child.StandardOutput.ReadToEnd()
-    let stderr = child.StandardError.ReadToEnd()
-
-    if not (child.WaitForExit(60000)) then
-        child.Kill true
-        failwithf "%s: child FSI process did not exit" name
-
-    child.ExitCode, stdout, stderr
+    let stdoutTask = child.StandardOutput.ReadToEndAsync()
+    let stderrTask = child.StandardError.ReadToEndAsync()
+    do! child.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds 60.0) |> Async.AwaitTask
+    let! stdout = stdoutTask |> Async.AwaitTask
+    let! stderr = stderrTask |> Async.AwaitTask
+    return child.ExitCode, stdout, stderr
+    }
 
 // ARCH-INFRA005-001 binds projectRoot to the MCP process working directory, so
 // the harness anchors the host at its own task workspace rather than the repo.
@@ -223,26 +214,27 @@ let validateProtocolLine (line: string) =
 
     node
 
-let readProtocolLine (child: Process) name =
-    let task = child.StandardOutput.ReadLineAsync()
+let readProtocolLine (child: Process) name : Async<JsonNode> =
+    async {
+        let! line = child.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromMilliseconds 240000.0) |> Async.AwaitTask
+        if isNull line then return failwithf "%s: protocol stdout closed before a response arrived" name
+        return validateProtocolLine line
+    }
 
-    if not (task.Wait(240000)) then
-        failwithf "%s: timed out waiting for a protocol response" name
+let writeLine (child: Process) (line: string) : Async<unit> =
+    async {
+        do! child.StandardInput.WriteLineAsync line |> Async.AwaitTask
+        do! child.StandardInput.FlushAsync() |> Async.AwaitTask
+    }
 
-    if isNull task.Result then
-        failwithf "%s: protocol stdout closed before a response arrived" name
+let sendRaw (child: Process) name (line: string) : Async<JsonNode> =
+    async {
+        do! child.StandardInput.WriteLineAsync line |> Async.AwaitTask
+        do! child.StandardInput.FlushAsync() |> Async.AwaitTask
+        return! readProtocolLine child name
+    }
 
-    validateProtocolLine task.Result
-
-let writeLine (child: Process) (line: string) =
-    child.StandardInput.WriteLine line
-    child.StandardInput.Flush()
-
-let sendRaw (child: Process) name (line: string) =
-    writeLine child line
-    readProtocolLine child name
-
-let send (child: Process) name id methodName parameters =
+let send (child: Process) name id methodName parameters : Async<JsonNode> =
     let request =
         jobj
             [ "jsonrpc", jstr "2.0"
@@ -252,7 +244,7 @@ let send (child: Process) name id methodName parameters =
 
     sendRaw child name (request.ToJsonString())
 
-let notify (child: Process) methodName parameters =
+let notify (child: Process) methodName parameters : Async<unit> =
     let request = jobj [ "jsonrpc", jstr "2.0"; "method", jstr methodName; "params", parameters ]
     writeLine child (request.ToJsonString())
 
@@ -326,12 +318,13 @@ Directory.CreateDirectory tempRoot |> ignore
 let fileRoot = Path.Combine(tempRoot, "not-a-directory.txt")
 File.WriteAllText(fileRoot, "not a directory")
 
-let mcp = startMcp tempRoot
-let mcpStderr = mcp.StandardError.ReadToEndAsync()
+async {
+    do! assertRequiredSdk dotnetHost
+    let mcp = startMcp tempRoot
+    let mcpStderr = mcp.StandardError.ReadToEndAsync()
 
-try
     // Protocol handshake.
-    let initialized =
+    let! initialized =
         send
             mcp
             "initialize"
@@ -352,9 +345,9 @@ try
         (initResult.["capabilities"].["tools"].["listChanged"].GetValue<bool>())
 
     // A notification must not desynchronize the request/response stream.
-    notify mcp "notifications/initialized" (jobj [])
+    do! notify mcp "notifications/initialized" (jobj [])
 
-    let listed = send mcp "tools/list" 2 "tools/list" (jobj [])
+    let! listed = send mcp "tools/list" 2 "tools/list" (jobj [])
     assertEqual "tools/list id" 2 (listed.["id"].GetValue<int>())
     let tools = (resultOf "tools/list" listed).["tools"].AsArray()
     let toolNames = tools |> Seq.map (fun tool -> nodeString tool.["name"]) |> List.ofSeq
@@ -380,27 +373,28 @@ try
     assertEqual "task_create schema requires acceptance criteria" true (createTool.["inputSchema"].["properties"].["acceptanceCriteria"].["minItems"].GetValue<int>() > 0)
     assertEqual "task_create schema requires work items" true (createTool.["inputSchema"].["properties"].["workItems"].["minItems"].GetValue<int>() > 0)
 
-    let ping = send mcp "ping" 3 "ping" (jobj [])
+    let! ping = send mcp "ping" 3 "ping" (jobj [])
     assertEqual "ping id" 3 (ping.["id"].GetValue<int>())
     assertEqual "ping result is empty object" 0 ((resultOf "ping" ping).AsObject().Count)
 
     // Structured tool results and library/CLI parity on the same persisted state.
-    let created = callTool mcp "task_create" 4 "task_create" (createArgs tempRoot)
+    let! created = callTool mcp "task_create" 4 "task_create" (createArgs tempRoot)
     let createdStructured = expectToolOk "task_create" created
     let createdTask = createdStructured.["task"]
     assertEqual "created id" "MCP-1" (nodeString createdTask.["id"])
     assertEqual "created schemaVersion" 1 (createdTask.["schemaVersion"].GetValue<int>())
     assertEqual "created stateRevision" 0 (createdTask.["stateRevision"].GetValue<int>())
 
-    let fetched = callToolWithMeta mcp "task_get" 5 "task_get" (getArgs tempRoot)
+    let! fetched = callToolWithMeta mcp "task_get" 5 "task_get" (getArgs tempRoot)
     let fetchedStructured = expectToolOk "task_get" fetched
-    let libraryTask = expectOk "library get parity" (getTask tempRoot "MCP-1")
+    let! libraryResult = getTask tempRoot "MCP-1"
+    let libraryTask = expectOk "library get parity" libraryResult
     let libraryJson = serialize libraryTask
     assertTrue
         "MCP task_get equals library serialize"
         (JsonNode.DeepEquals(fetchedStructured.["task"], JsonNode.Parse libraryJson))
 
-    let cliStdout, cliStderr =
+    let! cliStdout, cliStderr =
         runFsi "CLI get parity" (Path.Combine(scriptDirectory, "TaskGet.fsx")) [ tempRoot; "MCP-1" ]
 
     assertTrue "CLI get has no diagnostics" (String.IsNullOrWhiteSpace cliStderr)
@@ -412,7 +406,7 @@ try
     // a genuine process boundary. The CLI exposes no surface to inject User
     // authority, rejects unknown flags with usage exit code 2, and stderr
     // carries the usage message instead of accepting the flag silently.
-    let cliAuthorityExit, _, cliAuthorityStderr =
+    let! cliAuthorityExit, _, cliAuthorityStderr =
         runFsiReturnExit
             "TaskApply authority flag"
             (Path.Combine(scriptDirectory, "TaskApply.fsx"))
@@ -421,12 +415,12 @@ try
     assertEqual "TaskApply rejects unknown authority flag" 2 cliAuthorityExit
     assertContains "TaskApply authority usage on stderr" "usage:" cliAuthorityStderr
 
-    let validated = callTool mcp "task_validate" 6 "task_validate" (getArgs tempRoot)
+    let! validated = callTool mcp "task_validate" 6 "task_validate" (getArgs tempRoot)
     expectToolOk "task_validate" validated |> ignore
 
     // Expected-revision CAS: a successful apply increments; a stale apply is a
     // bounded CONFLICT that leaves persisted state untouched.
-    let applied =
+    let! applied =
         callTool
             mcp
             "task_apply success"
@@ -445,7 +439,7 @@ try
     let appliedStructured = expectToolOk "task_apply success" applied
     assertEqual "apply increments revision" 1 (appliedStructured.["task"].["stateRevision"].GetValue<int>())
 
-    let conflicted =
+    let! conflicted =
         callTool
             mcp
             "task_apply conflict"
@@ -464,25 +458,25 @@ try
     let conflictError = expectToolError "task_apply conflict" "CONFLICT" conflicted
     assertContains "conflict message" "state revision conflict" (nodeString conflictError.["message"])
 
-    let afterConflict = callTool mcp "task_get after conflict" 9 "task_get" (getArgs tempRoot)
+    let! afterConflict = callTool mcp "task_get after conflict" 9 "task_get" (getArgs tempRoot)
     let afterConflictTask = (expectToolOk "task_get after conflict" afterConflict).["task"]
     assertEqual "CAS conflict preserves revision" 1 (afterConflictTask.["stateRevision"].GetValue<int>())
     assertEqual "CAS conflict preserves evidence" 1 (afterConflictTask.["evidence"].AsArray().Count)
 
     // Invalid workspace is rejected before any runtime operation.
     let missingRoot = Path.Combine(tempRoot, "does-not-exist")
-    let missing =
+    let! missing =
         callTool mcp "task_get missing root" 10 "task_get" (jobj [ "projectRoot", jstr missingRoot; "taskId", jstr "MCP-1" ])
 
     let missingError = expectToolError "task_get missing root" "INVALID_INPUT" missing
     assertContains "missing root message" "project root does not exist" (nodeString missingError.["message"])
 
-    let fileWorkspace = callTool mcp "task_get file root" 11 "task_get" (jobj [ "projectRoot", jstr fileRoot; "taskId", jstr "MCP-1" ])
+    let! fileWorkspace = callTool mcp "task_get file root" 11 "task_get" (jobj [ "projectRoot", jstr fileRoot; "taskId", jstr "MCP-1" ])
     let fileError = expectToolError "task_get file root" "INVALID_INPUT" fileWorkspace
     assertContains "file root message" "project root does not exist" (nodeString fileError.["message"])
 
     // Ordinary task_apply exposes no authority, provenance, or receipt ingress.
-    let argsAuthority =
+    let! argsAuthority =
         callTool
             mcp
             "task_apply args authority"
@@ -498,7 +492,7 @@ try
     let argsAuthorityError = expectToolError "task_apply args authority" "INVALID_INPUT" argsAuthority
     assertContains "args authority rejected" "unknown property 'authority'" (nodeString argsAuthorityError.["message"])
 
-    let commandAuthority =
+    let! commandAuthority =
         callTool
             mcp
             "task_apply command authority"
@@ -509,7 +503,7 @@ try
     let commandAuthorityError = expectToolError "task_apply command authority" "INVALID_INPUT" commandAuthority
     assertContains "command authority rejected" "unknown property 'authority'" (nodeString commandAuthorityError.["message"])
 
-    let commandProvenance =
+    let! commandProvenance =
         callTool
             mcp
             "task_apply command provenance"
@@ -520,7 +514,7 @@ try
     let commandProvenanceError = expectToolError "task_apply command provenance" "INVALID_INPUT" commandProvenance
     assertContains "command provenance rejected" "unknown property 'provenance'" (nodeString commandProvenanceError.["message"])
 
-    let commandReceipt =
+    let! commandReceipt =
         callTool
             mcp
             "task_apply command receipt"
@@ -531,7 +525,7 @@ try
     let commandReceiptError = expectToolError "task_apply command receipt" "INVALID_INPUT" commandReceipt
     assertContains "command receipt rejected" "unknown property 'receipt'" (nodeString commandReceiptError.["message"])
 
-    let commandConfirmation =
+    let! commandConfirmation =
         callTool
             mcp
             "task_apply command confirmationRef"
@@ -546,34 +540,34 @@ try
         (nodeString commandConfirmationError.["message"])
 
     // Arbitrary effects are not a command family.
-    let shellCommand =
+    let! shellCommand =
         callTool mcp "task_apply arbitrary effect" 17 "task_apply" (applyArgs tempRoot 1 (jobj [ "type", jstr "shell"; "command", jstr "whoami" ]))
 
     let shellError = expectToolError "task_apply arbitrary effect" "INVALID_INPUT" shellCommand
     assertContains "arbitrary effect rejected" "not supported" (nodeString shellError.["message"])
 
     // Bounded argument and protocol failures.
-    let unknownTool = callTool mcp "unknown tool" 18 "task_exec" (jobj [])
+    let! unknownTool = callTool mcp "unknown tool" 18 "task_exec" (jobj [])
     let unknownToolError = expectToolError "unknown tool" "INVALID_INPUT" unknownTool
     assertContains "unknown tool rejected" "tool 'task_exec' is not registered" (nodeString unknownToolError.["message"])
 
-    let missingArg = callTool mcp "task_get missing arg" 19 "task_get" (jobj [ "projectRoot", jstr tempRoot ])
+    let! missingArg = callTool mcp "task_get missing arg" 19 "task_get" (jobj [ "projectRoot", jstr tempRoot ])
     let missingArgError = expectToolError "task_get missing arg" "INVALID_INPUT" missingArg
     assertContains "missing arg rejected" "missing property 'taskId'" (nodeString missingArgError.["message"])
 
-    let unknownArg =
+    let! unknownArg =
         callTool mcp "task_get unknown arg" 20 "task_get" (jobj [ "projectRoot", jstr tempRoot; "taskId", jstr "MCP-1"; "authority", jstr "user" ])
 
     let unknownArgError = expectToolError "task_get unknown arg" "INVALID_INPUT" unknownArg
     assertContains "unknown arg rejected" "unknown property 'authority'" (nodeString unknownArgError.["message"])
 
-    let unknownToolCallParameter = sendRaw mcp "task-call unknown parameter" """{"jsonrpc":"2.0","id":24,"method":"tools/call","params":{"name":"task_get","arguments":{"projectRoot":""},"_unexpected":true}}"""
+    let! unknownToolCallParameter = sendRaw mcp "task-call unknown parameter" """{"jsonrpc":"2.0","id":24,"method":"tools/call","params":{"name":"task_get","arguments":{"projectRoot":""},"_unexpected":true}}"""
     assertEqual "unknown tools/call parameter code" -32602 (unknownToolCallParameter.["error"].["code"].GetValue<int>())
 
-    let unknownMethod = send mcp "unknown method" 21 "tools/nonexistent" (jobj [])
+    let! unknownMethod = send mcp "unknown method" 21 "tools/nonexistent" (jobj [])
     assertEqual "unknown method code" -32601 (unknownMethod.["error"].["code"].GetValue<int>())
 
-    let badVersion =
+    let! badVersion =
         send
             mcp
             "bad version"
@@ -586,40 +580,33 @@ try
 
     assertEqual "bad version code" -32602 (badVersion.["error"].["code"].GetValue<int>())
 
-    let invalidJson = sendRaw mcp "invalid json" "this is not json"
+    let! invalidJson = sendRaw mcp "invalid json" "this is not json"
     assertEqual "invalid json code" -32700 (invalidJson.["error"].["code"].GetValue<int>())
     assertTrue "invalid json id is null" (isJsonNull invalidJson.["id"])
 
     // The host remains usable after every bounded failure.
-    let finalPing = send mcp "final ping" 23 "ping" (jobj [])
+    let! finalPing = send mcp "final ping" 23 "ping" (jobj [])
     assertEqual "final ping id" 23 (finalPing.["id"].GetValue<int>())
 
     // Clean shutdown and residual stdout cleanliness.
     mcp.StandardInput.Close()
 
-    if not (mcp.WaitForExit(120000)) then
-        mcp.Kill true
-        failwith "mcp shutdown: host did not exit after stdin closed"
+    do! mcp.WaitForExitAsync().WaitAsync(TimeSpan.FromMilliseconds 120000.0) |> Async.AwaitTask
 
-    let trailing = mcp.StandardOutput.ReadToEnd()
+    let! trailing = mcp.StandardOutput.ReadToEndAsync() |> Async.AwaitTask
 
     for line in trailing.Split('\n') do
         if not (String.IsNullOrWhiteSpace line) then
             validateProtocolLine (line.Trim()) |> ignore
 
-    let stderr = mcpStderr.Result
+    let! stderr = mcpStderr |> Async.AwaitTask
     assertTrue "MCP stderr carries no protocol responses" (not (stderr.Contains("\"jsonrpc\"", StringComparison.Ordinal)))
 
     printfn
         "OK platform-internal task runtime MCP boundary: stdio handshake, tools/list, structured results, library/CLI parity, TaskApply CLI unknown-flag/authority fail-closed exit, workspace rejection, CAS preservation, authority/receipt/effect rejection, bounded failures, and stdout cleanliness"
-finally
-    if not (isNull mcp) then
-        try
-            if not mcp.HasExited then mcp.Kill true
-        with _ ->
-            ()
-
-        mcp.Dispose()
-
+    mcp.Dispose()
     if Directory.Exists tempRoot && tempRoot.Contains("taskruntime-mcp-tests-", StringComparison.Ordinal) then
         Directory.Delete(tempRoot, true)
+}
+// Standalone entry bridge: FSI requires one synchronous top-level boundary.
+|> Async.RunSynchronously

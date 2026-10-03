@@ -226,57 +226,61 @@ let private parsingTests =
             Expect.equal unlocated.Code (Some "CS1002") "unlocated code"
             Expect.equal unlocated.File None "unlocated file"
 
-        testCase "TRX results produce counts and cases"
-        <| fun _ ->
-            use workspace = new TempWorkspace()
+        testCaseTask "TRX results produce counts and cases" (fun () ->
+            task {
+                use workspace = new TempWorkspace()
 
-            let trxPath =
-                workspace.Write(
-                    "results.trx",
-                    trxDocument
-                        [ ("Alpha", "Passed", None)
-                          ("Beta", "Failed", Some "expected 1 but got 2")
-                          ("Gamma", "NotExecuted", None) ]
-                )
+                let trxPath =
+                    workspace.Write(
+                        "results.trx",
+                        trxDocument
+                            [ ("Alpha", "Passed", None)
+                              ("Beta", "Failed", Some "expected 1 but got 2")
+                              ("Gamma", "NotExecuted", None) ]
+                    )
 
-            let evidence = Parsers.tests trxPath "" ""
+                let! evidence = Parsers.tests trxPath "" ""
+                Expect.isTrue evidence.TrxAvailable "trx available"
+                Expect.equal evidence.Cases.Length 3 "case count"
+                Expect.equal
+                    evidence.Counts
+                    (Some
+                        { Total = 3
+                          Passed = 1
+                          Failed = 1
+                          Skipped = 1 })
+                    "counts"
+                Expect.equal
+                    (evidence.Cases |> List.filter (fun item -> item.Outcome = TestOutcome.Failed)).Length
+                    1
+                    "failed case"
+            })
 
-            Expect.isTrue evidence.TrxAvailable "trx available"
-            Expect.equal evidence.Cases.Length 3 "case count"
+        testCaseTask "missing TRX falls back to console counts with an explicit reason" (fun () ->
+            task {
+                let! evidence =
+                    Parsers.tests
+                        "does-not-exist.trx"
+                        "Failed!  - Failed:     1, Passed:     2, Skipped:     0, Total: 3"
+                        ""
+                Expect.equal evidence.TrxAvailable false "trx unavailable"
+                Expect.isSome evidence.TrxUnavailableReason "reason present"
+                Expect.equal
+                    evidence.Counts
+                    (Some
+                        { Total = 3
+                          Passed = 2
+                          Failed = 1
+                          Skipped = 0 })
+                    "console counts"
+            })
 
-            Expect.equal
-                evidence.Counts
-                (Some
-                    { Total = 3
-                      Passed = 1
-                      Failed = 1
-                      Skipped = 1 })
-                "counts"
-
-            Expect.equal (evidence.Cases |> List.filter (fun item -> item.Outcome = TestOutcome.Failed)).Length 1 "failed case"
-
-        testCase "missing TRX falls back to console counts with an explicit reason"
-        <| fun _ ->
-            let evidence =
-                Parsers.tests "does-not-exist.trx" "Failed!  - Failed:     1, Passed:     2, Skipped:     0, Total: 3" ""
-
-            Expect.equal evidence.TrxAvailable false "trx unavailable"
-            Expect.isSome evidence.TrxUnavailableReason "reason present"
-
-            Expect.equal
-                evidence.Counts
-                (Some
-                    { Total = 3
-                      Passed = 2
-                      Failed = 1
-                      Skipped = 0 })
-                "console counts"
-
-        testCase "missing TRX without console summary keeps counts absent"
-        <| fun _ ->
-            let evidence = Parsers.tests "does-not-exist.trx" "" ""
-            Expect.equal evidence.TrxAvailable false "trx unavailable"
-            Expect.equal evidence.Counts None "no counts"
+        testCaseTask "missing TRX without console summary keeps counts absent" (fun () ->
+            task {
+                let! evidence = Parsers.tests "does-not-exist.trx" "" ""
+                Expect.equal evidence.TrxAvailable false "trx unavailable"
+                Expect.equal evidence.Counts None "no counts"
+            })
     ]
 
 let private textTests =

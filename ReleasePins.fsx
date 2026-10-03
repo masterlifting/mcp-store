@@ -44,7 +44,12 @@ let validateManifestIdentity
                     match mismatch with
                     | Some error -> return Error error
                     | None -> return Ok()
-            with error ->
+            with
+            | :? System.Text.Json.JsonException as error ->
+                return Error(MalformedArtifact(manifestPath, $"the manifest is not valid JSON: {error.Message}"))
+            | :? FormatException as error ->
+                return Error(MalformedArtifact(manifestPath, $"the manifest is not valid JSON: {error.Message}"))
+            | :? InvalidOperationException as error ->
                 return Error(MalformedArtifact(manifestPath, $"the manifest is not valid JSON: {error.Message}"))
     }
 

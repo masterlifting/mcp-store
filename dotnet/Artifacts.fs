@@ -40,7 +40,6 @@ type ArtifactRegistry(artifactRoot: string, workspaceNamespace: string, retentio
         with
         | :? FileNotFoundException
         | :? DirectoryNotFoundException -> false
-        | _ -> true
 
     let fileLength path =
         if File.Exists path then FileInfo(path).Length else 0L
@@ -72,7 +71,9 @@ type ArtifactRegistry(artifactRoot: string, workspaceNamespace: string, retentio
                 match failure with
                 | Some error -> Error error
                 | None -> Ok total
-            with error ->
+            with
+            | :? IOException as error -> Error(ArtifactFailure $"artifact size could not be measured: {error.Message}")
+            | :? UnauthorizedAccessException as error ->
                 Error(ArtifactFailure $"artifact size could not be measured: {error.Message}")
 
     let quotaFailure (handle: RunHandle) : Result<unit, VerificationError> =
@@ -103,7 +104,9 @@ type ArtifactRegistry(artifactRoot: string, workspaceNamespace: string, retentio
                         Error(ArtifactQuotaExceeded "aggregate artifact quota exceeded")
                     else
                         Ok()
-        with error ->
+        with
+        | :? IOException as error -> Error(ArtifactFailure $"artifact quota could not be measured: {error.Message}")
+        | :? UnauthorizedAccessException as error ->
             Error(ArtifactFailure $"artifact quota could not be measured: {error.Message}")
 
     let randomToken byteCount =
@@ -121,7 +124,11 @@ type ArtifactRegistry(artifactRoot: string, workspaceNamespace: string, retentio
           ParsedEvidence = Path.Combine(directory, "parsed-evidence.json") }
 
     let removeRunDirectory (directory: string) =
-        try Directory.Delete(directory, true) with _ -> ()
+        try
+            Directory.Delete(directory, true)
+        with
+        | :? IOException -> ()
+        | :? UnauthorizedAccessException -> ()
 
         // The namespace may be shared with sibling run state, so it is removed only
         // when empty and never recursively. The consumer-owned root is never removed.
@@ -131,8 +138,9 @@ type ArtifactRegistry(artifactRoot: string, workspaceNamespace: string, retentio
                 && (Directory.EnumerateFileSystemEntries workspaceDirectory |> Seq.isEmpty)
             then
                 Directory.Delete(workspaceDirectory, false)
-        with _ ->
-            ()
+        with
+        | :? IOException -> ()
+        | :? UnauthorizedAccessException -> ()
 
     let removeExpired now =
         for pair in entries do
@@ -198,12 +206,16 @@ type ArtifactRegistry(artifactRoot: string, workspaceNamespace: string, retentio
                                     removeRunDirectory directory
                             else
                                 removeRunDirectory directory
-                    with _ -> ()
+                    with
+                    | :? IOException -> ()
+                    | :? UnauthorizedAccessException -> ()
 
                 match created with
                 | Some handle -> Ok handle
                 | None -> Error(ArtifactFailure "could not allocate an isolated verification artifact directory")
-        with error -> Error(ArtifactFailure $"artifact quota could not be measured: {error.Message}")
+        with
+        | :? IOException as error -> Error(ArtifactFailure $"artifact allocation failed: {error.Message}")
+        | :? UnauthorizedAccessException as error -> Error(ArtifactFailure $"artifact allocation failed: {error.Message}")
 
     member _.Start(operation) : Result<RunHandle, VerificationError> =
         lock gate (fun () ->
@@ -285,9 +297,12 @@ module ArtifactFiles =
     let readAsync path : Async<Result<string, VerificationError>> =
         async {
             try
-                let! text = File.ReadAllTextAsync path |> Async.AwaitTask
+                let! text = TaskAwait.operational (File.ReadAllTextAsync path)
                 return Ok text
-            with error ->
+            with
+            | :? OperationCanceledException as error -> return raise error
+            | :? IOException as error -> return Error(MissingArtifact $"artifact could not be read: {error.Message}")
+            | :? UnauthorizedAccessException as error ->
                 return Error(MissingArtifact $"artifact could not be read: {error.Message}")
         }
 
@@ -319,8 +334,9 @@ module ArtifactFiles =
                            maxAggregateBytes = Budgets.DefaultArtifactQuotas.MaxAggregateBytes |} |}
 
                 do!
-                    File.WriteAllTextAsync(handle.Paths.Metadata, JsonSerializer.Serialize(metadata, jsonOptions), Encoding.UTF8)
-                    |> Async.AwaitTask
+                    TaskAwait.complete (
+                        File.WriteAllTextAsync(handle.Paths.Metadata, JsonSerializer.Serialize(metadata, jsonOptions), Encoding.UTF8)
+                    )
 
                 let diagnostics =
                     evidence.Diagnostics
@@ -348,10 +364,15 @@ module ArtifactFiles =
                 let parsed = {| diagnostics = diagnostics; tests = tests |}
 
                 do!
-                    File.WriteAllTextAsync(handle.Paths.ParsedEvidence, JsonSerializer.Serialize(parsed, jsonOptions), Encoding.UTF8)
-                    |> Async.AwaitTask
+                    TaskAwait.complete (
+                        File.WriteAllTextAsync(handle.Paths.ParsedEvidence, JsonSerializer.Serialize(parsed, jsonOptions), Encoding.UTF8)
+                    )
 
                 return Ok()
-            with error ->
+            with
+            | :? OperationCanceledException as error -> return raise error
+            | :? IOException as error ->
+                return Error(ArtifactFailure $"verification evidence could not be persisted: {error.Message}")
+            | :? UnauthorizedAccessException as error ->
                 return Error(ArtifactFailure $"verification evidence could not be persisted: {error.Message}")
         }

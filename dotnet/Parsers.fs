@@ -142,10 +142,15 @@ module Parsers =
                     if FileInfo(path).Length > Budgets.DefaultArtifactQuotas.MaxTrxBytes then
                         return Error "TRX result exceeded the retained artifact quota"
                     else
-                        let! text = File.ReadAllTextAsync path |> Async.AwaitTask
+                        let! text = TaskAwait.operational (File.ReadAllTextAsync path)
                         return Ok(XDocument.Parse text)
-                with error ->
+                with
+                | :? OperationCanceledException as error -> return raise error
+                | :? IOException as error -> return Error $"TRX result could not be read: {error.Message}"
+                | :? UnauthorizedAccessException as error ->
                     return Error $"TRX result could not be read: {error.Message}"
+                | :? System.Xml.XmlException as error ->
+                    return Error $"TRX result could not be parsed: {error.Message}"
         }
 
     let private consoleCounts stdout stderr =

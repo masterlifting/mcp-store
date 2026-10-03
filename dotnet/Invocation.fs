@@ -53,8 +53,10 @@ module AuthorizedInvocation =
         while valid && not (isNull directory) do
             try
                 valid <- not (File.GetAttributes(directory.FullName).HasFlag FileAttributes.ReparsePoint)
-            with _ ->
-                valid <- false
+            with
+            | :? FileNotFoundException
+            | :? DirectoryNotFoundException -> ()
+            | :? UnauthorizedAccessException -> valid <- false
 
             directory <- directory.Parent
 
@@ -87,8 +89,11 @@ module AuthorizedInvocation =
                     Error(ProcessStartFailure "the injected .NET host must be an executable file")
                 else
                     Ok fullPath
-        with _ ->
-            Error(ProcessStartFailure "the injected .NET host is invalid")
+        with
+        | :? IOException
+        | :? UnauthorizedAccessException
+        | :? ArgumentException
+        | :? NotSupportedException -> Error(ProcessStartFailure "the injected .NET host is invalid")
 
     let internal validateInjectedHost workspaceRoot candidate = validateExecutable workspaceRoot candidate
 

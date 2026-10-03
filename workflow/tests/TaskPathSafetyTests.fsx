@@ -39,23 +39,30 @@ let request id =
       AcceptanceCriteria = [ "AC1", "Create" ]
       WorkItems = [ { Id = "W1"; Title = "Create"; DependsOn = []; Children = [] } ] }
 
-// Process-boundary helper: synchronous Process is the documented boundary for
-// this fsx; only the .Wait/.Result on the local Process instance is the bridge.
-let createDirectoryLink (link: string) (target: string) =
-    if OperatingSystem.IsWindows() then
-        let startInfo = ProcessStartInfo("cmd.exe", $"/c mklink /J \"{link}\" \"{target}\"")
-        startInfo.RedirectStandardOutput <- true
-        startInfo.RedirectStandardError <- true
-        startInfo.UseShellExecute <- false
-        use process = Process.Start startInfo
-        if process.WaitForExit(60000) then
-            if process.ExitCode <> 0 then
-                let stderr = process.StandardError.ReadToEnd()
-                failwithf "could not create junction '%s': %s" link stderr
+let createDirectoryLink (link: string) (target: string) : Async<unit> =
+    async {
+        if OperatingSystem.IsWindows() then
+            let startInfo = ProcessStartInfo("cmd.exe", $"/c mklink /J \"{link}\" \"{target}\"")
+            startInfo.RedirectStandardOutput <- true
+            startInfo.RedirectStandardError <- true
+            startInfo.UseShellExecute <- false
+            use child = Process.Start startInfo
+            let stdoutTask = child.StandardOutput.ReadToEndAsync()
+            let stderrTask = child.StandardError.ReadToEndAsync()
+            let mutable timedOut = false
+            try
+                do! child.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds 60.0) |> Async.AwaitTask
+            with :? TimeoutException ->
+                timedOut <- true
+                if not child.HasExited then child.Kill true
+                do! child.WaitForExitAsync() |> Async.AwaitTask
+            let! stdout = stdoutTask |> Async.AwaitTask
+            let! stderr = stderrTask |> Async.AwaitTask
+            if timedOut then failwithf "junction creation timed out: %s %s %s" link stdout stderr
+            if child.ExitCode <> 0 then failwithf "could not create junction '%s': %s %s" link stdout stderr
         else
-            failwithf "junction creation timed out: %s" link
-    else
-        Directory.CreateSymbolicLink(link, target) |> ignore
+            Directory.CreateSymbolicLink(link, target) |> ignore
+    }
 
 let removeLink (path: string) =
     if Directory.Exists path then Directory.Delete(path, false)
@@ -66,21 +73,19 @@ Directory.CreateDirectory tempRoot |> ignore
 
 let sidecar root id = Path.Combine(root, ".tasks", id, SidecarFileName)
 
-// Standalone entry bridge: the only synchronous wait in this script's flow;
-// the entire suite composes asynchronously above.
 async {
     try
         let realRoot = Path.Combine(tempRoot, "real-root")
         Directory.CreateDirectory realRoot |> ignore
         let rootLink = Path.Combine(tempRoot, "root-link")
-        createDirectoryLink rootLink realRoot
+        do! createDirectoryLink rootLink realRoot
         do! expectRejected "project root reparse point rejected" "project root must not be a reparse point" (getTask rootLink "PAT-1")
 
         let traversalRoot = Path.Combine(tempRoot, "traversal-root")
         Directory.CreateDirectory traversalRoot |> ignore
         let traversalTarget = Path.Combine(tempRoot, "traversal-target")
         Directory.CreateDirectory traversalTarget |> ignore
-        createDirectoryLink (Path.Combine(traversalRoot, ".tasks")) traversalTarget
+        do! createDirectoryLink (Path.Combine(traversalRoot, ".tasks")) traversalTarget
         do! expectRejected "traversed reparse point rejected" "path must not traverse a reparse point" (getTask traversalRoot "PAT-2")
 
         let leafRoot = Path.Combine(tempRoot, "leaf-root")
@@ -88,7 +93,7 @@ async {
         Directory.CreateDirectory leafDirectory |> ignore
         let leafTarget = Path.Combine(tempRoot, "leaf-target")
         Directory.CreateDirectory leafTarget |> ignore
-        createDirectoryLink (sidecar leafRoot "PAT-3") leafTarget
+        do! createDirectoryLink (sidecar leafRoot "PAT-3") leafTarget
         do! expectRejected "sidecar reparse leaf rejected" "file must not be a reparse point" (getTask leafRoot "PAT-3")
 
         let layoutRoot = Path.Combine(tempRoot, "layout-root")
@@ -120,7 +125,7 @@ async {
         Directory.CreateDirectory existingTarget |> ignore
         let! _ = expectOk "create existing task" (createTask existingRoot (request "PAT-7"))
         Directory.Delete(existingTaskDirectory, true)
-        createDirectoryLink existingTaskDirectory existingTarget
+        do! createDirectoryLink existingTaskDirectory existingTarget
         do! expectRejected "existing task junction rejected by get" "file must not be a reparse point" (getTask existingRoot "PAT-7")
         do! expectRejected "existing task junction rejected by apply" "file must not be a reparse point" (applyTask existingRoot "PAT-7" 0 (StartWorkItem "W1"))
 
@@ -135,4 +140,5 @@ async {
         if Directory.Exists tempRoot && tempRoot.Contains("workflow-pathsafety-v1-", StringComparison.Ordinal) then
             Directory.Delete(tempRoot, true)
 }
+// Standalone entry bridge: FSI requires one synchronous top-level boundary.
 |> Async.RunSynchronously

@@ -1,10 +1,7 @@
-// Deterministic contract coverage for the component-local workflow v1 producer.
-// The test regenerates the current v1 release output and verifies the
-// manifest/pin contract end-to-end.
-
 #load "../ReleaseConfig.fsx"
 #load "../../DistributionTestHelper.fsx"
 
+open System
 open System.Diagnostics
 open System.IO
 
@@ -19,36 +16,25 @@ let manifestPath = Path.Combine(distributionDirectory, "distribution.json")
 let pinsPath = Path.Combine(dist, "consumer-pins.json")
 let stalePublishPath = Path.Combine(distributionDirectory, "publish", "stale-output.txt")
 
-let runScript path =
-    let info = ProcessStartInfo("dotnet")
-    info.WorkingDirectory <- repoRoot
-    info.UseShellExecute <- false
-    info.RedirectStandardOutput <- true
-    info.RedirectStandardError <- true
-    info.ArgumentList.Add "fsi"
-    info.ArgumentList.Add path
+let runScript path : Async<string> =
+    async {
+        let info = ProcessStartInfo("dotnet")
+        info.WorkingDirectory <- repoRoot
+        info.UseShellExecute <- false
+        info.RedirectStandardOutput <- true
+        info.RedirectStandardError <- true
+        info.ArgumentList.Add "fsi"
+        info.ArgumentList.Add path
 
-    use childProcess = Process.Start info
-    let output = childProcess.StandardOutput.ReadToEndAsync()
-    let error = childProcess.StandardError.ReadToEndAsync()
-    childProcess.WaitForExit()
-
-    if childProcess.ExitCode <> 0 then
-        failwithf "%s failed: %s" path (error.Result.Trim())
-
-    output.Result
-
-try
-    Directory.CreateDirectory(Path.GetDirectoryName stalePublishPath) |> ignore
-    File.WriteAllText(stalePublishPath, "stale staging output")
-    runScript (Path.Combine(workflow, "BuildDistributions.fsx")) |> ignore
-
-    DistributionTestHelper.assertTrue "regeneration removes workflow staging output" (not (File.Exists stalePublishPath))
-
-    runScript (Path.Combine(workflow, "PrepareReleasePins.fsx")) |> ignore
-finally
-    if File.Exists stalePublishPath then
-        File.Delete stalePublishPath
+        use childProcess = Process.Start info
+        let outputTask = childProcess.StandardOutput.ReadToEndAsync()
+        let errorTask = childProcess.StandardError.ReadToEndAsync()
+        do! childProcess.WaitForExitAsync() |> Async.AwaitTask
+        let! output = outputTask |> Async.AwaitTask
+        let! error = errorTask |> Async.AwaitTask
+        if childProcess.ExitCode <> 0 then return failwithf "%s failed: %s" path (error.Trim())
+        return output
+    }
 
 let producer: DistributionTestHelper.Producer =
     { ComponentId = ReleaseConfig.componentId
@@ -66,8 +52,26 @@ let layout: DistributionTestHelper.Layout =
       ManifestPath = manifestPath
       PinsPath = pinsPath }
 
-// Standalone entry bridge: the only synchronous wait in this script's flow;
-// the contract check itself composes asynchronously.
-DistributionTestHelper.assertDistributionContract producer layout |> Async.RunSynchronously
+// Concurrent pipe drains prevent a child script from blocking on redirected output.
+async {
+    let! generation =
+        async {
+        Directory.CreateDirectory(Path.GetDirectoryName stalePublishPath) |> ignore
+        File.WriteAllText(stalePublishPath, "stale staging output")
+        let! _ = runScript (Path.Combine(workflow, "BuildDistributions.fsx"))
+        DistributionTestHelper.assertTrue "regeneration removes workflow staging output" (not (File.Exists stalePublishPath))
+        let! _ = runScript (Path.Combine(workflow, "PrepareReleasePins.fsx"))
+        return ()
+        }
+        |> Async.Catch
 
-printfn "workflow distribution contract passed: %s" archiveName
+    if File.Exists stalePublishPath then File.Delete stalePublishPath
+
+    match generation with
+    | Choice1Of2 () -> ()
+    | Choice2Of2 error -> return raise error
+
+    do! DistributionTestHelper.assertDistributionContract producer layout
+}
+// FSI needs one synchronous top-level entry for the asynchronous script.
+|> Async.RunSynchronously

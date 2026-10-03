@@ -16,6 +16,9 @@
     <Compile Include="McpHostTests.fs" />
     <Compile Include="QuotaTests.fs" />
     <Compile Include="DotnetSchemaParityTests.fs" />
+    <Compile Include="SyncOverAsyncChecker.fs" />
+    <Compile Include="SyncOverAsyncCheckerTests.fs" />
+    <Compile Include="AsyncTypedFailureTests.fs" />
     <Compile Include="Main.fs" />
   </ItemGroup>
   <ItemGroup>

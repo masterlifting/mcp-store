@@ -319,33 +319,29 @@ let private trustedHostTests =
             |> expectErrorMatching "non-canonical host" isProcessStartFailure
             |> ignore
 
-        testCase "a reparse-point host path is rejected"
-        <| fun _ ->
-            use workspace = new TempWorkspace()
-            workspace.CreateClassLibrary("lib", validClassSource) |> ignore
-            let host = dotnetHost ()
-            let outsideRoot = Path.Combine(Path.GetTempPath(), "mcp-dotnet-host", Guid.NewGuid().ToString("N"))
-            Directory.CreateDirectory outsideRoot |> ignore
-            let link = Path.Combine(outsideRoot, "host-link")
-
-            try
-                createDirectoryLink link (Path.GetDirectoryName host) |> ignore
-                let linkedHost = Path.Combine(link, Path.GetFileName host)
-
-                Invocation.build workspace.Root linkedHost Budgets.Defaults defaultBuildOptions (pathsFor workspace)
-                |> expectErrorMatching "reparse host" isProcessStartFailure
-                |> ignore
-            finally
-                if Directory.Exists link then
-                    try
-                        Directory.Delete(link, false)
-                    with _ ->
-                        ()
+        testCaseTask "a reparse-point host path is rejected" (fun () ->
+            task {
+                use workspace = new TempWorkspace()
+                workspace.CreateClassLibrary("lib", validClassSource) |> ignore
+                let host = dotnetHost ()
+                let outsideRoot = Path.Combine(Path.GetTempPath(), "mcp-dotnet-host", Guid.NewGuid().ToString("N"))
+                Directory.CreateDirectory outsideRoot |> ignore
+                let link = Path.Combine(outsideRoot, "host-link")
 
                 try
-                    Directory.Delete(outsideRoot, true)
-                with _ ->
-                    ()
+                    let! _ = createDirectoryLink link (Path.GetDirectoryName host)
+                    let linkedHost = Path.Combine(link, Path.GetFileName host)
+
+                    Invocation.build workspace.Root linkedHost Budgets.Defaults defaultBuildOptions (pathsFor workspace)
+                    |> expectErrorMatching "reparse host" isProcessStartFailure
+                    |> ignore
+                finally
+                    if Directory.Exists link then
+                        try Directory.Delete(link, false) with _ -> ()
+                    try
+                        Directory.Delete(outsideRoot, true)
+                    with _ -> ()
+            })
     ]
 
 let tests = testList "invocation" [ argumentTests; authorizationTests; trustedHostTests ]

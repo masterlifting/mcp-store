@@ -64,7 +64,8 @@ let tests =
                     Expect.equal compact.ErrorCount 0 "no errors"
                     Expect.isTrue compact.DetailsAvailable "details available"
 
-                    let details = service.Details(outputRequest compact.RunId) |> expectOk "output details"
+                    let! details = service.Details(outputRequest compact.RunId)
+                    let details = details |> expectOk "output details"
                     Expect.isTrue (details.Total > 0) "output retained outside the compact result"
                     Expect.isTrue (details.Items |> List.exists (fun item -> item.StartsWith "stdout:")) "stdout retained"
                 })
@@ -205,21 +206,23 @@ let tests =
                     Expect.isTrue (compact.Errors.Length <= Budgets.Defaults.InitialErrors) "bounded error subset"
                     Expect.isTrue (compact.Errors |> List.forall (fun item -> item.Length <= Budgets.Defaults.MessageMaxLength)) "bounded error text"
 
-                    let details =
+                    let! detailsResult =
                         service.Details
                             { RunId = compact.RunId
                               Kind = DetailKind.Errors
                               Offset = 0
                               Limit = None }
-                        |> expectOk "error details"
+                    let details = detailsResult |> expectOk "error details"
 
                     Expect.isTrue (details.Total >= compact.ErrorCount) "full diagnostics retained"
 
-                    service.Details
-                        { RunId = compact.RunId
-                          Kind = DetailKind.FailedTests
-                          Offset = 0
-                          Limit = None }
+                    let! unavailable =
+                        service.Details
+                            { RunId = compact.RunId
+                              Kind = DetailKind.FailedTests
+                              Offset = 0
+                              Limit = None }
+                    unavailable
                     |> expectErrorMatching "failed-tests on build" isUnavailableTestDetail
                     |> ignore
                 })
@@ -399,11 +402,13 @@ let tests =
                     Expect.isFalse compact.TrxAvailable "no TRX was produced"
                     Expect.isSome compact.TrxUnavailableReason "unavailable reason is surfaced"
 
-                    service.Details
-                        { RunId = compact.RunId
-                          Kind = DetailKind.FailedTests
-                          Offset = 0
-                          Limit = None }
+                    let! unavailable =
+                        service.Details
+                            { RunId = compact.RunId
+                              Kind = DetailKind.FailedTests
+                              Offset = 0
+                              Limit = None }
+                    unavailable
                     |> expectErrorMatching "failed-test detail unavailable" isUnavailableTestDetail
                     |> ignore
                 })
