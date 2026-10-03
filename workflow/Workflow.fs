@@ -9,6 +9,7 @@ open System.Text.Json
 open System.Text.Json.Nodes
 open System.Text.RegularExpressions
 open System.Threading
+open System.Threading.Tasks
 open Common.CE
 open Microsoft.Win32.SafeHandles
 
@@ -1982,18 +1983,51 @@ module private ProfileSource =
                   SemanticGuidance = guidance }
         }
 
+// Focused acquisition boundary for one project profile: async read, then pure
+// JSON parse/validation. Expected absence/parse rejection stays typed.
+let private readProjectProfile (path: string) : Async<Result<string * ProfileOverlay, RuntimeError>> =
+    async {
+        let! textResult =
+            async {
+                try
+                    let! text = File.ReadAllTextAsync path |> Async.AwaitTask
+                    return Ok text
+                with error ->
+                    return Error(PersistenceFailure $"could not read project profile '{path}': {error.Message}")
+            }
+
+        match textResult with
+        | Error error -> return Error error
+        | Ok text ->
+            try
+                use document = JsonDocument.Parse text
+
+                match ProfileSource.parseOverlay document.RootElement with
+                | Error error -> return Error error
+                | Ok overlay ->
+                    if overlay.SchemaVersion <> 1 then
+                        return Error(InvalidInput $"project profile '{path}' schemaVersion must be 1")
+                    else
+                        return Ok(path, overlay)
+            with
+            | :? JsonException as error ->
+                return Error(InvalidInput $"project profile '{path}' is not valid JSON: {error.Message}")
+            | error ->
+                return Error(PersistenceFailure $"could not parse project profile '{path}': {error.Message}")
+    }
+
 // deterministic ordinal file order. A missing directory means only
 // the compiled-in builtins are active. Malformed files, duplicate IDs, invalid
 // new profiles, and weakening same-ID overlays all fail resolution; the platform
 // composition.json is never consulted here.
-let resolveProfiles root =
-    result {
+let resolveProfiles root : Async<Result<Map<string, EffectiveProfile>, RuntimeError>> =
+    async {
         let directory = Path.Combine(Path.GetFullPath root, ".opencode", "task", "profiles")
 
         if not (Directory.Exists directory) then
-            return builtinProfiles
+            return Ok builtinProfiles
         else
-            let! files =
+            let filesResult =
                 try
                     Ok(
                         Directory.EnumerateFiles(directory, "*.json", SearchOption.TopDirectoryOnly)
@@ -2003,60 +2037,40 @@ let resolveProfiles root =
                 with error ->
                     Error(PersistenceFailure $"could not enumerate project profiles: {error.Message}")
 
-            let! parsed =
-                files
-                |> List.map (fun path ->
-                    result {
-                        let! text =
-                            try
-                                Ok(File.ReadAllText path)
-                            with error ->
-                                Error(PersistenceFailure $"could not read project profile '{path}': {error.Message}")
+            match filesResult with
+            | Error error -> return Error error
+            | Ok files ->
+                let! parsedResults = files |> List.map readProjectProfile |> Async.Sequential
 
-                        let! overlay =
-                            try
-                                use document = JsonDocument.Parse text
-                                ProfileSource.parseOverlay document.RootElement
-                            with
-                            | :? JsonException as error ->
-                                Error(InvalidInput $"project profile '{path}' is not valid JSON: {error.Message}")
-                            | error ->
-                                Error(PersistenceFailure $"could not parse project profile '{path}': {error.Message}")
+                match collectResults (List.ofArray parsedResults) with
+                | Error error -> return Error error
+                | Ok parsed ->
+                    let duplicate =
+                        parsed
+                        |> List.map (fun (_, overlay) -> overlay.Id)
+                        |> List.groupBy (fun value -> value)
+                        |> List.tryFind (fun (_, matches) -> matches.Length > 1)
 
-                        if overlay.SchemaVersion <> 1 then
-                            return! Error(InvalidInput $"project profile '{path}' schemaVersion must be 1")
+                    match duplicate with
+                    | Some (id, _) -> return Error(InvalidInput $"duplicate project profile id '{id}'")
+                    | None ->
+                        // Pure deterministic overlay resolution over the acquired snapshots.
+                        return
+                            parsed
+                            |> List.fold
+                                (fun state (_, overlay) ->
+                                    result {
+                                        let! current = state
 
-                        return path, overlay
-                    })
-                |> collectResults
-
-            let duplicate =
-                parsed
-                |> List.map (fun (_, overlay) -> overlay.Id)
-                |> List.groupBy (fun value -> value)
-                |> List.tryFind (fun (_, matches) -> matches.Length > 1)
-
-            match duplicate with
-            | Some (id, _) -> return! Error(InvalidInput $"duplicate project profile id '{id}'")
-            | None ->
-                let! registry =
-                    parsed
-                    |> List.fold
-                        (fun state (_, overlay) ->
-                            result {
-                                let! current = state
-
-                                match Map.tryFind overlay.Id current with
-                                | Some shared ->
-                                    let! merged = mergeProfileDefinition shared.Definition overlay
-                                    return Map.add overlay.Id (makeEffectiveProfile merged Overlay) current
-                                | None ->
-                                    let! definition = definitionFromOverlay overlay
-                                    return Map.add overlay.Id (makeEffectiveProfile definition Project) current
-                            })
-                        (Ok builtinProfiles)
-
-                return registry
+                                        match Map.tryFind overlay.Id current with
+                                        | Some shared ->
+                                            let! merged = mergeProfileDefinition shared.Definition overlay
+                                            return Map.add overlay.Id (makeEffectiveProfile merged Overlay) current
+                                        | None ->
+                                            let! definition = definitionFromOverlay overlay
+                                            return Map.add overlay.Id (makeEffectiveProfile definition Project) current
+                                    })
+                                (Ok builtinProfiles)
     }
 
 let private nextGuardNumber (guards: Guard list) =
@@ -5905,90 +5919,158 @@ let private coordinationName (path: string) =
     let digest = SHA256.HashData(Encoding.UTF8.GetBytes canonical) |> Convert.ToHexString
     if OperatingSystem.IsWindows() then $"Local\\Mcp.Workflow.Runtime.{digest}" else $"Mcp.Workflow.Runtime.{digest}"
 
-let private withLock (path: string) action =
-    try
-        use mutex = new Mutex(false, coordinationName path)
-        let mutable acquired = false
+// Named OS mutexes are thread-affine, so a dedicated background owner thread
+// acquires and releases while the async transaction runs on the thread pool.
+let private withLock
+    (path: string)
+    (action: unit -> Async<Result<'a, RuntimeError>>)
+    : Async<Result<'a, RuntimeError>> =
+    async {
+        let name = coordinationName path
+        use releaseRequested = new ManualResetEvent(false)
+
+        let acquired =
+            TaskCompletionSource<Result<unit, RuntimeError>>(TaskCreationOptions.RunContinuationsAsynchronously)
+
+        let released = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+
+        let owner =
+            Thread(
+                ThreadStart(fun () ->
+                    let mutable mutex: Mutex = null
+                    let mutable held = false
+
+                    try
+                        try
+                            mutex <- new Mutex(false, name)
+
+                            try
+                                mutex.WaitOne() |> ignore
+                                held <- true
+                            with :? AbandonedMutexException ->
+                                // WaitOne reports abandonment after transferring
+                                // ownership to this process; the operation is still
+                                // safe to continue.
+                                held <- true
+
+                            acquired.TrySetResult(Ok()) |> ignore
+                            releaseRequested.WaitOne() |> ignore
+                        with error ->
+                            acquired.TrySetResult(Error(PersistenceFailure $"could not coordinate runtime operation: {error.Message}"))
+                            |> ignore
+                    finally
+                        if held && not (isNull mutex) then
+                            try
+                                mutex.ReleaseMutex()
+                            with _ ->
+                                ()
+
+                        if not (isNull mutex) then
+                            mutex.Dispose()
+
+                        released.TrySetResult(()) |> ignore
+                )
+            )
+
+        owner.IsBackground <- true
+        owner.Name <- "Mcp.Workflow.LockOwner"
+        owner.Start()
+
+        match! Async.AwaitTask acquired.Task with
+        | Error error -> return Error error
+        | Ok() ->
+            let! outcome =
+                async {
+                    try
+                        let! value = action ()
+                        return Choice1Of2 value
+                    with error ->
+                        return Choice2Of2 error
+                }
+
+            releaseRequested.Set() |> ignore
+            do! Async.AwaitTask released.Task
+
+            match outcome with
+            | Choice1Of2 value -> return value
+            | Choice2Of2 error -> return raise error
+    }
+
+let private withWindowsDirectoryBoundaries
+    root
+    taskDirectory
+    createMissing
+    (action: unit -> Async<Result<'a, RuntimeError>>)
+    : Async<Result<'a, RuntimeError>> =
+    async {
+        let fullRoot = Path.GetFullPath root
+        let tasksDirectory = Path.Combine(fullRoot, ".tasks")
 
         try
-            try
-                mutex.WaitOne() |> ignore
-                acquired <- true
-            with :? AbandonedMutexException ->
-                // WaitOne reports abandonment after transferring ownership to
-                // this process; the operation is still safe to continue.
-                acquired <- true
-
-            action ()
-        finally
-            if acquired then mutex.ReleaseMutex()
-    with
-    | :? UnauthorizedAccessException as error ->
-        Error(PersistenceFailure $"could not coordinate runtime operation: {error.Message}")
-    | :? IOException as error ->
-        Error(PersistenceFailure $"could not coordinate runtime operation: {error.Message}")
-
-let private withWindowsDirectoryBoundaries root taskDirectory createMissing action =
-    let fullRoot = Path.GetFullPath root
-    let tasksDirectory = Path.Combine(fullRoot, ".tasks")
-
-    try
-        // This boundary is intentionally Windows-only. Unix has no complete
-        // descriptor-relative implementation here, so it uses the validated
-        // pathname boundary below.
-        match DirectoryBoundary.openExisting fullRoot with
-        | Error error -> Error error
-        | Ok rootHandle ->
-            use rootHandle = rootHandle
-
-            if createMissing then
-                Directory.CreateDirectory tasksDirectory |> ignore
-
-            match DirectoryBoundary.openExisting tasksDirectory with
-            | Error error -> Error error
-            | Ok tasksHandle ->
-                use tasksHandle = tasksHandle
+            // Unix has no complete descriptor-relative implementation, so only
+            // Windows opens handles here; they are held across the awaited action.
+            match DirectoryBoundary.openExisting fullRoot with
+            | Error error -> return Error error
+            | Ok rootHandle ->
+                use rootHandle = rootHandle
 
                 if createMissing then
-                    Directory.CreateDirectory taskDirectory |> ignore
+                    Directory.CreateDirectory tasksDirectory |> ignore
 
-                match DirectoryBoundary.openExisting taskDirectory with
-                | Error error -> Error error
-                | Ok taskHandle ->
-                    use taskHandle = taskHandle
-                    action ()
-    with error ->
-        Error(PersistenceFailure $"could not establish runtime directory boundary: {error.Message}")
+                match DirectoryBoundary.openExisting tasksDirectory with
+                | Error error -> return Error error
+                | Ok tasksHandle ->
+                    use tasksHandle = tasksHandle
+
+                    if createMissing then
+                        Directory.CreateDirectory taskDirectory |> ignore
+
+                    match DirectoryBoundary.openExisting taskDirectory with
+                    | Error error -> return Error error
+                    | Ok taskHandle ->
+                        use taskHandle = taskHandle
+                        return! action ()
+        with error ->
+            return Error(PersistenceFailure $"could not establish runtime directory boundary: {error.Message}")
+    }
 
 // Read-only get path: lenient and registry-free so a task can still be inspected
 // while its profile entry is missing or drifted.
-let private readTaskLenient path =
-    try
-        if not (File.Exists path) then
-            Error(NotFound $"runtime sidecar does not exist: {path}")
-        elif PathSafety.isReparseLeaf path then
-            Error(PersistenceFailure $"runtime sidecar must not be a reparse point: {path}")
-        else
-            match Dto.fromJson (File.ReadAllText path) with
-            | Error error -> Error error
-            | Ok dto -> Domain.fromDto Map.empty false dto
-    with error ->
-        Error(PersistenceFailure $"could not read runtime sidecar: {error.Message}")
+let private readTaskLenient path : Async<Result<TaskModel, RuntimeError>> =
+    async {
+        try
+            if not (File.Exists path) then
+                return Error(NotFound $"runtime sidecar does not exist: {path}")
+            elif PathSafety.isReparseLeaf path then
+                return Error(PersistenceFailure $"runtime sidecar must not be a reparse point: {path}")
+            else
+                let! text = File.ReadAllTextAsync path |> Async.AwaitTask
+
+                match Dto.fromJson text with
+                | Error error -> return Error error
+                | Ok dto -> return Domain.fromDto Map.empty false dto
+        with error ->
+            return Error(PersistenceFailure $"could not read runtime sidecar: {error.Message}")
+    }
 
 // Registry-backed read used by apply/validate: a fingerprint mismatch is
 // tolerated so decide can surface and reconcile drift.
-let private readTaskWith profiles path =
-    try
-        if not (File.Exists path) then
-            Error(NotFound $"runtime sidecar does not exist: {path}")
-        elif PathSafety.isReparseLeaf path then
-            Error(PersistenceFailure $"runtime sidecar must not be a reparse point: {path}")
-        else
-            match Dto.fromJson (File.ReadAllText path) with
-            | Error error -> Error error
-            | Ok dto -> Domain.fromDto profiles false dto
-    with error ->
-        Error(PersistenceFailure $"could not read runtime sidecar: {error.Message}")
+let private readTaskWith profiles path : Async<Result<TaskModel, RuntimeError>> =
+    async {
+        try
+            if not (File.Exists path) then
+                return Error(NotFound $"runtime sidecar does not exist: {path}")
+            elif PathSafety.isReparseLeaf path then
+                return Error(PersistenceFailure $"runtime sidecar must not be a reparse point: {path}")
+            else
+                let! text = File.ReadAllTextAsync path |> Async.AwaitTask
+
+                match Dto.fromJson text with
+                | Error error -> return Error error
+                | Ok dto -> return Domain.fromDto profiles false dto
+        with error ->
+            return Error(PersistenceFailure $"could not read runtime sidecar: {error.Message}")
+    }
 
 let private loadTaskLenient path = readTaskLenient path
 
@@ -6027,11 +6109,16 @@ let private validateTaskDirectory (taskDirectory: string) : Result<unit, Runtime
     with error ->
         Error(PersistenceFailure $"could not inspect task directory: {error.Message}")
 
-let private withExistingSidecar root taskDirectory (path: string) action =
+let private withExistingSidecar
+    root
+    taskDirectory
+    (path: string)
+    (action: unit -> Async<Result<'a, RuntimeError>>)
+    : Async<Result<'a, RuntimeError>> =
     // A missing task directory fails closed before any Windows handle is opened so
     // the not-found contract is identical on every platform.
     if not (Directory.Exists taskDirectory) then
-        Error(NotFound $"runtime sidecar does not exist: {path}")
+        async { return Error(NotFound $"runtime sidecar does not exist: {path}") }
     else
         withLock path (fun () ->
             let withinDirectoryBoundary action =
@@ -6041,157 +6128,207 @@ let private withExistingSidecar root taskDirectory (path: string) action =
                     action ()
 
             withinDirectoryBoundary (fun () ->
-                result {
-                    do! validateTaskDirectory taskDirectory
+                async {
+                    match validateTaskDirectory taskDirectory with
+                    | Error error -> return Error error
+                    | Ok() ->
+                        if not (File.Exists path) then
+                            return Error(NotFound $"runtime sidecar does not exist: {path}")
+                        else
+                            let! result = action ()
 
-                    if not (File.Exists path) then
-                        return! Error(NotFound $"runtime sidecar does not exist: {path}")
-
-                    let! result = action ()
-
-                    if File.Exists path then
-                        return result
-                    else
-                        return! Error(NotFound $"runtime sidecar does not exist: {path}")
+                            if File.Exists path then
+                                return result
+                            else
+                                return Error(NotFound $"runtime sidecar does not exist: {path}")
                 }))
 
-let private atomicWrite (path: string) (content: string) =
-    let directory = Path.GetDirectoryName path
-    let temporary = Path.Combine(directory, $".{Path.GetFileName path}.{Guid.NewGuid():N}.tmp")
+let private atomicWrite (path: string) (content: string) : Async<Result<unit, RuntimeError>> =
+    async {
+        let directory = Path.GetDirectoryName path
+        let temporary = Path.Combine(directory, $".{Path.GetFileName path}.{Guid.NewGuid():N}.tmp")
 
-    try
         if PathSafety.isReparseLeaf path then
-            Error(PersistenceFailure $"runtime sidecar must not be a reparse point: {path}")
+            return Error(PersistenceFailure $"runtime sidecar must not be a reparse point: {path}")
         else
-            use stream =
-                new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, FileOptions.WriteThrough)
+            let cleanupTemporary () =
+                try
+                    if File.Exists temporary then File.Delete temporary
+                with _ ->
+                    ()
 
-            let bytes = Encoding.UTF8.GetBytes content
-            stream.Write(bytes, 0, bytes.Length)
-            stream.Flush true
-            stream.Dispose()
+            try
+                do!
+                    task {
+                        use stream =
+                            new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, FileOptions.WriteThrough)
 
-            if File.Exists path then
-                File.Replace(temporary, path, null, true)
-            else
-                File.Move(temporary, path)
+                        let bytes = Encoding.UTF8.GetBytes content
+                        do! stream.WriteAsync(bytes, 0, bytes.Length)
+                        // Durability needs a synchronous flush-to-disk; FlushAsync
+                        // alone does not provide the Flush(true) guarantee.
+                        stream.Flush true
+                    }
+                    |> Async.AwaitTask
 
-            Ok()
-    with error ->
-        if File.Exists temporary then File.Delete temporary
-        Error(PersistenceFailure $"could not atomically persist runtime sidecar: {error.Message}")
+                if File.Exists path then
+                    File.Replace(temporary, path, null, true)
+                else
+                    File.Move(temporary, path)
+
+                return Ok()
+            with error ->
+                // Cleanup failure must not replace the primary error.
+                cleanupTemporary ()
+                return Error(PersistenceFailure $"could not atomically persist runtime sidecar: {error.Message}")
+    }
 
 let private persist path task = atomicWrite path (serialize task)
 
 // the caller may name an explicit active profile; an omitted profile
 // falls back to general and an unknown id fails before any sidecar is written.
-let createTaskWithProfile root profileId request =
-    result {
-        let! path, taskDirectory = sidecarPath root request.Id
+let createTaskWithProfile root profileId request : Async<Result<TaskModel, RuntimeError>> =
+    async {
+        match sidecarPath root request.Id with
+        | Error error -> return Error error
+        | Ok(path, taskDirectory) ->
+            let! profilesResult = resolveProfiles root
 
-        let! profiles = resolveProfiles root
-        let requestedProfile = profileId |> Option.defaultValue GeneralProfileId
+            match profilesResult with
+            | Error error -> return Error error
+            | Ok profiles ->
+                let requestedProfile = profileId |> Option.defaultValue GeneralProfileId
 
-        let! profile =
-            match Map.tryFind requestedProfile profiles with
-            | Some profile -> Ok profile
-            | None -> Error(InvalidInput $"unknown profile '{requestedProfile}'")
+                match Map.tryFind requestedProfile profiles with
+                | None -> return Error(InvalidInput $"unknown profile '{requestedProfile}'")
+                | Some profile ->
+                    match Domain.create profile request with
+                    | Error error -> return Error error
+                    | Ok task ->
+                        let createWithinBoundary action =
+                            if OperatingSystem.IsWindows() then
+                                withWindowsDirectoryBoundaries root taskDirectory true action
+                            else
+                                async {
+                                    try
+                                        Directory.CreateDirectory taskDirectory |> ignore
+                                        return! action ()
+                                    with error ->
+                                        return Error(PersistenceFailure $"could not create runtime sidecar: {error.Message}")
+                                }
 
-        let! task = Domain.create profile request
+                        let! outcome =
+                            createWithinBoundary (fun () ->
+                                withLock path (fun () ->
+                                    async {
+                                        match validateTaskDirectory taskDirectory with
+                                        | Error error -> return Error error
+                                        | Ok() ->
+                                            if File.Exists path then
+                                                return
+                                                    Error(
+                                                        InvalidInput
+                                                            $"task directory contains runtime state '{SidecarFileName}': {path}"
+                                                    )
+                                            else
+                                                return! persist path task
+                                    }))
+                            |> Async.Catch
+                            |> Async.map (function
+                                | Choice1Of2 result -> result
+                                | Choice2Of2 error ->
+                                    Error(PersistenceFailure $"could not create runtime sidecar: {error.Message}"))
 
-        let outcome =
-            try
-                let createWithinBoundary action =
-                    if OperatingSystem.IsWindows() then
-                        withWindowsDirectoryBoundaries root taskDirectory true action
-                    else
-                        Directory.CreateDirectory taskDirectory |> ignore
-                        action ()
-
-                createWithinBoundary (fun () ->
-                    withLock path (fun () ->
-                        result {
-                            do! validateTaskDirectory taskDirectory
-
-                            if File.Exists path then
-                                return!
-                                    Error(
-                                        InvalidInput
-                                            $"task directory contains runtime state '{SidecarFileName}': {path}"
-                                    )
-
-                            return! persist path task
-                        }))
-            with error ->
-                Error(PersistenceFailure $"could not create runtime sidecar: {error.Message}")
-
-        match outcome with
-        | Ok () -> return task
-        | Error error -> return! Error error
+                        match outcome with
+                        | Ok() -> return Ok task
+                        | Error error -> return Error error
     }
 
 let createTask root request = createTaskWithProfile root None request
 
-let getTask root id =
-    result {
-        let! path, taskDirectory = sidecarPath root id
-        return! withExistingSidecar root taskDirectory path (fun () -> loadTaskLenient path)
+let getTask root id : Async<Result<TaskModel, RuntimeError>> =
+    async {
+        match sidecarPath root id with
+        | Error error -> return Error error
+        | Ok(path, taskDirectory) ->
+            return! withExistingSidecar root taskDirectory path (fun () -> loadTaskLenient path)
     }
 
 // Ordinary CLI/model apply boundary. Invocation is Coordinator-only: there is no
 // authority parameter, receipt factory, or User ingress, so User-required
 // operations fail closed inside decide without a signed-attestation bridge.
-let applyTask root id expectedRevision command =
-    result {
-        let! path, taskDirectory = sidecarPath root id
-        let! profiles = resolveProfiles root
+let applyTask root id expectedRevision command : Async<Result<TaskModel, RuntimeError>> =
+    async {
+        match sidecarPath root id with
+        | Error error -> return Error error
+        | Ok(path, taskDirectory) ->
+            let! profilesResult = resolveProfiles root
 
-        return!
-            withExistingSidecar root taskDirectory path (fun () ->
-                result {
-                    let! task = loadTaskWith profiles path
+            match profilesResult with
+            | Error error -> return Error error
+            | Ok profiles ->
+                return!
+                    withExistingSidecar root taskDirectory path (fun () ->
+                        async {
+                            let! taskResult = loadTaskWith profiles path
 
-                    if task.StateRevision <> expectedRevision then
-                        return! Error(Conflict(expectedRevision, task.StateRevision))
+                            match taskResult with
+                            | Error error -> return Error error
+                            | Ok task ->
+                                if task.StateRevision <> expectedRevision then
+                                    return Error(Conflict(expectedRevision, task.StateRevision))
+                                else
+                                    match decideAt profiles DateTimeOffset.UtcNow task command with
+                                    | Error errors ->
+                                        // carry the structured authority remediation
+                                        // through unchanged instead of flattening it
+                                        // into a text-only InvalidInput. Every other
+                                        // error list keeps its existing flattened
+                                        // envelope.
+                                        match
+                                            errors
+                                            |> List.tryPick (fun error ->
+                                                match error with
+                                                | AuthorityDenied _ -> Some error
+                                                | _ -> None)
+                                        with
+                                        | Some authorityError -> return Error authorityError
+                                        | None ->
+                                            return
+                                                Error(InvalidInput(errors |> List.map errorMessage |> String.concat "; "))
+                                    | Ok events ->
+                                        let next = evolve task events
+                                        let next = { next with StateRevision = task.StateRevision + 1 }
+                                        let! persisted = persist path next
 
-                    let! events =
-                        match decideAt profiles DateTimeOffset.UtcNow task command with
-                        | Ok events -> Ok events
-                        | Error errors ->
-                            // carry the structured authority remediation
-                            // through unchanged instead of flattening it into a
-                            // text-only InvalidInput. Every other error list keeps
-                            // its existing flattened envelope.
-                            match
-                                errors
-                                |> List.tryPick (fun error ->
-                                    match error with
-                                    | AuthorityDenied _ -> Some error
-                                    | _ -> None)
-                            with
-                            | Some authorityError -> Error authorityError
-                            | None -> Error(InvalidInput(errors |> List.map errorMessage |> String.concat "; "))
-
-                    let next = evolve task events
-                    let next = { next with StateRevision = task.StateRevision + 1 }
-                    do! persist path next
-                    return next
-                })
+                                        match persisted with
+                                        | Error error -> return Error error
+                                        | Ok() -> return Ok next
+                        })
     }
 
-let validateTask root id =
-    result {
-        let! path, taskDirectory = sidecarPath root id
-        let! profiles = resolveProfiles root
-        let! task = withExistingSidecar root taskDirectory path (fun () -> loadTaskWith profiles path)
+let validateTask root id : Async<Result<TaskModel, RuntimeError>> =
+    async {
+        match sidecarPath root id with
+        | Error error -> return Error error
+        | Ok(path, taskDirectory) ->
+            let! profilesResult = resolveProfiles root
 
-        // validation is read-only but truthful. getTask stays
-        // lenient; validate fails explicitly when the recorded profile is missing
-        // or drifted, or when the persisted contract no longer matches its
-        // recorded fingerprint.
-        match Domain.validationFindings profiles task with
-        | [] -> return task
-        | findings -> return! Error(InvalidTransition(findings |> String.concat "; "))
+            match profilesResult with
+            | Error error -> return Error error
+            | Ok profiles ->
+                let! taskResult = withExistingSidecar root taskDirectory path (fun () -> loadTaskWith profiles path)
+
+                match taskResult with
+                | Error error -> return Error error
+                | Ok task ->
+                    // validation is read-only but truthful. getTask stays
+                    // lenient; validate fails explicitly when the recorded profile
+                    // is missing or drifted, or when the persisted contract no
+                    // longer matches its recorded fingerprint.
+                    match Domain.validationFindings profiles task with
+                    | [] -> return Ok task
+                    | findings -> return Error(InvalidTransition(findings |> String.concat "; "))
     }
 
 let renderError error = errorMessage error

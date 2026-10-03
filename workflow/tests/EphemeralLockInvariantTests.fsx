@@ -18,10 +18,12 @@ let assertTrue name condition =
 let assertEqual name expected actual =
     if actual <> expected then failwithf "%s: expected %A, got %A" name expected actual
 
-let expectOk name result =
-    match result with
-    | Ok value -> value
-    | Error error -> failwithf "%s: expected Ok, got Error %s" name (renderError error)
+let expectOk name (result: Async<Result<'a, RuntimeError>>) : Async<'a> =
+    async {
+        match! result with
+        | Ok value -> return value
+        | Error error -> return failwithf "%s: expected Ok, got Error %s" name (renderError error)
+    }
 
 let request id =
     { Id = id
@@ -86,43 +88,48 @@ Directory.CreateDirectory tempRoot |> ignore
 let taskId = "EPH-1"
 let sampler = DirectorySampler(taskDirectory tempRoot taskId)
 
-try
-    sampler.Start()
+// Standalone entry bridge: the only synchronous wait in this script's flow;
+// the entire suite composes asynchronously above.
+async {
+    try
+        sampler.Start()
 
-    expectOk "create" (createTask tempRoot (request taskId)) |> ignore
-    assertOnlyRuntimeJson "after task_create" tempRoot taskId
+        let! _ = expectOk "create" (createTask tempRoot (request taskId))
+        assertOnlyRuntimeJson "after task_create" tempRoot taskId
 
-    expectOk "get" (getTask tempRoot taskId) |> ignore
-    assertOnlyRuntimeJson "after task_get" tempRoot taskId
+        let! _ = expectOk "get" (getTask tempRoot taskId)
+        assertOnlyRuntimeJson "after task_get" tempRoot taskId
 
-    let applied = expectOk "apply" (applyTask tempRoot taskId 0 (StartWorkItem "W1"))
-    assertEqual "apply revision" 1 applied.StateRevision
-    assertOnlyRuntimeJson "after task_apply" tempRoot taskId
+        let! applied = expectOk "apply" (applyTask tempRoot taskId 0 (StartWorkItem "W1"))
+        assertEqual "apply revision" 1 applied.StateRevision
+        assertOnlyRuntimeJson "after task_apply" tempRoot taskId
 
-    expectOk "validate" (validateTask tempRoot taskId) |> ignore
-    assertOnlyRuntimeJson "after task_validate" tempRoot taskId
+        let! _ = expectOk "validate" (validateTask tempRoot taskId)
+        assertOnlyRuntimeJson "after task_validate" tempRoot taskId
 
-    let observed = sampler.Stop()
+        let observed = sampler.Stop()
 
-    let observedEntries =
-        observed |> List.collect id |> List.distinct |> List.sort
+        let observedEntries =
+            observed |> List.collect id |> List.distinct |> List.sort
 
-    let observedLockFiles =
-        observedEntries
-        |> List.filter (fun entry ->
-            Path.GetFileName(entry).Equals("runtime.lock", StringComparison.OrdinalIgnoreCase))
+        let observedLockFiles =
+            observedEntries
+            |> List.filter (fun entry ->
+                Path.GetFileName(entry).Equals("runtime.lock", StringComparison.OrdinalIgnoreCase))
 
-    assertTrue
-        (sprintf "sampler never observed runtime.lock (observed: %A)" observedEntries)
-        observedLockFiles.IsEmpty
+        assertTrue
+            (sprintf "sampler never observed runtime.lock (observed: %A)" observedEntries)
+            observedLockFiles.IsEmpty
 
-    assertOnlyRuntimeJson "final" tempRoot taskId
+        assertOnlyRuntimeJson "final" tempRoot taskId
 
-    printfn "OK ephemeral lock invariant: create/get/apply/validate leave only runtime.json"
-    printfn "observed task-directory snapshots (%d samples, %d distinct): %A" observed.Length observedEntries.Length observedEntries
-finally
-    try sampler.Stop() |> ignore with _ -> ()
+        printfn "OK ephemeral lock invariant: create/get/apply/validate leave only runtime.json"
+        printfn "observed task-directory snapshots (%d samples, %d distinct): %A" observed.Length observedEntries.Length observedEntries
+    finally
+        try sampler.Stop() |> ignore with _ -> ()
 
-    if Directory.Exists tempRoot
-       && tempRoot.Contains("workflow-ephemeral-lock-", StringComparison.Ordinal) then
-        Directory.Delete(tempRoot, true)
+        if Directory.Exists tempRoot
+           && tempRoot.Contains("workflow-ephemeral-lock-", StringComparison.Ordinal) then
+            Directory.Delete(tempRoot, true)
+}
+|> Async.RunSynchronously

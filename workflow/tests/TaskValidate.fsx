@@ -11,7 +11,8 @@ if args.Length <> 2 then
     eprintfn "usage: TaskValidate.fsx <project-root> <TASK-ID>"
     exit 2
 
-match execute (ValidateTask { Root = args.[0]; TaskId = args.[1] }) with
+// Standalone entry bridge: the only synchronous wait in this CLI's flow.
+match execute (ValidateTask { Root = args.[0]; TaskId = args.[1] }) |> Async.RunSynchronously with
 | Ok task ->
     printfn "OK %s stateRevision=%d" task.Id task.StateRevision
 | Error error ->

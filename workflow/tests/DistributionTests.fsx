@@ -66,6 +66,8 @@ let layout: DistributionTestHelper.Layout =
       ManifestPath = manifestPath
       PinsPath = pinsPath }
 
-DistributionTestHelper.assertDistributionContract producer layout
+// Standalone entry bridge: the only synchronous wait in this script's flow;
+// the contract check itself composes asynchronously.
+DistributionTestHelper.assertDistributionContract producer layout |> Async.RunSynchronously
 
 printfn "workflow distribution contract passed: %s" archiveName

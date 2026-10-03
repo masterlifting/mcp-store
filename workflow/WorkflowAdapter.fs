@@ -30,7 +30,9 @@ type Operation =
     | ApplyTask of ApplyOperation
     | ValidateTask of ValidateOperation
 
-let execute operation : Result<TaskModel, RuntimeError> =
+// Effectful dispatch is asynchronous end-to-end; the transport host is the only
+// place that bridges this to its native Task-based loop.
+let execute operation : Async<Result<TaskModel, RuntimeError>> =
     match operation with
     | CreateTask request -> createTaskWithProfile request.Root request.ProfileId request.Request
     | GetTask request -> getTask request.Root request.TaskId

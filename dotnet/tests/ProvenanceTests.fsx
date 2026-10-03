@@ -6,43 +6,89 @@
 
 open System
 open System.IO
+open BuildProvenance
 
 let private assertEqual name expected actual =
     if expected <> actual then failwithf "%s: expected %A, got %A" name expected actual
 
-let private assertThrows name (action: unit -> unit) =
-    let mutable threw = false
+let private assertAsyncOk name (action: Async<Result<'a, ReleaseError>>) =
+    async {
+        match! action with
+        | Ok value -> return value
+        | Error error -> return failwithf "%s: expected Ok, got Error %s" name (ReleaseError.message error)
+    }
 
-    try
-        action ()
-    with _ ->
-        threw <- true
-
-    if not threw then
-        failwithf "%s: expected the guard to reject the manifest" name
+let private assertAsyncRejected name (fragment: string) (action: Async<Result<'a, ReleaseError>>) =
+    async {
+        match! action with
+        | Ok value -> return failwithf "%s: expected rejection, got Ok %A" name value
+        | Error error ->
+            let message = ReleaseError.message error
+            if not (message.Contains(fragment, StringComparison.Ordinal)) then
+                return failwithf "%s: expected '%s', got '%s'" name fragment message
+    }
 
 let private revision = String.replicate 40 "a"
 
-let private withManifest (json: string) (action: string -> unit) =
-    let path = Path.Combine(Path.GetTempPath(), "mcp-provenance-" + Guid.NewGuid().ToString("N") + ".json")
-    File.WriteAllText(path, json)
+let private withManifest (json: string) (action: string -> Async<unit>) : Async<unit> =
+    async {
+        let path = Path.Combine(Path.GetTempPath(), "mcp-provenance-" + Guid.NewGuid().ToString("N") + ".json")
+        File.WriteAllText(path, json)
 
-    try
-        action path
-    finally
-        if File.Exists path then
-            File.Delete path
+        try
+            do! action path
+        finally
+            if File.Exists path then
+                File.Delete path
+    }
 
-withManifest (sprintf "{\"revision\":\"%s\"}" revision) (fun path ->
-    assertEqual "matching revision is returned" revision (BuildProvenance.assertManifestRevision path revision))
+// The script composes one async pipeline of every assertion; the entry point
+// applies exactly one Async.RunSynchronously at the bottom.
+let private suite () : Async<unit> =
+    async {
+        do!
+            withManifest
+                (sprintf "{\"revision\":\"%s\"}" revision)
+                (fun path -> async {
+                    let! actual = assertAsyncOk "matching revision" (BuildProvenance.assertManifestRevision path revision)
+                    assertEqual "matching revision is returned" revision actual
+                })
 
-withManifest """{ "revision": "0000000000000000000000000000000000000000" }""" (fun path ->
-    assertThrows "mismatched revision is rejected" (fun () -> BuildProvenance.assertManifestRevision path revision |> ignore))
+        do!
+            withManifest
+                """{ "revision": "0000000000000000000000000000000000000000" }"""
+                (fun path -> async {
+                    do!
+                        assertAsyncRejected
+                            "mismatched revision is rejected"
+                            "manifest revision"
+                            (BuildProvenance.assertManifestRevision path revision)
+                })
 
-withManifest "{}" (fun path ->
-    assertThrows "missing revision is rejected" (fun () -> BuildProvenance.assertManifestRevision path revision |> ignore))
+        do!
+            withManifest
+                "{}"
+                (fun path -> async {
+                    do!
+                        assertAsyncRejected
+                            "missing revision is rejected"
+                            "the 'revision' field is missing"
+                            (BuildProvenance.assertManifestRevision path revision)
+                })
 
-withManifest "not json" (fun path ->
-    assertThrows "malformed manifest is rejected" (fun () -> BuildProvenance.assertManifestRevision path revision |> ignore))
+        do!
+            withManifest
+                "not json"
+                (fun path -> async {
+                    do!
+                        assertAsyncRejected
+                            "malformed manifest is rejected"
+                            "the manifest is not valid JSON"
+                            (BuildProvenance.assertManifestRevision path revision)
+                })
+    }
+
+// Standalone entry bridge: the only synchronous wait in this script's flow.
+suite () |> Async.RunSynchronously
 
 printfn "provenance contract passed"

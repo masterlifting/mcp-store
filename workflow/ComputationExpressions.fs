@@ -1,5 +1,7 @@
 namespace Common
 
+open System
+
 module CE =
     type ResultBuilder() =
         member _.Bind(m, f) = Result.bind f m
@@ -16,6 +18,8 @@ module CE =
 
     let result = ResultBuilder()
 
+    // Sequences Async<Result<_, RuntimeError>> steps with scoped resources; the
+    // effectful boundary composition, not a second runtime implementation.
     type AsyncResultBuilder() =
         member _.Bind(m: Async<Result<'a, 'e>>, f: 'a -> Async<Result<'b, 'e>>) =
             async {
@@ -42,6 +46,31 @@ module CE =
                 match! a with
                 | Ok() -> return! b
                 | Error e -> return Error e
+            }
+
+        member _.Using(resource: #IDisposable, binder: _ -> Async<Result<'a, 'e>>) : Async<Result<'a, 'e>> =
+            async {
+                try
+                    return! binder resource
+                finally
+                    if not (isNull (box resource)) then
+                        resource.Dispose()
+            }
+
+        member _.TryFinally(body: Async<Result<'a, 'e>>, compensation: unit -> unit) : Async<Result<'a, 'e>> =
+            async {
+                try
+                    return! body
+                finally
+                    compensation ()
+            }
+
+        member _.TryWith(body: Async<Result<'a, 'e>>, handler: exn -> Async<Result<'a, 'e>>) : Async<Result<'a, 'e>> =
+            async {
+                try
+                    return! body
+                with error ->
+                    return! handler error
             }
 
     let asyncResult = AsyncResultBuilder()

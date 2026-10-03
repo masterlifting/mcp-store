@@ -11,7 +11,8 @@ if args.Length <> 2 then
     eprintfn "usage: TaskGet.fsx <project-root> <TASK-ID>"
     exit 2
 
-match execute (GetTask { Root = args.[0]; TaskId = args.[1] }) with
+// Standalone entry bridge: the only synchronous wait in this CLI's flow.
+match execute (GetTask { Root = args.[0]; TaskId = args.[1] }) |> Async.RunSynchronously with
 | Ok task -> printfn "%s" (serialize task)
 | Error error ->
     eprintfn "%s" (renderError error)

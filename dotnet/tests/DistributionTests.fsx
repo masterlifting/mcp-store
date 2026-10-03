@@ -73,7 +73,9 @@ let layout: DistributionTestHelper.Layout =
       ManifestPath = manifestPath
       PinsPath = pinsPath }
 
-DistributionTestHelper.assertDistributionContract producer layout
+// Standalone entry bridge: the only synchronous wait in this script's flow;
+// the contract check itself composes asynchronously.
+DistributionTestHelper.assertDistributionContract producer layout |> Async.RunSynchronously
 
 // The packaged entry assembly must stay the no-debug output even though a
 // plain Release build populated the intermediate outputs before packaging.
