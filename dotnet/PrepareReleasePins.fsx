@@ -3,7 +3,7 @@
 
 open System
 open System.IO
-open System.Text.Json.Nodes
+open BuildProvenance
 
 let root = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, ".."))
 let dist = Path.Combine(root, "dotnet", "dist")
@@ -16,23 +16,25 @@ let assetUri = ReleaseConfig.assetUri
 let manifestPath = Path.Combine(dist, componentId, "distribution.json")
 let archivePath = Path.Combine(dist, archiveName)
 
-if not (File.Exists archivePath) || not (File.Exists manifestPath) then
-    failwith "run dotnet/BuildDistribution.fsx before preparing dotnet v1 pins"
+let run () : Async<Result<string * string * string, ReleaseError>> =
+    if not (File.Exists archivePath) || not (File.Exists manifestPath) then
+        async { return Error(MissingArtifact "run dotnet/BuildDistribution.fsx before preparing dotnet v1 pins") }
+    else
+        releaseResult {
+            do!
+                ReleasePins.validateManifestIdentity
+                    manifestPath
+                    [ "id", componentId; "version", version; "archive", archiveName ]
 
-let manifest: JsonObject = JsonNode.Parse(File.ReadAllText manifestPath).AsObject()
+            return!
+                ReleasePins.writeConsumerPins root manifestPath archivePath output componentId archiveName assetUri
+        }
 
-let requiredManifestValue (name: string) =
-    match manifest[name] with
-    | null -> failwithf "manifest is missing '%s'" name
-    | value -> value.GetValue<string>()
-
-if requiredManifestValue "id" <> componentId
-   || requiredManifestValue "version" <> version
-   || requiredManifestValue "archive" <> archiveName then
-    failwith "dotnet v1 manifest identity does not match the release pin"
-
+// Standalone entry bridge: the only synchronous wait in this script's flow.
 let archiveSha256, manifestSha256, revision =
-    ReleasePins.writeConsumerPins root manifestPath archivePath output componentId archiveName assetUri
+    match run () |> Async.RunSynchronously with
+    | Ok value -> value
+    | Error error -> failwith (ReleaseError.message error)
 
 printfn
     "dotnet asset=%s archiveSha256=%s manifestSha256=%s revision=%s"

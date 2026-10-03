@@ -283,13 +283,16 @@ let command =
               Next = args.[6] }
     | _ -> usage ()
 
+// Standalone entry bridge: the only synchronous wait in this CLI's flow.
 match
     execute
         (ApplyTask
             { Root = args.[0]
               TaskId = args.[1]
               ExpectedStateRevision = expectedRevision
-              Command = command }) with
+              Command = command })
+    |> Async.RunSynchronously
+with
 | Ok task -> printfn "%s" (serialize task)
 | Error error ->
     eprintfn "%s" (renderError error)

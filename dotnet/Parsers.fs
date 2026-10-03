@@ -96,49 +96,57 @@ module Parsers =
         | "skipped" -> TestOutcome.Skipped
         | _ -> TestOutcome.Inconclusive
 
-    let private parseTrx path =
-        try
+    // Pure parsing over an already-acquired document.
+    let private parseTrxDocument (document: XDocument) =
+        let cases =
+            document.Descendants()
+            |> Seq.filter (localName "UnitTestResult")
+            |> Seq.map (fun item ->
+                let attribute (name: string) =
+                    item.Attribute(XName.Get name) |> Option.ofObj |> Option.map _.Value
+
+                { Name = attribute "testName" |> Option.defaultValue "unnamed test" |> shorten
+                  Outcome =
+                    attribute "outcome"
+                    |> Option.map parseOutcome
+                    |> Option.defaultValue TestOutcome.Inconclusive
+                  Message =
+                    item.Descendants()
+                    |> Seq.filter (fun child ->
+                        child.Name.LocalName = "Message" || child.Name.LocalName = "StackTrace")
+                    |> Seq.tryHead
+                    |> Option.map _.Value
+                    |> Option.map shorten
+                    |> Option.bind (fun value -> if String.IsNullOrWhiteSpace value then None else Some value) })
+            |> Seq.truncate Budgets.MaxRetainedTestCases
+            |> Seq.toList
+
+        let counts =
+            let total = cases.Length
+
+            { Total = total
+              Passed = cases |> List.filter (fun item -> item.Outcome = TestOutcome.Passed) |> List.length
+              Failed = cases |> List.filter (fun item -> item.Outcome = TestOutcome.Failed) |> List.length
+              Skipped = cases |> List.filter (fun item -> item.Outcome = TestOutcome.Skipped) |> List.length }
+
+        cases, Some counts
+
+    // Acquisition boundary: expected absence/quota rejection are classified here;
+    // the XML parse itself is pure over an owned text snapshot.
+    let private readTrxAsync path : Async<Result<XDocument, string>> =
+        async {
             if not (File.Exists path) then
-                Error "TRX result was not produced by dotnet test"
-            elif FileInfo(path).Length > Budgets.DefaultArtifactQuotas.MaxTrxBytes then
-                Error "TRX result exceeded the retained artifact quota"
+                return Error "TRX result was not produced by dotnet test"
             else
-                let document = XDocument.Load path
-
-                let cases =
-                    document.Descendants()
-                    |> Seq.filter (localName "UnitTestResult")
-                    |> Seq.map (fun item ->
-                        let attribute (name: string) =
-                            item.Attribute(XName.Get name) |> Option.ofObj |> Option.map _.Value
-
-                        { Name = attribute "testName" |> Option.defaultValue "unnamed test" |> shorten
-                          Outcome =
-                            attribute "outcome"
-                            |> Option.map parseOutcome
-                            |> Option.defaultValue TestOutcome.Inconclusive
-                          Message =
-                            item.Descendants()
-                            |> Seq.filter (fun child ->
-                                child.Name.LocalName = "Message" || child.Name.LocalName = "StackTrace")
-                            |> Seq.tryHead
-                            |> Option.map _.Value
-                            |> Option.map shorten
-                            |> Option.bind (fun value -> if String.IsNullOrWhiteSpace value then None else Some value) })
-                    |> Seq.truncate Budgets.MaxRetainedTestCases
-                    |> Seq.toList
-
-                let counts =
-                    let total = cases.Length
-
-                    { Total = total
-                      Passed = cases |> List.filter (fun item -> item.Outcome = TestOutcome.Passed) |> List.length
-                      Failed = cases |> List.filter (fun item -> item.Outcome = TestOutcome.Failed) |> List.length
-                      Skipped = cases |> List.filter (fun item -> item.Outcome = TestOutcome.Skipped) |> List.length }
-
-                Ok(cases, Some counts)
-        with error ->
-            Error $"TRX result could not be read: {error.Message}"
+                try
+                    if FileInfo(path).Length > Budgets.DefaultArtifactQuotas.MaxTrxBytes then
+                        return Error "TRX result exceeded the retained artifact quota"
+                    else
+                        let! text = File.ReadAllTextAsync path |> Async.AwaitTask
+                        return Ok(XDocument.Parse text)
+                with error ->
+                    return Error $"TRX result could not be read: {error.Message}"
+        }
 
     let private consoleCounts stdout stderr =
         let summaryPattern =
@@ -153,26 +161,41 @@ module Parsers =
         if not result.Success then
             None
         else
-            let number (name: string) = Int32.Parse result.Groups.[name].Value
-            let failed = number "failed"
-            let passed = number "passed"
-            let skipped = number "skipped"
+            // Oversized or malformed summary numbers are rejected rather than
+            // overflowing the total; the caller falls back to unavailable counts.
+            let number (name: string) =
+                match Int64.TryParse result.Groups.[name].Value with
+                | true, value -> Some value
+                | false, _ -> None
 
-            Some
-                { Total = failed + passed + skipped
-                  Passed = passed
-                  Failed = failed
-                  Skipped = skipped }
+            match number "failed", number "passed", number "skipped" with
+            | Some failed, Some passed, Some skipped
+                when failed <= int64 Int32.MaxValue
+                     && passed <= int64 Int32.MaxValue
+                     && skipped <= int64 Int32.MaxValue
+                     && failed + passed + skipped <= int64 Int32.MaxValue ->
+                Some
+                    { Total = int (failed + passed + skipped)
+                      Passed = int passed
+                      Failed = int failed
+                      Skipped = int skipped }
+            | _ -> None
 
-    let tests trxPath stdout stderr =
-        match parseTrx trxPath with
-        | Ok(cases, counts) ->
-            { Counts = counts
-              Cases = cases
-              TrxAvailable = true
-              TrxUnavailableReason = None }
-        | Error reason ->
-            { Counts = consoleCounts stdout stderr
-              Cases = []
-              TrxAvailable = false
-              TrxUnavailableReason = Some reason }
+    let tests trxPath stdout stderr : Async<TestEvidence> =
+        async {
+            match! readTrxAsync trxPath with
+            | Ok document ->
+                let cases, counts = parseTrxDocument document
+
+                return
+                    { Counts = counts
+                      Cases = cases
+                      TrxAvailable = true
+                      TrxUnavailableReason = None }
+            | Error reason ->
+                return
+                    { Counts = consoleCounts stdout stderr
+                      Cases = []
+                      TrxAvailable = false
+                      TrxUnavailableReason = Some reason }
+        }
