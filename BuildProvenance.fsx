@@ -79,7 +79,10 @@ type ReleaseResultBuilder() =
     member _.ReturnFrom(work: Async<Result<'a, ReleaseError>>) = work
     member _.ReturnFrom(value: Result<'a, ReleaseError>) = async { return value }
     member _.Zero() : Async<Result<unit, ReleaseError>> = async { return Ok() }
-    member _.Delay(generator: unit -> Async<Result<'a, ReleaseError>>) = generator ()
+
+    // Deferring the remainder is required for source-order effects; an eager delay
+    // evaluated later synchronous steps before an earlier for/async step completed.
+    member _.Delay(generator: unit -> Async<Result<'a, ReleaseError>>) = async { return! generator () }
 
     member _.Combine(first: Async<Result<unit, ReleaseError>>, second: Async<Result<'a, ReleaseError>>) =
         async {

@@ -42,10 +42,59 @@ let private withManifest (json: string) (action: string -> Async<unit>) : Async<
                 File.Delete path
     }
 
+let private releaseResultBuilderOrderingTest () : Async<unit> =
+    async {
+        let events = ResizeArray<string>()
+        let step name result : Async<Result<unit, ReleaseError>> =
+            async {
+                events.Add name
+                return result
+            }
+
+        let! ordered =
+            releaseResult {
+                events.Add "sync-before"
+                do! step "async-before" (Ok())
+
+                for item in [ 1; 2 ] do
+                    do! step $"for-{item}" (Ok())
+
+                events.Add "post-for"
+                return ()
+            }
+
+        assertEqual "ordered release flow succeeds" (Ok()) ordered
+        assertEqual "synchronous, async, for, and post-for effects preserve source order"
+            [ "sync-before"; "async-before"; "for-1"; "for-2"; "post-for" ]
+            (events |> Seq.toList)
+
+        events.Clear()
+        let failure = MalformedArtifact("failure-sentinel", "stop")
+
+        let! failed =
+            releaseResult {
+                events.Add "failure-sync-before"
+                do! step "failure-async" (Error failure)
+
+                for item in [ 1; 2 ] do
+                    do! step $"failure-for-{item}" (Ok())
+
+                events.Add "failure-post-for"
+                return ()
+            }
+
+        assertEqual "release flow returns the first failure" (Error failure) failed
+        assertEqual "failure skips later async, for, and post-for effects"
+            [ "failure-sync-before"; "failure-async" ]
+            (events |> Seq.toList)
+    }
+
 // The script composes one async pipeline of every assertion; the entry point
 // applies exactly one Async.RunSynchronously at the bottom.
 let private suite () : Async<unit> =
     async {
+        do! releaseResultBuilderOrderingTest ()
+
         do!
             withManifest
                 (sprintf "{\"revision\":\"%s\"}" revision)
