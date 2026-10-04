@@ -5970,6 +5970,12 @@ let private coordinationName (path: string) =
     let digest = SHA256.HashData(Encoding.UTF8.GetBytes canonical) |> Convert.ToHexString
     if OperatingSystem.IsWindows() then $"Local\\Mcp.Workflow.Runtime.{digest}" else $"Mcp.Workflow.Runtime.{digest}"
 
+// Internal observation of live native owner threads for the lock-exit regression.
+let private lockOwnerGate = obj ()
+let mutable private lockOwnerThreads = 0
+let internal activeLockOwnerThreads () = lockOwnerThreads
+let private adjustLockOwnerThreads delta = lock lockOwnerGate (fun () -> lockOwnerThreads <- lockOwnerThreads + delta)
+
 // Named OS mutexes are thread-affine, so a dedicated background owner thread
 // acquires and releases while the async transaction runs on the thread pool.
 let private withLock
@@ -5977,6 +5983,7 @@ let private withLock
     (action: unit -> Async<Result<'a, RuntimeError>>)
     : Async<Result<'a, RuntimeError>> =
     async {
+        let! cancellationToken = Async.CancellationToken
         let name = coordinationName path
         let releaseRequested = new ManualResetEvent(false)
 
@@ -5998,22 +6005,42 @@ let private withLock
                 ThreadStart(fun () ->
                     let mutable mutex: Mutex = null
                     let mutable held = false
+                    adjustLockOwnerThreads 1
 
                     try
                         try
                             mutex <- new Mutex(false, name)
 
+                            // Wait on the cancel signal and the mutex together so an
+                            // external holder that never releases cannot pin this
+                            // thread forever once the caller cancels; the release
+                            // handle is first so cancellation wins a tie.
+                            let handles: WaitHandle[] =
+                                [| releaseRequested :> WaitHandle; mutex :> WaitHandle |]
+
+                            let mutable signalled = -1
+
                             try
-                                mutex.WaitOne() |> ignore
-                                held <- true
-                            with :? AbandonedMutexException ->
-                                // WaitOne reports abandonment after transferring
-                                // ownership to this process; the operation is still
-                                // safe to continue.
+                                signalled <- WaitHandle.WaitAny handles
+                            with :? AbandonedMutexException as abandoned ->
+                                signalled <- abandoned.MutexIndex
+
+                                // Ownership transfers only when the abandoned handle
+                                // is the mutex slot, never the cancel slot.
+                                if abandoned.MutexIndex = 1 then
+                                    held <- true
+
+                            if signalled = 1 then
                                 held <- true
 
-                            acquired.TrySetResult(Ok()) |> ignore
-                            releaseRequested.WaitOne() |> ignore
+                            if held then
+                                acquired.TrySetResult(Ok()) |> ignore
+                                releaseRequested.WaitOne() |> ignore
+                            else
+                                // Cancelled before acquisition: nothing is held, so
+                                // the owner exits without a release.
+                                acquired.TrySetResult(Error(OperationCanceledException "workflow lock acquisition was cancelled"))
+                                |> ignore
                         with error ->
                             // Any failure must still complete the await so the caller
                             // never waits on a dead owner thread.
@@ -6032,8 +6059,13 @@ let private withLock
                             mutex.Dispose()
 
                         releaseRequested.Dispose()
+                        adjustLockOwnerThreads -1
                 )
             )
+
+        // Async.AwaitTask ignores F# cancellation, so the cancellation signal is
+        // registered on the ambient token to release the owner even mid-await.
+        use cancellationRegistration = cancellationToken.Register(signalRelease)
 
         owner.IsBackground <- true
         owner.Name <- "Mcp.Workflow.LockOwner"

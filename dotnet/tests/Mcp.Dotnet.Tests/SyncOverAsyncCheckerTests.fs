@@ -12,7 +12,41 @@ let private fixtureTests =
             let findings = checkText "sample.fs" "let a = pendingTask.Result\nlet b = pendingTask.Wait()\n"
             Expect.equal (violations findings |> List.map _.Pattern) [ "Task.Result"; "Task.Wait" ] "both receiver patterns match"
             Expect.equal findings.Head.Line 1 "first line is one-based"
-            Expect.equal findings.Head.Column 9 "column is one-based"
+            Expect.equal findings.Head.Column 20 "column identifies the member token"
+
+        testCase "member blockers match expression receivers and preserve token locations" <| fun _ ->
+            let source =
+                "let x = (getTask()).Result\nlet item = tasks.[0].Result\nlet selected = task'.Result\nlet timed = (getTask()).Wait()\n"
+            let findings = checkText "sample.fs" source |> violations
+            Expect.equal
+                (findings |> List.map (fun finding -> finding.Pattern, finding.Line, finding.Column))
+                [ "Task.Result", 1, 20
+                  "Task.Result", 2, 21
+                  "Task.Result", 3, 21
+                  "Task.Wait", 4, 24 ]
+                "arbitrary receivers and primed identifiers retain precise locations"
+
+        testCase "character literals and type variables are not apostrophe truncation points" <| fun _ ->
+            let source = "type Generic<'T> = 'T\nlet character = '.'\nlet selected = workItem.Result\n"
+            let findings = checkText "sample.fs" source |> violations
+            Expect.equal (findings |> List.map (fun finding -> finding.Line, finding.Column)) [ 3, 24 ] "only the member token is reported"
+
+        testCase "interpolated contents remain visible, including conservative literal matches" <| fun _ ->
+            let source =
+                "let formatted = $\"{task.Result}\"\nlet literal = $\"literal task.Wait()\"\nlet verbatim = $@\"literal task.Result\"\nlet verbatimAlt = @$\"literal task.Wait()\"\nlet raw = $\"\"\"literal task.Result\"\"\"\n"
+            let findings = checkText "sample.fs" source |> violations
+            Expect.equal
+                (findings |> List.map (fun finding -> finding.Pattern, finding.Line, finding.Column))
+                [ "Task.Result", 1, 24
+                  "Task.Result", 3, 31
+                  "Task.Result", 5, 27
+                  "Task.Wait", 2, 29
+                  "Task.Wait", 4, 34 ]
+                "interpolation expressions and literal text are scanned conservatively"
+
+            Expect.isEmpty
+                (checkText "sample.fs" "WaitHandle.WaitAny [| releaseRequested; mutex |]\n" |> violations)
+                "native wait-handle arbitration is distinct from Task.WaitAny"
 
         testCase "blocking APIs are detected" <| fun _ ->
             let source =
@@ -26,6 +60,10 @@ let private fixtureTests =
             let source =
                 "// task.Result\nlet text = \"task.Result and stream.ReadToEnd()\"\nlet longText = \"\"\"task.Wait()\"\"\"\n(* task.Wait() *)\n"
             Expect.isEmpty (checkText "sample.fs" source) "non-code text is masked"
+
+        testCase "native mutex arbitration does not match Task.WaitAny" <| fun _ ->
+            let findings = checkText "sample.fs" "WaitHandle.WaitAny [| releaseRequested; mutex |]\nTask.WaitAny [||]\n" |> violations
+            Expect.equal (findings |> List.map _.Pattern) [ "Task.WaitAny" ] "only the Task wait primitive is forbidden"
 
         testCase "only reasoned non-Task Result field marker is accepted" <| fun _ ->
             let allowed = "// Non-Task Result field: This is the Workflow WorkItem record payload.\nlet saved = workItem.Result\n"

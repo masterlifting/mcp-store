@@ -70,6 +70,8 @@ let verifyCancelledWaiterReleasesMutex root id : Async<unit> =
                         holderReleased.TrySetResult(()) |> ignore))
         holderThread.IsBackground <- true
         holderThread.Start()
+        let baselineOwnerCount = activeLockOwnerThreads ()
+        let mutable waitingTask: Task<Result<TaskModel, RuntimeError>> option = None
 
         let! outcome =
             async {
@@ -78,21 +80,44 @@ let verifyCancelledWaiterReleasesMutex root id : Async<unit> =
                 with :? TimeoutException -> return failwith "mutex-holder acquisition timed out"
                 use cancellation = new CancellationTokenSource()
                 let waiting = Async.StartAsTask(getTask root id, cancellationToken = cancellation.Token)
-                do! Task.Delay 100 |> Async.AwaitTask
-                cancellation.Cancel()
-                releaseHolder.Set() |> ignore
-                do! holderReleased.Task.WaitAsync(TimeSpan.FromSeconds 5.0) |> Async.AwaitTask
-                let! cancelled =
+                waitingTask <- Some waiting
+
+                let awaitOwnerCount predicate : Async<bool> =
                     async {
-                        try
-                            let! _ = waiting.WaitAsync(TimeSpan.FromSeconds 5.0) |> Async.AwaitTask
-                            return false
-                        with
-                        | :? OperationCanceledException -> return true
-                        | :? TimeoutException -> return failwith "cancelled getTask did not finish after holder release"
+                        let deadline = DateTime.UtcNow.AddSeconds 5.0
+                        let mutable matched = predicate (activeLockOwnerThreads ())
+                        while not matched && DateTime.UtcNow < deadline do
+                            do! Task.Delay 10 |> Async.AwaitTask
+                            matched <- predicate (activeLockOwnerThreads ())
+                        return matched
                     }
 
+                let! contenderStarted = awaitOwnerCount (fun count -> count > baselineOwnerCount)
+                assertTrue "cancelled operation started its native mutex owner" contenderStarted
+                cancellation.Cancel()
+
+                let! ownerReturned = awaitOwnerCount ((=) baselineOwnerCount)
+                assertTrue "cancelled waiter releases its native owner while the external holder still owns the mutex" ownerReturned
+                assertTrue "external mutex holder remains unreleased until the owner exits" (not holderReleased.Task.IsCompleted)
+
+                let! cancellationResult =
+                    Async.Catch(waiting.WaitAsync(TimeSpan.FromSeconds 5.0) |> Async.AwaitTask)
+
+                let rec isCancellation (error: exn) =
+                    match error with
+                    | :? OperationCanceledException -> true
+                    | :? AggregateException as aggregate when aggregate.InnerExceptions.Count = 1 ->
+                        isCancellation aggregate.InnerExceptions.[0]
+                    | _ -> false
+
+                let cancelled =
+                    match cancellationResult with
+                    | Choice2Of2 error -> isCancellation error
+                    | Choice1Of2 _ -> false
+
                 assertTrue "contended getTask preserves caller cancellation" cancelled
+                releaseHolder.Set() |> ignore
+                do! holderReleased.Task.WaitAsync(TimeSpan.FromSeconds 5.0) |> Async.AwaitTask
                 let nextTask = Async.StartAsTask(getTask root id)
                 let! next =
                     async {
@@ -107,6 +132,11 @@ let verifyCancelledWaiterReleasesMutex root id : Async<unit> =
 
         releaseHolder.Set() |> ignore
         do! holderReleased.Task.WaitAsync(TimeSpan.FromSeconds 5.0) |> Async.AwaitTask
+        match waitingTask with
+        | Some waiting when not waiting.IsCompleted ->
+            let! _ = Async.Catch(waiting.WaitAsync(TimeSpan.FromSeconds 5.0) |> Async.AwaitTask)
+            ()
+        | _ -> ()
         match outcome with
         | Choice1Of2 () -> return ()
         | Choice2Of2 error -> return raise error

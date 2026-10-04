@@ -116,14 +116,17 @@ let private processCancellationTest () : Async<unit> =
 
                 childTask <- Some task
                 let deadline = DateTime.UtcNow.AddSeconds 15.0
+                let mutable childPid = None
 
-                while not (File.Exists markerPath) && not task.IsCompleted && DateTime.UtcNow < deadline do
-                    do! Async.Sleep 20
+                while childPid.IsNone && not task.IsCompleted && DateTime.UtcNow < deadline do
+                    if File.Exists markerPath then
+                        try
+                            childPid <- Some(int (File.ReadAllText markerPath))
+                        with :? IOException -> ()
 
-                if not (File.Exists markerPath) then
-                    return failwith "cancellation child did not write its PID marker"
+                    if childPid.IsNone then do! Async.Sleep 20
 
-                let pid = int (File.ReadAllText markerPath)
+                let pid = childPid |> Option.defaultWith (fun () -> failwith "cancellation child did not write a readable PID marker")
                 use child = Process.GetProcessById pid
                 child.Refresh()
                 if child.HasExited then return failwith "cancellation child exited before cancellation"

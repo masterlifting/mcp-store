@@ -21,13 +21,14 @@ let private rules =
         { Name = name
           Regex = Regex(pattern, RegexOptions.Compiled ||| RegexOptions.CultureInvariant) }
 
-    [ make "Task.Result" @"\b[A-Za-z_][A-Za-z0-9_']*\s*\.\s*Result\b"
-      make "Task.Wait" @"\b[A-Za-z_][A-Za-z0-9_']*\s*\.\s*Wait\s*\("
+    // WaitAny stays Task-qualified because Workflow uses the native wait-handle API for mutex coordination.
+    [ make "Task.Result" @"\.\s*Result\b"
+      make "Task.Wait" @"\.\s*Wait\s*\("
       make "GetAwaiter().GetResult" @"GetAwaiter\s*\(\s*\)\s*\.\s*GetResult\s*\("
       make "Task.WaitAll" @"\bTask\s*\.\s*WaitAll\b"
       make "Task.WaitAny" @"\bTask\s*\.\s*WaitAny\b"
-      make "WaitForExit" @"\b[A-Za-z_][A-Za-z0-9_']*\s*\.\s*WaitForExit\s*\("
-      make "ReadToEnd" @"\b[A-Za-z_][A-Za-z0-9_']*\s*\.\s*ReadToEnd\s*\("
+      make "WaitForExit" @"\.\s*WaitForExit\s*\("
+      make "ReadToEnd" @"\.\s*ReadToEnd\s*\("
       make "Async.RunSynchronously" @"\bAsync\s*\.\s*RunSynchronously\b" ]
 
 let private excludedSegments =
@@ -71,6 +72,79 @@ let private blankRange (chars: char array) startIndex endIndex =
     for i in startIndex .. endIndex - 1 do
         if chars.[i] <> '\n' && chars.[i] <> '\r' then chars.[i] <- ' '
 
+let private interpolatedStringStart (chars: char array) startIndex =
+    let mutable cursor = startIndex
+    let mutable verbatim = false
+    if chars.[cursor] = '@' then
+        verbatim <- true
+        cursor <- cursor + 1
+
+    let dollarStart = cursor
+    while cursor < chars.Length && chars.[cursor] = '$' do cursor <- cursor + 1
+    let dollarCount = cursor - dollarStart
+
+    if dollarCount = 0 then
+        None
+    else
+        if cursor < chars.Length && chars.[cursor] = '@' then
+            verbatim <- true
+            cursor <- cursor + 1
+
+        if cursor >= chars.Length || chars.[cursor] <> '"' then
+            None
+        else
+            let quoteStart = cursor
+            while cursor < chars.Length && chars.[cursor] = '"' do cursor <- cursor + 1
+            Some(quoteStart, cursor - quoteStart, verbatim)
+
+let private interpolatedStringEnd (chars: char array) quoteStart quoteCount verbatim =
+    let mutable cursor = quoteStart + quoteCount
+    let mutable closing = -1
+
+    if quoteCount >= 3 then
+        while cursor + quoteCount <= chars.Length && closing < 0 do
+            if chars.[cursor] = '"' then
+                let mutable count = 0
+                while cursor + count < chars.Length && chars.[cursor + count] = '"' do count <- count + 1
+                if count >= quoteCount then closing <- cursor
+                else cursor <- cursor + count
+            else
+                cursor <- cursor + 1
+    else
+        while cursor < chars.Length && closing < 0 do
+            if not verbatim && chars.[cursor] = '\\' && cursor + 1 < chars.Length then
+                cursor <- cursor + 2
+            elif chars.[cursor] = '"' then
+                if verbatim && cursor + 1 < chars.Length && chars.[cursor + 1] = '"' then
+                    cursor <- cursor + 2
+                else
+                    closing <- cursor
+            else
+                cursor <- cursor + 1
+
+    closing
+
+let private charLiteralEnd (chars: char array) startIndex =
+    let mutable cursor = startIndex + 1
+
+    if cursor < chars.Length && chars.[cursor] = '\\' then
+        cursor <- cursor + 1
+        if cursor < chars.Length then
+            match chars.[cursor] with
+            | 'u' -> cursor <- cursor + 5
+            | 'U' -> cursor <- cursor + 9
+            | 'x' ->
+                cursor <- cursor + 1
+                let mutable digits = 0
+                while cursor < chars.Length && digits < 4 && Uri.IsHexDigit chars.[cursor] do
+                    cursor <- cursor + 1
+                    digits <- digits + 1
+            | _ -> cursor <- cursor + 1
+    else
+        cursor <- cursor + 1
+
+    if cursor < chars.Length && chars.[cursor] = '\'' then Some(cursor + 1) else None
+
 let private maskStringsAndComments (source: string) =
     let chars = source.ToCharArray()
     let mutable i = 0
@@ -94,6 +168,13 @@ let private maskStringsAndComments (source: string) =
                 else
                     i <- i + 1
             blankRange chars startIndex i
+        // Interpolation bodies stay visible so executable expressions cannot hide blockers; literal text can false-positive.
+        elif interpolatedStringStart chars i |> Option.isSome then
+            let quoteStart, quoteCount, verbatim = interpolatedStringStart chars i |> Option.get
+            let close = interpolatedStringEnd chars quoteStart quoteCount verbatim
+            blankRange chars i (quoteStart + quoteCount)
+            if close >= 0 then blankRange chars close (close + quoteCount)
+            i <- if close >= 0 then close + quoteCount else chars.Length
         elif chars.[i] = '"' || ((chars.[i] = '$' || chars.[i] = '@') && i + 1 < chars.Length && chars.[i + 1] = '"') then
             let startIndex = i
             if chars.[i] <> '"' then i <- i + 1
@@ -123,12 +204,10 @@ let private maskStringsAndComments (source: string) =
                     else
                         i <- i + 1
             blankRange chars startIndex i
-        elif chars.[i] = '\'' && i + 2 < chars.Length then
-            let startIndex = i
-            i <- i + 1
-            if chars.[i] = '\\' then i <- i + 1
-            i <- min chars.Length (i + 2)
-            blankRange chars startIndex i
+        elif chars.[i] = '\'' then
+            match charLiteralEnd chars i with
+            | Some endIndex -> blankRange chars i endIndex; i <- endIndex
+            | None -> i <- i + 1
         else
             i <- i + 1
 
