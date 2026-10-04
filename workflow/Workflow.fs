@@ -6260,35 +6260,37 @@ let private atomicWrite (path: string) (content: string) : Async<Result<unit, Ru
                 | :? UnauthorizedAccessException -> ()
 
             try
-                do!
-                    awaitComplete (
-                        task {
-                            use stream =
-                                new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, FileOptions.WriteThrough)
+                try
+                    do!
+                        awaitComplete (
+                            task {
+                                use stream =
+                                    new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, FileOptions.WriteThrough)
 
-                            let bytes = Encoding.UTF8.GetBytes content
-                            do! stream.WriteAsync(bytes, 0, bytes.Length)
-                            // Durability needs a synchronous flush-to-disk; FlushAsync
-                            // alone does not provide the Flush(true) guarantee.
-                            stream.Flush true
-                        }
-                    )
+                                let bytes = Encoding.UTF8.GetBytes content
+                                do! stream.WriteAsync(bytes, 0, bytes.Length)
+                                // Durability needs a synchronous flush-to-disk; FlushAsync
+                                // alone does not provide the Flush(true) guarantee.
+                                stream.Flush true
+                            }
+                        )
 
-                if File.Exists path then
-                    File.Replace(temporary, path, null, true)
-                else
-                    File.Move(temporary, path)
+                    if File.Exists path then
+                        File.Replace(temporary, path, null, true)
+                    else
+                        File.Move(temporary, path)
 
-                return Ok()
-            with
-            | :? OperationCanceledException as error -> return raise error
-            | :? IOException as error ->
-                // Cleanup failure must not replace the primary error.
+                    return Ok()
+                with
+                | :? OperationCanceledException as error -> return raise error
+                | :? IOException as error ->
+                    return Error(PersistenceFailure $"could not atomically persist runtime sidecar: {error.Message}")
+                | :? UnauthorizedAccessException as error ->
+                    return Error(PersistenceFailure $"could not atomically persist runtime sidecar: {error.Message}")
+            finally
+                // Removes the staged temp on error or cancellation; no-op after
+                // a committed move/replace, and cleanup never overwrites the error.
                 cleanupTemporary ()
-                return Error(PersistenceFailure $"could not atomically persist runtime sidecar: {error.Message}")
-            | :? UnauthorizedAccessException as error ->
-                cleanupTemporary ()
-                return Error(PersistenceFailure $"could not atomically persist runtime sidecar: {error.Message}")
     }
 
 let private persist path task = atomicWrite path (serialize task)

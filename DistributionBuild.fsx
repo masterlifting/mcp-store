@@ -1,14 +1,13 @@
-// Repo-shared distribution generation mechanics. Producers supply an explicit
-// request so the whole flow — clean-tree provenance, framework-dependent publish,
-// transient staging, exact allowlist enforcement, manifest, and deterministic
-// archive — is identical between distributions. The file name supplies the
-// implicit module name, so `#load` exposes these as DistributionBuild.*.
+// Repo-shared deterministic distribution flow; the file name is the implicit
+// module name for `#load`. One producer-supplied request keeps clean-tree
+// provenance, publish, staging, manifest, and archive identical across producers.
 #load "BuildProvenance.fsx"
 
 open System
 open System.IO
 open System.IO.Compression
 open System.Text.Json.Nodes
+open System.Threading
 open BuildProvenance
 
 // Everything the shared flow needs; producer release policy stays in the
@@ -79,7 +78,10 @@ let private createArchive archivePath sourceRoot files : Async<Result<unit, Rele
         | :? NotSupportedException as error -> return Error(FileFailure("archive", archivePath, error.Message))
     }
 
-let build (request: Request) : Async<Result<DistributionResult, ReleaseError>> =
+let private buildWith
+    (request: Request)
+    (cancellationToken: CancellationToken)
+    : Async<Result<DistributionResult, ReleaseError>> =
     releaseResult {
         do! BuildProvenance.assertCleanTree request.Root
         let! revision = BuildProvenance.committedHead request.Root
@@ -114,6 +116,7 @@ let build (request: Request) : Async<Result<DistributionResult, ReleaseError>> =
                    "-p:DebugSymbols=false" ]
                  @ request.ExtraPublishProperties
                  @ [ "-p:SatelliteResourceLanguages=none"; "--output"; publishRoot ])
+                cancellationToken
 
         let actualFiles = listFiles publishRoot SearchOption.AllDirectories
         let expectedFiles = request.PublishedFiles |> List.sort
@@ -180,4 +183,10 @@ let build (request: Request) : Async<Result<DistributionResult, ReleaseError>> =
               ArchiveSha256 = archiveSha256
               ManifestSha256 = manifestSha256
               Revision = revision }
+    }
+
+let build (request: Request) : Async<Result<DistributionResult, ReleaseError>> =
+    async {
+        let! cancellationToken = Async.CancellationToken
+        return! buildWith request cancellationToken
     }

@@ -7,6 +7,7 @@ open System.IO
 open System.Security.Cryptography
 open System.Text.Json
 open System.Text.Json.Nodes
+open System.Threading
 open System.Threading.Tasks
 
 // Async.AwaitTask reports a faulted task as AggregateException; surface its
@@ -156,7 +157,12 @@ let readAllTextAsync (path: string) : Async<Result<string, ReleaseError>> =
 
 // Runs one external process asynchronously, draining both pipes concurrently so
 // a full stderr pipe cannot deadlock the child, and returns its stdout.
-let runProcess (workingDirectory: string) (executable: string) (arguments: string list) : Async<Result<string, ReleaseError>> =
+let runProcess
+    (workingDirectory: string)
+    (executable: string)
+    (arguments: string list)
+    (cancellationToken: CancellationToken)
+    : Async<Result<string, ReleaseError>> =
     async {
         let argumentText = String.concat " " arguments
         let operation = $"{executable} {argumentText}"
@@ -168,17 +174,46 @@ let runProcess (workingDirectory: string) (executable: string) (arguments: strin
         arguments |> List.iter info.ArgumentList.Add
         use childProcess = new Process(StartInfo = info)
 
+        let terminate () =
+            try
+                if not childProcess.HasExited then childProcess.Kill(true)
+            with
+            | :? InvalidOperationException -> ()
+            | :? System.ComponentModel.Win32Exception -> ()
+            | :? NotSupportedException -> ()
+
         try
             if not (childProcess.Start()) then
                 return Error(ProcessStartFailure(operation, "process could not be started"))
             else
+                // Cancellation can abort the async without entering a try/with, so
+                // termination is registered on the token itself.
+                use registration = cancellationToken.Register(fun () -> terminate ())
                 let stdoutTask = childProcess.StandardOutput.ReadToEndAsync()
                 let stderrTask = childProcess.StandardError.ReadToEndAsync()
-                do! awaitComplete (childProcess.WaitForExitAsync())
+
+                try
+                    do! awaitComplete (childProcess.WaitForExitAsync cancellationToken)
+                with :? OperationCanceledException as cancelled ->
+                    terminate ()
+                    do! awaitComplete (childProcess.WaitForExitAsync())
+
+                    try
+                        let! _ = awaitOperational stdoutTask
+                        let! _ = awaitOperational stderrTask
+                        ()
+                    with
+                    | :? IOException -> ()
+                    | :? UnauthorizedAccessException -> ()
+
+                    return raise cancelled
+
                 let! stdout = awaitOperational stdoutTask
                 let! stderr = awaitOperational stderrTask
 
-                if childProcess.ExitCode <> 0 then
+                if cancellationToken.IsCancellationRequested then
+                    return raise (OperationCanceledException cancellationToken)
+                elif childProcess.ExitCode <> 0 then
                     return Error(ProcessFailed(operation, childProcess.ExitCode, stderr.Trim()))
                 else
                     return Ok(stdout.Trim())
@@ -189,7 +224,11 @@ let runProcess (workingDirectory: string) (executable: string) (arguments: strin
         | :? IOException as error -> return Error(ProcessStartFailure(operation, error.Message))
     }
 
-let private gitRun (root: string) (args: string list) = runProcess root "git" args
+let private gitRun (root: string) (args: string list) =
+    async {
+        let! cancellationToken = Async.CancellationToken
+        return! runProcess root "git" args cancellationToken
+    }
 
 let committedHead (root: string) : Async<Result<string, ReleaseError>> =
     async {

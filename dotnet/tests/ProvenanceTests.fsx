@@ -5,7 +5,10 @@
 #load "../../BuildProvenance.fsx"
 
 open System
+open System.Diagnostics
 open System.IO
+open System.Threading
+open System.Threading.Tasks
 open BuildProvenance
 
 let private assertEqual name expected actual =
@@ -89,11 +92,108 @@ let private releaseResultBuilderOrderingTest () : Async<unit> =
             (events |> Seq.toList)
     }
 
+let private processCancellationTest () : Async<unit> =
+    async {
+        let root = Path.Combine(Path.GetTempPath(), "mcp-provenance-cancel-" + Guid.NewGuid().ToString("N"))
+        Directory.CreateDirectory root |> ignore
+        let scriptPath = Path.Combine(root, "WaitForCancellation.fsx")
+        let markerPath = Path.Combine(root, "child.pid")
+        File.WriteAllText(
+            scriptPath,
+            "open System\nopen System.IO\nopen System.Threading\nFile.WriteAllText(Array.last fsi.CommandLineArgs, string Environment.ProcessId)\nThread.Sleep Timeout.Infinite\n"
+        )
+
+        use cancellation = new CancellationTokenSource()
+        let mutable childTask: Task<Result<string, ReleaseError>> option = None
+        let mutable childIdentity: (int * DateTime) option = None
+
+        let! result =
+            async {
+                let task =
+                    Async.StartAsTask(
+                        runProcess root "dotnet" [ "fsi"; "--nologo"; scriptPath; markerPath ] cancellation.Token
+                    )
+
+                childTask <- Some task
+                let deadline = DateTime.UtcNow.AddSeconds 15.0
+
+                while not (File.Exists markerPath) && not task.IsCompleted && DateTime.UtcNow < deadline do
+                    do! Async.Sleep 20
+
+                if not (File.Exists markerPath) then
+                    return failwith "cancellation child did not write its PID marker"
+
+                let pid = int (File.ReadAllText markerPath)
+                use child = Process.GetProcessById pid
+                child.Refresh()
+                if child.HasExited then return failwith "cancellation child exited before cancellation"
+                childIdentity <- Some(pid, child.StartTime.ToUniversalTime())
+
+                cancellation.Cancel()
+                let! cancellationOutcome =
+                    Async.Catch(
+                        task.WaitAsync(TimeSpan.FromSeconds 10.0)
+                        |> Async.AwaitTask
+                    )
+
+                let rec isCancellation (error: exn) =
+                    match error with
+                    | :? OperationCanceledException -> true
+                    | :? AggregateException as aggregate when aggregate.InnerExceptions.Count = 1 ->
+                        isCancellation aggregate.InnerExceptions.[0]
+                    | _ -> false
+
+                match cancellationOutcome with
+                | Choice2Of2 error when isCancellation error -> ()
+                | Choice2Of2 (:? TimeoutException) -> return failwith "runProcess did not reap its child after cancellation"
+                | Choice2Of2 error -> return failwithf "runProcess cancellation raised an unexpected error: %s" error.Message
+                | Choice1Of2 value -> return failwithf "runProcess returned after cancellation: %A" value
+
+                match childIdentity with
+                | Some(ownedPid, ownedStartTime) ->
+                    let stillOwnedProcessExists =
+                        try
+                            use ownedProcess = Process.GetProcessById ownedPid
+                            ownedProcess.Refresh()
+                            not ownedProcess.HasExited && ownedProcess.StartTime.ToUniversalTime() = ownedStartTime
+                        with :? ArgumentException -> false
+
+                    assertEqual "owned child is terminated after runProcess returns" false stillOwnedProcessExists
+                | None -> failwith "cancellation child identity was not recorded"
+
+                return ()
+            }
+            |> Async.Catch
+
+        cancellation.Cancel()
+
+        match childTask with
+        | Some task when not task.IsCompleted ->
+            match childIdentity with
+            | Some(pid, _) ->
+                try
+                    use child = Process.GetProcessById pid
+                    if not child.HasExited then child.Kill true
+                with :? ArgumentException -> ()
+            | None -> ()
+
+            let! _ = Async.Catch(task.WaitAsync(TimeSpan.FromSeconds 5.0) |> Async.AwaitTask)
+            ()
+        | _ -> ()
+
+        if Directory.Exists root then Directory.Delete(root, true)
+
+        match result with
+        | Choice1Of2 () -> return ()
+        | Choice2Of2 error -> return raise error
+    }
+
 // The script composes one async pipeline of every assertion; the entry point
 // applies exactly one Async.RunSynchronously at the bottom.
 let private suite () : Async<unit> =
     async {
         do! releaseResultBuilderOrderingTest ()
+        do! processCancellationTest ()
 
         do!
             withManifest

@@ -725,6 +725,7 @@ let private processLine (line: string) : Async<string> =
                             else
                                 return! handle requestId methodName parameters
         with
+        | :? OperationCanceledException as error -> return raise error
         | :? JsonException as error -> return protocolError "null" -32700 $"invalid JSON: {error.Message}"
         | :? FormatException as error -> return protocolError "null" -32600 $"invalid request: {error.Message}"
         | _ -> return protocolError "null" -32603 "internal MCP error"
