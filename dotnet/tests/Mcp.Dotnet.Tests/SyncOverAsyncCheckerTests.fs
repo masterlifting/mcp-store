@@ -33,15 +33,19 @@ let private fixtureTests =
 
         testCase "nested interpolation quotes trigger fail-closed raw scanning" <| fun _ ->
             let source =
-                "let nestedResult = $\"{(if \"x\" = \"x\" then pendingTask else otherTask).Result}\"\nlet nestedWait = $\"{(if \"x\" = \"x\" then pendingTask else otherTask).Wait()}\"\nlet multipleHoles = $\"{(if \"x\" = \"x\" then pendingTask else otherTask).Result}{(if \"y\" = \"y\" then pendingTask else otherTask).Wait()}\"\n"
+                "let nestedResult = $\"{(if \"x\" = \"x\" then pendingTask else otherTask).Result}\"\nlet nestedWait = $\"{(if \"x\" = \"x\" then pendingTask else otherTask).Wait()}\"\nlet multipleHoles = $\"{(if \"x\" = \"x\" then pendingTask else otherTask).Result}{(if \"y\" = \"y\" then pendingTask else otherTask).Wait()}\"\nlet commentBraceResult = $\"{(if (* } *) \"x\" = \"x\" then pendingTask else otherTask).Result}\"\nlet commentBraceWait = $\"{(if (* } *) \"x\" = \"x\" then pendingTask else otherTask).Wait()}\"\nlet closedHoleFirst = $\"{pendingTask.Result}{(if \"z\" = \"z\" then pendingTask else otherTask).Wait()}\"\n"
             let lines = source.Split('\n')
             let findings = checkText "sample.fs" source |> violations
             Expect.equal
                 (findings |> List.map (fun finding -> finding.Pattern, finding.Line, finding.Column))
                 [ "Task.Result", 1, lines.[0].IndexOf(".Result", StringComparison.Ordinal) + 1
                   "Task.Result", 3, lines.[2].IndexOf(".Result", StringComparison.Ordinal) + 1
+                  "Task.Result", 4, lines.[3].IndexOf(".Result", StringComparison.Ordinal) + 1
+                  "Task.Result", 6, lines.[5].IndexOf(".Result", StringComparison.Ordinal) + 1
                   "Task.Wait", 2, lines.[1].IndexOf(".Wait(", StringComparison.Ordinal) + 1
-                  "Task.Wait", 3, lines.[2].IndexOf(".Wait(", StringComparison.Ordinal) + 1 ]
+                  "Task.Wait", 3, lines.[2].IndexOf(".Wait(", StringComparison.Ordinal) + 1
+                  "Task.Wait", 5, lines.[4].IndexOf(".Wait(", StringComparison.Ordinal) + 1
+                  "Task.Wait", 6, lines.[5].IndexOf(".Wait(", StringComparison.Ordinal) + 1 ]
                 "quotes inside open holes cannot hide member blockers"
 
         testCase "interpolated contents remain visible, including conservative literal matches" <| fun _ ->

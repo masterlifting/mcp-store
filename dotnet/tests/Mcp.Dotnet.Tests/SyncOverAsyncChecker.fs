@@ -97,13 +97,13 @@ let private interpolatedStringStart (chars: char array) startIndex =
             while cursor < chars.Length && chars.[cursor] = '"' do cursor <- cursor + 1
             Some(quoteStart, cursor - quoteStart, verbatim)
 
-let private hasOpenInterpolationHole (chars: char array) startIndex endIndex =
-    let mutable lastOpen = -1
-    let mutable lastClose = -1
-    for index in startIndex .. endIndex - 1 do
-        if chars.[index] = '{' then lastOpen <- index
-        elif chars.[index] = '}' then lastClose <- index
-    lastOpen > lastClose
+let private hasSeenInterpolationOpeningBrace (chars: char array) startIndex endIndex =
+    let mutable found = false
+    let mutable index = startIndex
+    while index < endIndex && not found do
+        if chars.[index] = '{' then found <- true
+        index <- index + 1
+    found
 
 let private interpolatedStringEnd (chars: char array) quoteStart quoteCount verbatim =
     let mutable cursor = quoteStart + quoteCount
@@ -123,7 +123,7 @@ let private interpolatedStringEnd (chars: char array) quoteStart quoteCount verb
             if not verbatim && chars.[cursor] = '\\' && cursor + 1 < chars.Length then
                 cursor <- cursor + 2
             elif chars.[cursor] = '"' then
-                if hasOpenInterpolationHole chars (quoteStart + 1) cursor then
+                if hasSeenInterpolationOpeningBrace chars (quoteStart + 1) cursor then
                     closing <- -2
                 elif verbatim && cursor + 1 < chars.Length && chars.[cursor + 1] = '"' then
                     cursor <- cursor + 2
@@ -178,13 +178,20 @@ let private maskStringsAndComments (source: string) =
                 else
                     i <- i + 1
             blankRange chars startIndex i
-        // Ambiguous holes keep the remaining source visible; literal text and comments may false-positive.
+        // Ambiguous interpolation quotes retain a raw suffix; literal text and comments may false-positive.
         elif interpolatedStringStart chars i |> Option.isSome then
             let quoteStart, quoteCount, verbatim = interpolatedStringStart chars i |> Option.get
             let close = interpolatedStringEnd chars quoteStart quoteCount verbatim
             blankRange chars i (quoteStart + quoteCount)
             if close >= 0 then blankRange chars close (close + quoteCount)
-            i <- if close >= 0 then close + quoteCount else chars.Length
+            i <-
+                if close >= 0 then
+                    close + quoteCount
+                elif close = -2 && quoteCount = 1 && not verbatim then
+                    let lineEnd = Array.tryFindIndex ((=) '\n') chars.[i..] |> Option.map (fun offset -> i + offset) |> Option.defaultValue chars.Length
+                    lineEnd
+                else
+                    chars.Length
         elif chars.[i] = '"' || ((chars.[i] = '$' || chars.[i] = '@') && i + 1 < chars.Length && chars.[i + 1] = '"') then
             let startIndex = i
             if chars.[i] <> '"' then i <- i + 1
