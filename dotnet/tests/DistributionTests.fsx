@@ -1,10 +1,7 @@
-// Deterministic contract coverage for the component-local dotnet v1 producer.
-// The test regenerates the current v1 release output and verifies the
-// manifest/pin contract end-to-end.
-
 #load "../ReleaseConfig.fsx"
 #load "../../DistributionTestHelper.fsx"
 
+open System
 open System.Diagnostics
 open System.IO
 open System.Reflection.PortableExecutable
@@ -20,42 +17,29 @@ let manifestPath = Path.Combine(distributionDirectory, "distribution.json")
 let pinsPath = Path.Combine(dist, "consumer-pins.json")
 let stalePublishPath = Path.Combine(distributionDirectory, "publish", "stale-output.txt")
 
-let runDotnet arguments =
-    let info = ProcessStartInfo("dotnet")
-    info.WorkingDirectory <- repoRoot
-    info.UseShellExecute <- false
-    info.RedirectStandardOutput <- true
-    info.RedirectStandardError <- true
-    arguments |> List.iter info.ArgumentList.Add
+let runDotnet arguments : Async<string> =
+    async {
+        let info = ProcessStartInfo("dotnet")
+        info.WorkingDirectory <- repoRoot
+        info.UseShellExecute <- false
+        info.RedirectStandardOutput <- true
+        info.RedirectStandardError <- true
+        arguments |> List.iter info.ArgumentList.Add
 
-    use childProcess = Process.Start info
-    let output = childProcess.StandardOutput.ReadToEndAsync()
-    let error = childProcess.StandardError.ReadToEndAsync()
-    childProcess.WaitForExit()
+        use childProcess = Process.Start info
+        let outputTask = childProcess.StandardOutput.ReadToEndAsync()
+        let errorTask = childProcess.StandardError.ReadToEndAsync()
+        do! childProcess.WaitForExitAsync() |> Async.AwaitTask
+        let! output = outputTask |> Async.AwaitTask
+        let! error = errorTask |> Async.AwaitTask
 
-    if childProcess.ExitCode <> 0 then
-        failwithf "dotnet %s failed: %s" (String.concat " " arguments) (error.Result.Trim())
+        if childProcess.ExitCode <> 0 then
+            return failwithf "dotnet %s failed: %s" (String.concat " " arguments) (error.Trim())
 
-    output.Result
+        return output
+    }
 
 let runScript path = runDotnet [ "fsi"; path ]
-
-// Reproduce the F1 precondition: a clean plain Release build must not be able
-// to feed a portable-debug assembly into packaging via incremental reuse.
-runDotnet [ "clean"; "dotnet/Mcp.Dotnet.fsproj"; "-c"; "Release"; "--nologo" ] |> ignore
-runDotnet [ "build"; "dotnet/Mcp.Dotnet.fsproj"; "-c"; "Release"; "--nologo" ] |> ignore
-
-try
-    Directory.CreateDirectory(Path.GetDirectoryName stalePublishPath) |> ignore
-    File.WriteAllText(stalePublishPath, "stale staging output")
-    runScript (Path.Combine(dotnet, "BuildDistribution.fsx")) |> ignore
-
-    DistributionTestHelper.assertTrue "regeneration removes dotnet staging output" (not (File.Exists stalePublishPath))
-
-    runScript (Path.Combine(dotnet, "PrepareReleasePins.fsx")) |> ignore
-finally
-    if File.Exists stalePublishPath then
-        File.Delete stalePublishPath
 
 let producer: DistributionTestHelper.Producer =
     { ComponentId = ReleaseConfig.componentId
@@ -73,17 +57,29 @@ let layout: DistributionTestHelper.Layout =
       ManifestPath = manifestPath
       PinsPath = pinsPath }
 
-DistributionTestHelper.assertDistributionContract producer layout
+// Concurrent pipe drains prevent child output from filling a redirected stream.
+async {
+    do! runDotnet [ "clean"; "dotnet/Mcp.Dotnet.fsproj"; "-c"; "Release"; "--nologo" ] |> Async.Ignore
+    do! runDotnet [ "build"; "dotnet/Mcp.Dotnet.fsproj"; "-c"; "Release"; "--nologo" ] |> Async.Ignore
 
-// The packaged entry assembly must stay the no-debug output even though a
-// plain Release build populated the intermediate outputs before packaging.
-let packagedDllPath = Path.Combine(distributionDirectory, ReleaseConfig.entryDll)
+    try
+        Directory.CreateDirectory(Path.GetDirectoryName stalePublishPath) |> ignore
+        File.WriteAllText(stalePublishPath, "stale staging output")
+        do! runScript (Path.Combine(dotnet, "BuildDistribution.fsx")) |> Async.Ignore
+        DistributionTestHelper.assertTrue "regeneration removes dotnet staging output" (not (File.Exists stalePublishPath))
+        do! runScript (Path.Combine(dotnet, "PrepareReleasePins.fsx")) |> Async.Ignore
+    finally
+        if File.Exists stalePublishPath then File.Delete stalePublishPath
 
-let packagedDllHasNoDebugDirectory =
-    use stream = File.OpenRead packagedDllPath
-    use pe = new PEReader(stream)
-    pe.ReadDebugDirectory().IsEmpty
+    do! DistributionTestHelper.assertDistributionContract producer layout
 
-DistributionTestHelper.assertTrue "packaged entry DLL carries no debug directory" packagedDllHasNoDebugDirectory
+    let packagedDllPath = Path.Combine(distributionDirectory, ReleaseConfig.entryDll)
+    let packagedDllHasNoDebugDirectory =
+        use stream = File.OpenRead packagedDllPath
+        use pe = new PEReader(stream)
+        pe.ReadDebugDirectory().IsEmpty
 
-printfn "dotnet distribution contract passed: %s" archiveName
+    DistributionTestHelper.assertTrue "packaged entry DLL carries no debug directory" packagedDllHasNoDebugDirectory
+}
+// FSI needs one synchronous top-level entry for the asynchronous script.
+|> Async.RunSynchronously

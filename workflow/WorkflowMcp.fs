@@ -159,8 +159,11 @@ let private validateProjectRoot (root: string) : Result<string, string> =
                     invalid $"project root must not traverse a reparse point: {reparse.Value}"
                 else
                     Ok candidate
-        with error ->
-            invalid $"projectRoot is not a valid path: {error.Message}"
+        with
+        | :? IOException -> invalid "projectRoot is not a valid path"
+        | :? UnauthorizedAccessException -> invalid "projectRoot is not a valid path"
+        | :? ArgumentException -> invalid "projectRoot is not a valid path"
+        | :? NotSupportedException -> invalid "projectRoot is not a valid path"
 
 let private strings label (values: JsonElement list) =
     values
@@ -539,6 +542,7 @@ let private errorCode error =
     | InvalidTransition _ -> "INVALID_TRANSITION"
     | PersistenceFailure _ -> "PERSISTENCE_FAILURE"
     | AuthorityDenied _ -> "AUTHORITY_DENIED"
+    | InternalFailure _ -> "INTERNAL_FAILURE"
 
 let private node (value: 'T) : JsonNode = JsonValue.Create<'T>(value) :> JsonNode
 
@@ -631,78 +635,101 @@ let private toolsResult () =
     result["tools"] <- JsonNode.Parse tools
     result
 
-let private invokeTool name arguments =
-    try
-        match parseOperation name arguments with
-        | Error message ->
-            let detail = InvalidInput message
-            failure detail
-        | Ok operation ->
-            match execute operation with
-            | Ok task -> success (serialize task)
-            | Error error -> failure error
-    with error ->
-        failure (PersistenceFailure $"runtime operation failed: {error.Message}")
+let private invokeTool name arguments : Async<JsonNode> =
+    async {
+        try
+            match parseOperation name arguments with
+            | Error message ->
+                let detail = InvalidInput message
+                return failure detail
+            | Ok operation ->
+                let! result = execute operation
 
-let private handle id methodName parameters =
-    match methodName with
-    | "ping" -> response id (JsonObject())
-    | "initialize" ->
-        match parameters with
-        | None -> protocolError id -32602 "initialize requires params"
-        | Some values ->
-            match objectProperties "initialize params" values [ "protocolVersion"; "capabilities"; "clientInfo" ] [ "protocolVersion"; "capabilities"; "clientInfo" ] with
-            | Error message -> protocolError id -32602 message
-            | Ok values ->
-                match requiredString "initialize params" "protocolVersion" values with
-                | Error message -> protocolError id -32602 message
-                | Ok version when version <> ProtocolVersion && version <> AcceptedClientProtocolVersion -> protocolError id -32602 $"unsupported protocol version '{version}'"
-                | Ok _ -> response id (initializeResult ProtocolVersion)
-    | "tools/list" -> response id (toolsResult ())
-    | "tools/call" ->
-        match parameters with
-        | None -> protocolError id -32602 "tools/call requires params"
-        | Some values ->
-            match objectProperties "tools/call params" values [ "name"; "arguments"; "_meta" ] [ "name" ] with
-            | Error message -> protocolError id -32602 message
-            | Ok values ->
-                match requiredString "tools/call params" "name" values with
-                | Error message -> protocolError id -32602 message
-                | Ok name ->
-                    match property "arguments" values with
-                    | Some arguments when arguments.ValueKind <> JsonValueKind.Object -> protocolError id -32602 "tools/call arguments must be an object"
-                    | Some arguments -> response id (invokeTool name arguments)
-                    | None -> response id (invokeTool name (JsonDocument.Parse("{}").RootElement))
-    | _ -> protocolError id -32601 $"method '{methodName}' is not supported"
+                match result with
+                | Ok task -> return success (serialize task)
+                | Error error -> return failure error
+        with
+        | :? OperationCanceledException as error -> return raise error
+        | _ ->
+            // Terminal host safety boundary: unexpected faults become a bounded,
+            // non-sensitive internal failure rather than normal control flow.
+            return failure (InternalFailure "runtime operation failed")
+    }
 
-let private processLine (line: string) =
-    try
-        use document = JsonDocument.Parse(line, JsonDocumentOptions(CommentHandling = JsonCommentHandling.Disallow, AllowTrailingCommas = false))
-        let request = document.RootElement
+let private handle id methodName parameters : Async<string> =
+    async {
+        match methodName with
+        | "ping" -> return response id (JsonObject())
+        | "initialize" ->
+            match parameters with
+            | None -> return protocolError id -32602 "initialize requires params"
+            | Some values ->
+                match objectProperties "initialize params" values [ "protocolVersion"; "capabilities"; "clientInfo" ] [ "protocolVersion"; "capabilities"; "clientInfo" ] with
+                | Error message -> return protocolError id -32602 message
+                | Ok values ->
+                    match requiredString "initialize params" "protocolVersion" values with
+                    | Error message -> return protocolError id -32602 message
+                    | Ok version when version <> ProtocolVersion && version <> AcceptedClientProtocolVersion ->
+                        return protocolError id -32602 $"unsupported protocol version '{version}'"
+                    | Ok _ -> return response id (initializeResult ProtocolVersion)
+        | "tools/list" -> return response id (toolsResult ())
+        | "tools/call" ->
+            match parameters with
+            | None -> return protocolError id -32602 "tools/call requires params"
+            | Some values ->
+                match objectProperties "tools/call params" values [ "name"; "arguments"; "_meta" ] [ "name" ] with
+                | Error message -> return protocolError id -32602 message
+                | Ok values ->
+                    match requiredString "tools/call params" "name" values with
+                    | Error message -> return protocolError id -32602 message
+                    | Ok name ->
+                        match property "arguments" values with
+                        | Some arguments when arguments.ValueKind <> JsonValueKind.Object ->
+                            return protocolError id -32602 "tools/call arguments must be an object"
+                        | Some arguments ->
+                            let! result = invokeTool name arguments
+                            return response id result
+                        | None ->
+                            let! result = invokeTool name (JsonDocument.Parse("{}").RootElement)
+                            return response id result
+        | _ -> return protocolError id -32601 $"method '{methodName}' is not supported"
+    }
 
-        match objectProperties "JSON-RPC request" request [ "jsonrpc"; "id"; "method"; "params" ] [ "jsonrpc"; "method" ] with
-        | Error message -> protocolError "null" -32600 message
-        | Ok request ->
-            match requiredString "JSON-RPC request" "jsonrpc" request with
-            | Error message -> protocolError "null" -32600 message
-            | Ok version when version <> "2.0" -> protocolError "null" -32600 "JSON-RPC request jsonrpc must be exactly '2.0'"
-            | Ok _ ->
-                match requestId request with
-                | Error message -> protocolError "null" -32600 message
-                | Ok id ->
-                    let methodName = requiredString "JSON-RPC request" "method" request
-                    match methodName, id with
-                    | Error message, Some requestId -> protocolError requestId -32600 message
-                    | Error _, None -> ""
-                    | Ok _, None -> ""
-                    | Ok methodName, Some requestId ->
-                        let parameters = property "params" request
-                        if methodName = "notifications/initialized" then ""
-                        else handle requestId methodName parameters
-    with
-    | :? JsonException as error -> protocolError "null" -32700 $"invalid JSON: {error.Message}"
-    | :? FormatException as error -> protocolError "null" -32600 $"invalid request: {error.Message}"
-    | _ -> protocolError "null" -32603 "internal MCP error"
+let private processLine (line: string) : Async<string> =
+    async {
+        try
+            use document = JsonDocument.Parse(line, JsonDocumentOptions(CommentHandling = JsonCommentHandling.Disallow, AllowTrailingCommas = false))
+            let request = document.RootElement
+
+            match objectProperties "JSON-RPC request" request [ "jsonrpc"; "id"; "method"; "params" ] [ "jsonrpc"; "method" ] with
+            | Error message -> return protocolError "null" -32600 message
+            | Ok request ->
+                match requiredString "JSON-RPC request" "jsonrpc" request with
+                | Error message -> return protocolError "null" -32600 message
+                | Ok version when version <> "2.0" -> return protocolError "null" -32600 "JSON-RPC request jsonrpc must be exactly '2.0'"
+                | Ok _ ->
+                    match requestId request with
+                    | Error message -> return protocolError "null" -32600 message
+                    | Ok id ->
+                        let methodName = requiredString "JSON-RPC request" "method" request
+
+                        match methodName, id with
+                        | Error message, Some requestId -> return protocolError requestId -32600 message
+                        | Error _, None -> return ""
+                        | Ok _, None -> return ""
+                        | Ok methodName, Some requestId ->
+                            let parameters = property "params" request
+
+                            if methodName = "notifications/initialized" then
+                                return ""
+                            else
+                                return! handle requestId methodName parameters
+        with
+        | :? OperationCanceledException as error -> return raise error
+        | :? JsonException as error -> return protocolError "null" -32700 $"invalid JSON: {error.Message}"
+        | :? FormatException as error -> return protocolError "null" -32600 $"invalid request: {error.Message}"
+        | _ -> return protocolError "null" -32603 "internal MCP error"
+    }
 
 let private validateCatalog args =
     match args with
@@ -716,7 +743,9 @@ let private validateCatalog args =
                 let actual = SHA256.HashData(File.ReadAllBytes path) |> Convert.ToHexString |> fun value -> value.ToLowerInvariant()
                 if actual <> expected then Error "the canonical profile catalog hash does not match"
                 else Ok()
-        with error -> Error $"the canonical profile catalog could not be validated: {error.Message}"
+        with
+        | :? IOException -> Error "the canonical profile catalog could not be validated"
+        | :? UnauthorizedAccessException -> Error "the canonical profile catalog could not be validated"
     | _ -> Error "the Workflow requires --profile-catalog <absolute path> --profile-catalog-sha256 <sha256>"
 
 [<EntryPoint>]
@@ -726,12 +755,24 @@ let main args =
         Console.Error.WriteLine($"workflow startup failed: {message}")
         1
     | Ok() ->
-        let mutable continueReading = true
-        while continueReading do
-            let line = Console.ReadLine()
-            if isNull line then
-                continueReading <- false
-            elif not (String.IsNullOrWhiteSpace line) then
-                let output = processLine line
-                if output <> "" then printfn "%s" output
-        0
+        let run () =
+            async {
+                let mutable continueReading = true
+
+                while continueReading do
+                    let! line = Console.In.ReadLineAsync() |> Async.AwaitTask
+
+                    if isNull line then
+                        continueReading <- false
+                    elif not (String.IsNullOrWhiteSpace line) then
+                        let! output = processLine line
+
+                        if output <> "" then
+                            printfn "%s" output
+
+                return 0
+            }
+
+        // Standalone entry bridge: the only synchronous wait in the Workflow MCP
+        // flow; all request handling above composes asynchronously.
+        run () |> Async.RunSynchronously

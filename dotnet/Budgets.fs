@@ -1,6 +1,7 @@
 namespace Mcp.Dotnet
 
 open System
+open System.IO
 
 module Budgets =
     [<Literal>]
@@ -214,14 +215,18 @@ module Budgets =
             Error(InvalidPagination $"limit must be between 1 and {budgets.DetailsMaxPageSize}")
         else
             try
-                let total = values |> Seq.length
+                // Single pass over the owned snapshot: count every line while
+                // retaining only the requested bounded page.
+                let mutable total = 0
+                let items = ResizeArray<string>()
 
-                let items =
-                    values
-                    |> Seq.skip (min request.Offset total)
-                    |> Seq.truncate limit
-                    |> Seq.map (shorten budgets.MessageMaxLength)
-                    |> Seq.toList
+                for value in values do
+                    if total >= request.Offset && items.Count < limit then
+                        items.Add(shorten budgets.MessageMaxLength value)
+
+                    total <- total + 1
+
+                let items = List.ofSeq items
 
                 Ok
                     { RunId = request.RunId
@@ -231,5 +236,7 @@ module Budgets =
                       Total = total
                       Items = items
                       HasMore = request.Offset + items.Length < total }
-            with error ->
+            with
+            | :? IOException as error -> Error(MissingArtifact $"detail artifact could not be paged: {error.Message}")
+            | :? UnauthorizedAccessException as error ->
                 Error(MissingArtifact $"detail artifact could not be paged: {error.Message}")

@@ -4,6 +4,8 @@ open System
 open System.Diagnostics
 open System.IO
 open System.Text
+open System.Threading
+open System.Threading.Tasks
 open Mcp.Dotnet
 
 // Shared fixtures and assertions for the deterministic producer test suite.
@@ -69,24 +71,37 @@ let isArtifactQuotaExceeded = function
     | VerificationError.ArtifactQuotaExceeded _ -> true
     | _ -> false
 
-// Junctions on Windows and directory symlinks elsewhere keep reparse coverage
-// portable without requiring symbolic-link privileges on Windows.
-let createDirectoryLink (link: string) (target: string) =
-    if OperatingSystem.IsWindows() then
-        let startInfo = ProcessStartInfo("cmd.exe", $"/c mklink /J \"{link}\" \"{target}\"")
-        startInfo.UseShellExecute <- false
-        startInfo.CreateNoWindow <- true
-        startInfo.RedirectStandardOutput <- true
-        startInfo.RedirectStandardError <- true
-        use child = Process.Start startInfo
-        child.WaitForExit()
-
-        if child.ExitCode <> 0 then
-            fail "createDirectoryLink" $"junction creation failed: {child.StandardError.ReadToEnd()}"
-    else
-        Directory.CreateSymbolicLink(link, target) |> ignore
-
-    link
+// Junctions provide reparse coverage on Windows without symlink privileges.
+let createDirectoryLink (link: string) (target: string) : Task<string> =
+    task {
+        if OperatingSystem.IsWindows() then
+            let startInfo = ProcessStartInfo("cmd.exe", $"/c mklink /J \"{link}\" \"{target}\"")
+            startInfo.UseShellExecute <- false
+            startInfo.CreateNoWindow <- true
+            startInfo.RedirectStandardOutput <- true
+            startInfo.RedirectStandardError <- true
+            use child = Process.Start startInfo
+            use timeout = new CancellationTokenSource(TimeSpan.FromSeconds 30.0)
+            let stdoutTask = child.StandardOutput.ReadToEndAsync(timeout.Token)
+            let stderrTask = child.StandardError.ReadToEndAsync(timeout.Token)
+            let mutable timedOut = false
+            try
+                do! child.WaitForExitAsync(timeout.Token)
+            with :? OperationCanceledException ->
+                try child.Kill(true) with _ -> ()
+                timedOut <- true
+            let! stdout = stdoutTask
+            let! stderr = stderrTask
+            if timedOut then
+                return raise (TimeoutException "junction creation timed out")
+            elif child.ExitCode <> 0 then
+                return fail "createDirectoryLink" $"junction creation failed: {stderr.Trim()} {stdout.Trim()}"
+            else
+                return link
+        else
+            Directory.CreateSymbolicLink(link, target) |> ignore
+            return link
+    }
 
 type TempWorkspace() =
     let root =

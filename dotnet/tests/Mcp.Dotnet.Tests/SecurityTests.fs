@@ -49,15 +49,16 @@ let private workspaceTests =
             |> expectErrorMatching "blank root" isInvalidInput
             |> ignore
 
-        testCase "reparse-point workspace roots are rejected"
-        <| fun _ ->
-            use workspace = new TempWorkspace()
-            Directory.CreateDirectory(Path.Combine(workspace.Root, "real")) |> ignore
-            let link = workspace.CreateJunction("jlink", "real")
+        testCaseTask "reparse-point workspace roots are rejected" (fun () ->
+            task {
+                use workspace = new TempWorkspace()
+                Directory.CreateDirectory(Path.Combine(workspace.Root, "real")) |> ignore
+                let! link = workspace.CreateJunction("jlink", "real")
 
-            PathAuthorization.validateWorkspace link
-            |> expectErrorMatching "junction root" isUnauthorizedPath
-            |> ignore
+                PathAuthorization.validateWorkspace link
+                |> expectErrorMatching "junction root" isUnauthorizedPath
+                |> ignore
+            })
     ]
 
 let private targetTests =
@@ -121,16 +122,17 @@ let private targetTests =
             |> expectErrorMatching "blank target" isInvalidInput
             |> ignore
 
-        testCase "reparse-point ancestors are rejected"
-        <| fun _ ->
-            use workspace = new TempWorkspace()
-            workspace.Write("real/lib.csproj", classLibraryProject) |> ignore
-            workspace.Write("real/lib.cs", validClassSource) |> ignore
-            workspace.CreateJunction("link", "real") |> ignore
+        testCaseTask "reparse-point ancestors are rejected" (fun () ->
+            task {
+                use workspace = new TempWorkspace()
+                workspace.Write("real/lib.csproj", classLibraryProject) |> ignore
+                workspace.Write("real/lib.cs", validClassSource) |> ignore
+                let! _ = workspace.CreateJunction("link", "real")
 
-            PathAuthorization.authorize workspace.Root (Some "link/lib.csproj")
-            |> expectErrorMatching "reparse ancestor" isUnauthorizedPath
-            |> ignore
+                PathAuthorization.authorize workspace.Root (Some "link/lib.csproj")
+                |> expectErrorMatching "reparse ancestor" isUnauthorizedPath
+                |> ignore
+            })
 
         testCase "revalidation detects a workspace target changed after authorization"
         <| fun _ ->
@@ -229,87 +231,69 @@ let private artifactRootTests =
                     |> expectErrorMatching "network artifact root" isUnauthorizedPath
                     |> ignore
 
-        testCase "external artifact ancestors must not be reparse points"
-        <| fun _ ->
-            use workspace = new TempWorkspace()
-            let parent = Path.Combine(Path.GetTempPath(), "mcp-dotnet-reparse", Guid.NewGuid().ToString("N"))
-            let real = Path.Combine(parent, "real")
-            Directory.CreateDirectory real |> ignore
-            let link = Path.Combine(parent, "link")
-            createDirectoryLink link real |> ignore
+        testCaseTask "external artifact ancestors must not be reparse points" (fun () ->
+            task {
+                use workspace = new TempWorkspace()
+                let parent = Path.Combine(Path.GetTempPath(), "mcp-dotnet-reparse", Guid.NewGuid().ToString("N"))
+                let real = Path.Combine(parent, "real")
+                Directory.CreateDirectory real |> ignore
+                let link = Path.Combine(parent, "link")
+                let! _ = createDirectoryLink link real
 
-            try
-                PathAuthorization.validateArtifactRoot workspace.Root (Path.Combine(link, "artifacts"))
-                |> expectErrorMatching "external reparse ancestor" isUnauthorizedPath
-                |> ignore
-            finally
-                if Directory.Exists link then
-                    try
-                        Directory.Delete(link, false)
-                    with _ ->
-                        ()
+                try
+                    PathAuthorization.validateArtifactRoot workspace.Root (Path.Combine(link, "artifacts"))
+                    |> expectErrorMatching "external reparse ancestor" isUnauthorizedPath
+                    |> ignore
+                finally
+                    if Directory.Exists link then
+                        try Directory.Delete(link, false) with _ -> ()
+                    if Directory.Exists parent then
+                        try Directory.Delete(parent, true) with _ -> ()
+            })
 
-                if Directory.Exists parent then
-                    try
-                        Directory.Delete(parent, true)
-                    with _ ->
-                        ()
+        testCaseTask "reparse artifact ancestors are rejected" (fun () ->
+            task {
+                use workspace = new TempWorkspace()
+                let parent = Path.Combine(Path.GetTempPath(), "mcp-dotnet-reparse", Guid.NewGuid().ToString("N"))
+                let real = Path.Combine(parent, "real")
+                Directory.CreateDirectory real |> ignore
+                let link = Path.Combine(parent, "link")
+                let! _ = createDirectoryLink link real
 
-        testCase "reparse artifact ancestors are rejected"
-        <| fun _ ->
-            use workspace = new TempWorkspace()
-            let parent = Path.Combine(Path.GetTempPath(), "mcp-dotnet-reparse", Guid.NewGuid().ToString("N"))
-            let real = Path.Combine(parent, "real")
-            Directory.CreateDirectory real |> ignore
-            let link = Path.Combine(parent, "link")
-            createDirectoryLink link real |> ignore
+                try
+                    PathAuthorization.validateArtifactRoot workspace.Root link
+                    |> expectErrorMatching "reparse artifact root" isUnauthorizedPath
+                    |> ignore
+                finally
+                    if Directory.Exists link then
+                        try Directory.Delete(link, false) with _ -> ()
+                    if Directory.Exists parent then
+                        try Directory.Delete(parent, true) with _ -> ()
+            })
 
-            try
-                PathAuthorization.validateArtifactRoot workspace.Root link
-                |> expectErrorMatching "reparse artifact root" isUnauthorizedPath
-                |> ignore
-            finally
-                if Directory.Exists link then
-                    try
-                        Directory.Delete(link, false)
-                    with _ ->
-                        ()
+        testCaseTask "a missing artifact root below a reparse point is rejected before creation" (fun () ->
+            task {
+                use workspace = new TempWorkspace()
+                let parent = Path.Combine(Path.GetTempPath(), "mcp-dotnet-reparse", Guid.NewGuid().ToString("N"))
+                let real = Path.Combine(parent, "real")
+                Directory.CreateDirectory real |> ignore
+                let link = Path.Combine(parent, "link")
+                let! _ = createDirectoryLink link real
 
-                if Directory.Exists parent then
-                    try
-                        Directory.Delete(parent, true)
-                    with _ ->
-                        ()
+                try
+                    PathAuthorization.validateArtifactRoot workspace.Root (Path.Combine(link, "new", "artifacts"))
+                    |> expectErrorMatching "reparse pre-creation" isUnauthorizedPath
+                    |> ignore
 
-        testCase "a missing artifact root below a reparse point is rejected before creation"
-        <| fun _ ->
-            use workspace = new TempWorkspace()
-            let parent = Path.Combine(Path.GetTempPath(), "mcp-dotnet-reparse", Guid.NewGuid().ToString("N"))
-            let real = Path.Combine(parent, "real")
-            Directory.CreateDirectory real |> ignore
-            let link = Path.Combine(parent, "link")
-            createDirectoryLink link real |> ignore
-
-            try
-                PathAuthorization.validateArtifactRoot workspace.Root (Path.Combine(link, "new", "artifacts"))
-                |> expectErrorMatching "reparse pre-creation" isUnauthorizedPath
-                |> ignore
-
-                Expect.isFalse
-                    (Directory.Exists(Path.Combine(real, "new")))
-                    "no directory was materialized through the junction"
-            finally
-                if Directory.Exists link then
-                    try
-                        Directory.Delete(link, false)
-                    with _ ->
-                        ()
-
-                if Directory.Exists parent then
-                    try
-                        Directory.Delete(parent, true)
-                    with _ ->
-                        ()
+                    Expect.isFalse
+                        (Directory.Exists(Path.Combine(real, "new")))
+                        "no directory was materialized through the junction"
+                finally
+                    if Directory.Exists link then
+                        try Directory.Delete(link, false) with _ -> ()
+                    if Directory.Exists parent then
+                        try Directory.Delete(parent, true) with _ -> ()
+            })
 
         testCase "artifact root with an invalid character returns typed invalid input"
         <| fun _ ->

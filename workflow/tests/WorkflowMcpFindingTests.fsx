@@ -13,6 +13,7 @@ open System.IO
 open System.Security.Cryptography
 open System.Text.Json
 open System.Text.Json.Nodes
+open System.Threading.Tasks
 
 let repoRoot = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", ".."))
 
@@ -43,32 +44,28 @@ let resolveDotnetHost () =
     | Some host -> Path.GetFullPath host
     | None -> failwithf "the required .NET host '%s' is not on PATH" names.Head
 
-let assertRequiredSdk (host: string) =
-    let startInfo = ProcessStartInfo()
-    startInfo.FileName <- host
-    startInfo.ArgumentList.Add "--version"
-    startInfo.RedirectStandardOutput <- true
-    startInfo.RedirectStandardError <- true
-    startInfo.UseShellExecute <- false
-    startInfo.CreateNoWindow <- true
-    startInfo.WorkingDirectory <- repoRoot
-    use child = Process.Start startInfo
-    let stdout = child.StandardOutput.ReadToEnd()
-    let stderr = child.StandardError.ReadToEnd()
-    child.WaitForExit()
+let assertRequiredSdk (host: string) : Async<unit> =
+    async {
+        let startInfo = ProcessStartInfo()
+        startInfo.FileName <- host
+        startInfo.ArgumentList.Add "--version"
+        startInfo.RedirectStandardOutput <- true
+        startInfo.RedirectStandardError <- true
+        startInfo.UseShellExecute <- false
+        startInfo.CreateNoWindow <- true
+        startInfo.WorkingDirectory <- repoRoot
+        use child = Process.Start startInfo
+        let stdoutTask = child.StandardOutput.ReadToEndAsync()
+        let stderrTask = child.StandardError.ReadToEndAsync()
+        do! child.WaitForExitAsync() |> Async.AwaitTask
+        let! stdout = stdoutTask |> Async.AwaitTask
+        let! stderr = stderrTask |> Async.AwaitTask
+        if child.ExitCode <> 0 then return failwithf "could not query the .NET SDK version from '%s': %s" host (stderr.Trim())
+        let selected = stdout.Trim()
+        if selected <> requiredSdk then return failwithf "the required SDK is '%s' but '%s' reports '%s'" requiredSdk host selected
+    }
 
-    if child.ExitCode <> 0 then
-        failwithf "could not query the .NET SDK version from '%s': %s" host (stderr.Trim())
-
-    let selected = stdout.Trim()
-
-    if selected <> requiredSdk then
-        failwithf "the required SDK is '%s' but '%s' reports '%s'" requiredSdk host selected
-
-let dotnetHost =
-    let host = resolveDotnetHost ()
-    assertRequiredSdk host
-    host
+let dotnetHost = resolveDotnetHost ()
 
 let requireReleaseEntry () =
     if not (File.Exists releaseEntryDll) then
@@ -130,26 +127,22 @@ let startMcp (workingDirectory: string) =
     startInfo.WorkingDirectory <- workingDirectory
     Process.Start startInfo
 
-let readProtocolLine (child: Process) name =
-    let task = child.StandardOutput.ReadLineAsync()
+let readProtocolLine (child: Process) name : Async<JsonNode> =
+    async {
+        let! line = child.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromMilliseconds 240000.0) |> Async.AwaitTask
+        if isNull line then return failwithf "%s: protocol stdout closed before a response arrived" name
+        let node = JsonNode.Parse line
+        if isNull node || isNull node.["jsonrpc"] || nodeString node.["jsonrpc"] <> "2.0" then
+            return failwithf "%s: protocol stdout line is not JSON-RPC 2.0: %s" name line
+        return node
+    }
 
-    if not (task.Wait(240000)) then
-        failwithf "%s: timed out waiting for a protocol response" name
-
-    if isNull task.Result then
-        failwithf "%s: protocol stdout closed before a response arrived" name
-
-    let node = JsonNode.Parse task.Result
-
-    if isNull node || isNull node.["jsonrpc"] || nodeString node.["jsonrpc"] <> "2.0" then
-        failwithf "%s: protocol stdout line is not JSON-RPC 2.0: %s" name task.Result
-
-    node
-
-let sendRequest (child: Process) name (request: JsonNode) =
-    child.StandardInput.WriteLine(request.ToJsonString())
-    child.StandardInput.Flush()
-    readProtocolLine child name
+let sendRequest (child: Process) name (request: JsonNode) : Async<JsonNode> =
+    async {
+        do! child.StandardInput.WriteLineAsync(request.ToJsonString()) |> Async.AwaitTask
+        do! child.StandardInput.FlushAsync() |> Async.AwaitTask
+        return! readProtocolLine child name
+    }
 
 let callTool (child: Process) name id tool arguments =
     sendRequest child name (jobj [ "jsonrpc", jstr "2.0"; "id", jint id; "method", jstr "tools/call"; "params", jobj [ "name", jstr tool; "arguments", arguments ] ])
@@ -215,23 +208,24 @@ Directory.CreateDirectory subWorkspace |> ignore
 let workspaceFile = Path.Combine(workspaceRoot, "not-a-directory.txt")
 File.WriteAllText(workspaceFile, "not a directory")
 
-// Junctions are used on Windows so the fixtures never depend on symbolic-link
-// privilege; symlinks are used elsewhere.
-let createDirectoryLink (link: string) (target: string) =
-    if OperatingSystem.IsWindows() then
-        let startInfo = ProcessStartInfo("cmd.exe", $"/c mklink /J \"{link}\" \"{target}\"")
-        startInfo.RedirectStandardOutput <- true
-        startInfo.RedirectStandardError <- true
-        startInfo.UseShellExecute <- false
-        use proc = Process.Start startInfo
-        let stdout = proc.StandardOutput.ReadToEnd()
-        let stderr = proc.StandardError.ReadToEnd()
-        proc.WaitForExit()
-
-        if proc.ExitCode <> 0 then
-            failwithf "could not create junction '%s': %s %s" link stdout stderr
-    else
-        Directory.CreateSymbolicLink(link, target) |> ignore
+// Junctions avoid depending on symlink privileges on Windows.
+let createDirectoryLink (link: string) (target: string) : Async<unit> =
+    async {
+        if OperatingSystem.IsWindows() then
+            let startInfo = ProcessStartInfo("cmd.exe", $"/c mklink /J \"{link}\" \"{target}\"")
+            startInfo.RedirectStandardOutput <- true
+            startInfo.RedirectStandardError <- true
+            startInfo.UseShellExecute <- false
+            use proc = Process.Start startInfo
+            let stdoutTask = proc.StandardOutput.ReadToEndAsync()
+            let stderrTask = proc.StandardError.ReadToEndAsync()
+            do! proc.WaitForExitAsync() |> Async.AwaitTask
+            let! stdout = stdoutTask |> Async.AwaitTask
+            let! stderr = stderrTask |> Async.AwaitTask
+            if proc.ExitCode <> 0 then failwithf "could not create junction '%s': %s %s" link stdout stderr
+        else
+            Directory.CreateSymbolicLink(link, target) |> ignore
+    }
 
 let removeLink (path: string) =
     if Directory.Exists path then Directory.Delete(path, false)
@@ -239,8 +233,6 @@ let removeLink (path: string) =
 
 let traversalLink = Path.Combine(workspaceRoot, "link")
 let trustedLink = Path.Combine(suiteRoot, "trusted-link")
-createDirectoryLink traversalLink outsideRoot
-createDirectoryLink trustedLink workspaceRoot
 
 let createArgs root id =
     jobj
@@ -269,23 +261,40 @@ let evidenceCommand id =
           "source", jstr "task-runtime-finding-tests"
           "summary", jstr "finding evidence" ]
 
-let mcp = startMcp workspaceRoot
+let stopMcp (child: Process) (stderrTask: Task<string>) : Async<unit> =
+    async {
+        if not child.HasExited then child.StandardInput.Close()
+        if not child.HasExited then
+            try do! child.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds 30.0) |> Async.AwaitTask
+            with _ ->
+                if not child.HasExited then child.Kill true
+                do! child.WaitForExitAsync() |> Async.AwaitTask
+        let! _ = child.StandardOutput.ReadToEndAsync() |> Async.AwaitTask
+        let! _ = stderrTask |> Async.AwaitTask
+        child.Dispose()
+    }
 
-try
+async {
+    do! assertRequiredSdk dotnetHost
+    do! createDirectoryLink traversalLink outsideRoot
+    do! createDirectoryLink trustedLink workspaceRoot
+    let mcp = startMcp workspaceRoot
+    let stderrTask = mcp.StandardError.ReadToEndAsync()
+
     // --- INFRA-005-D1: JSON-RPC 2.0 and request ID validation --------------
-    let wrongVersion =
+    let! wrongVersion =
         sendRequest mcp "D1 jsonrpc 1.0" (jobj [ "jsonrpc", jstr "1.0"; "id", jint 1; "method", jstr "ping"; "params", jobj [] ])
 
     let wrongVersionMessage = expectProtocolError "D1 jsonrpc 1.0" -32600 wrongVersion
     assertContains "D1 jsonrpc message" "jsonrpc must be exactly '2.0'" wrongVersionMessage
 
-    let missingVersion =
+    let! missingVersion =
         sendRequest mcp "D1 missing jsonrpc" (jobj [ "id", jint 2; "method", jstr "ping"; "params", jobj [] ])
 
     let missingVersionMessage = expectProtocolError "D1 missing jsonrpc" -32600 missingVersion
     assertContains "D1 missing jsonrpc message" "missing property 'jsonrpc'" missingVersionMessage
 
-    let nonStringVersion =
+    let! nonStringVersion =
         sendRequest mcp "D1 non-string jsonrpc" (jobj [ "jsonrpc", jdouble 2.0; "id", jint 3; "method", jstr "ping"; "params", jobj [] ])
 
     let nonStringVersionMessage = expectProtocolError "D1 non-string jsonrpc" -32600 nonStringVersion
@@ -295,25 +304,25 @@ try
         [ "bool", jbool true
           "array", jarr [ jint 1 ]
           "object", jobj [ "a", jint 1 ] ] do
-        let invalidId =
+        let! invalidId =
             sendRequest mcp $"D1 invalid id {label}" (jobj [ "jsonrpc", jstr "2.0"; "id", idNode; "method", jstr "ping"; "params", jobj [] ])
 
         let message = expectProtocolError $"D1 invalid id {label}" -32600 invalidId
         assertContains $"D1 invalid id {label} message" "id must be a string, number, or null" message
 
-    let nullId =
+    let! nullId =
         sendRequest mcp "D1 null id" (jobj [ "jsonrpc", jstr "2.0"; "id", JsonValue.Create(null: string); "method", jstr "ping"; "params", jobj [] ])
 
     assertTrue "D1 null id returns a result" (not (isJsonNull nullId.["result"]))
     assertTrue "D1 null id echoed as null" (isJsonNull nullId.["id"])
 
-    let stringId =
+    let! stringId =
         sendRequest mcp "D1 string id" (jobj [ "jsonrpc", jstr "2.0"; "id", jstr "abc"; "method", jstr "ping"; "params", jobj [] ])
 
     assertTrue "D1 string id returns a result" (not (isJsonNull stringId.["result"]))
     assertEqual "D1 string id echoed" "abc" (nodeString stringId.["id"])
 
-    let numberId =
+    let! numberId =
         sendRequest mcp "D1 number id" (jobj [ "jsonrpc", jstr "2.0"; "id", jint 7; "method", jstr "ping"; "params", jobj [] ])
 
     assertTrue "D1 number id returns a result" (not (isJsonNull numberId.["result"]))
@@ -348,13 +357,13 @@ try
           "unknown property 'result'" ]
 
     for label, command, expected in crossVariantCases do
-        let response = callTool mcp $"D2 {label}" 20 "task_apply" (applyArgs workspaceRoot "FND-999" (jint 0) command)
+        let! response = callTool mcp $"D2 {label}" 20 "task_apply" (applyArgs workspaceRoot "FND-999" (jint 0) command)
         let error = expectToolError $"D2 {label}" "INVALID_INPUT" response
         assertContains $"D2 {label} message" expected (nodeString error.["message"])
 
     // Positive control: a well-formed single-variant patch parses and reaches
     // the runtime (missing task), proving the strict check is not over-broad.
-    let validPatch =
+    let! validPatch =
         callTool
             mcp
             "D2 valid patch control"
@@ -368,92 +377,80 @@ try
     assertTrue "D2 valid patch control has no unknown-property error" (not (validPatchMessage.Contains("unknown property", StringComparison.Ordinal)))
 
     // --- INFRA-005-D3: negative expectedStateRevision ----------------------
-    let created = callTool mcp "D3 create" 30 "task_create" (createArgs workspaceRoot "FND-1")
+    let! created = callTool mcp "D3 create" 30 "task_create" (createArgs workspaceRoot "FND-1")
     let createdTask = (expectToolOk "D3 create" created).["task"]
     assertEqual "D3 created revision" 0 (createdTask.["stateRevision"].GetValue<int>())
 
-    let negative = callTool mcp "D3 negative" 31 "task_apply" (applyArgs workspaceRoot "FND-1" (jint -1) (evidenceCommand "E1"))
+    let! negative = callTool mcp "D3 negative" 31 "task_apply" (applyArgs workspaceRoot "FND-1" (jint -1) (evidenceCommand "E1"))
     let negativeError = expectToolError "D3 negative" "INVALID_INPUT" negative
     assertContains "D3 negative message" "must be non-negative" (nodeString negativeError.["message"])
 
-    let outOfRange = callTool mcp "D3 out of range" 32 "task_apply" (applyArgs workspaceRoot "FND-1" (jlong -2147483649L) (evidenceCommand "E2"))
+    let! outOfRange = callTool mcp "D3 out of range" 32 "task_apply" (applyArgs workspaceRoot "FND-1" (jlong -2147483649L) (evidenceCommand "E2"))
     let outOfRangeError = expectToolError "D3 out of range" "INVALID_INPUT" outOfRange
     assertContains "D3 out of range message" "must be a 32-bit integer" (nodeString outOfRangeError.["message"])
 
-    let fractional = callTool mcp "D3 fractional" 33 "task_apply" (applyArgs workspaceRoot "FND-1" (jdouble 1.5) (evidenceCommand "E3"))
+    let! fractional = callTool mcp "D3 fractional" 33 "task_apply" (applyArgs workspaceRoot "FND-1" (jdouble 1.5) (evidenceCommand "E3"))
     let fractionalError = expectToolError "D3 fractional" "INVALID_INPUT" fractional
     assertContains "D3 fractional message" "must be a 32-bit integer" (nodeString fractionalError.["message"])
 
-    let afterRejections = callTool mcp "D3 get after rejections" 34 "task_get" (getArgs workspaceRoot "FND-1")
+    let! afterRejections = callTool mcp "D3 get after rejections" 34 "task_get" (getArgs workspaceRoot "FND-1")
     let afterRejectionsTask = (expectToolOk "D3 get after rejections" afterRejections).["task"]
     assertEqual "D3 rejections preserve revision" 0 (afterRejectionsTask.["stateRevision"].GetValue<int>())
     assertEqual "D3 rejections preserve evidence" 0 (afterRejectionsTask.["evidence"].AsArray().Count)
 
-    let positive = callTool mcp "D3 positive" 35 "task_apply" (applyArgs workspaceRoot "FND-1" (jint 0) (evidenceCommand "E4"))
+    let! positive = callTool mcp "D3 positive" 35 "task_apply" (applyArgs workspaceRoot "FND-1" (jint 0) (evidenceCommand "E4"))
     assertEqual "D3 positive revision" 1 ((expectToolOk "D3 positive" positive).["task"].["stateRevision"].GetValue<int>())
 
     // --- ARCH-INFRA005-001: trusted workspace containment ------------------
-    let outside =
+    let! outside =
         callTool mcp "ARCH outside" 40 "task_get" (getArgs outsideRoot "FND-1")
 
     let outsideError = expectToolError "ARCH outside" "INVALID_INPUT" outside
     assertContains "ARCH outside message" "outside the trusted workspace" (nodeString outsideError.["message"])
 
-    let escaped =
+    let! escaped =
         callTool mcp "ARCH escaped" 41 "task_get" (getArgs (Path.Combine(workspaceRoot, "..", "outside")) "FND-1")
 
     let escapedError = expectToolError "ARCH escaped" "INVALID_INPUT" escaped
     assertContains "ARCH escaped message" "outside the trusted workspace" (nodeString escapedError.["message"])
 
-    let atRoot = callTool mcp "ARCH trusted root" 42 "task_get" (getArgs workspaceRoot "FND-1")
+    let! atRoot = callTool mcp "ARCH trusted root" 42 "task_get" (getArgs workspaceRoot "FND-1")
     expectToolOk "ARCH trusted root accepted" atRoot |> ignore
 
-    let subCreated = callTool mcp "ARCH sub create" 43 "task_create" (createArgs subWorkspace "FND-2")
+    let! subCreated = callTool mcp "ARCH sub create" 43 "task_create" (createArgs subWorkspace "FND-2")
     expectToolOk "ARCH sub create" subCreated |> ignore
-    let atSub = callTool mcp "ARCH sub get" 44 "task_get" (getArgs subWorkspace "FND-2")
+    let! atSub = callTool mcp "ARCH sub get" 44 "task_get" (getArgs subWorkspace "FND-2")
     expectToolOk "ARCH sub workspace accepted" atSub |> ignore
 
-    let missing =
+    let! missing =
         callTool mcp "ARCH missing" 45 "task_get" (getArgs (Path.Combine(workspaceRoot, "missing")) "FND-1")
 
     let missingError = expectToolError "ARCH missing" "INVALID_INPUT" missing
     assertContains "ARCH missing message" "project root does not exist" (nodeString missingError.["message"])
 
-    let fileWorkspace = callTool mcp "ARCH file" 46 "task_get" (getArgs workspaceFile "FND-1")
+    let! fileWorkspace = callTool mcp "ARCH file" 46 "task_get" (getArgs workspaceFile "FND-1")
     let fileError = expectToolError "ARCH file" "INVALID_INPUT" fileWorkspace
     assertContains "ARCH file message" "project root does not exist" (nodeString fileError.["message"])
 
-    let traversed = callTool mcp "ARCH traversal" 47 "task_get" (getArgs traversalLink "FND-1")
+    let! traversed = callTool mcp "ARCH traversal" 47 "task_get" (getArgs traversalLink "FND-1")
     let traversedError = expectToolError "ARCH traversal" "INVALID_INPUT" traversed
     assertContains "ARCH traversal message" "must not traverse a reparse point" (nodeString traversedError.["message"])
 
     printfn
         "OK task runtime MCP findings: D1 JSON-RPC 2.0/ID validation, D2 strict tagged DTO fields, D3 negative revision rejected without write, ARCH-INFRA005-001 trusted workspace containment and reparse rejection"
-finally
-    try
-        if not mcp.HasExited then mcp.Kill true
-    with _ ->
-        ()
+    do! stopMcp mcp stderrTask
 
-    mcp.Dispose()
-
-// The trusted workspace itself being a reparse point must fail closed. A second
-// host is anchored at a junction to the real workspace.
-let mcpLinked = startMcp trustedLink
-
-try
-    let response = callTool mcpLinked "ARCH trusted reparse" 50 "task_get" (getArgs trustedLink "FND-1")
+    let mcpLinked = startMcp trustedLink
+    let linkedStderrTask = mcpLinked.StandardError.ReadToEndAsync()
+    let! response = callTool mcpLinked "ARCH trusted reparse" 50 "task_get" (getArgs trustedLink "FND-1")
     let error = expectToolError "ARCH trusted reparse" "INVALID_INPUT" response
     assertContains "ARCH trusted reparse message" "trusted workspace must not be a reparse point" (nodeString error.["message"])
-finally
-    try
-        if not mcpLinked.HasExited then mcpLinked.Kill true
-    with _ ->
-        ()
-
-    mcpLinked.Dispose()
+    do! stopMcp mcpLinked linkedStderrTask
 
     [ traversalLink; trustedLink ] |> List.iter removeLink
 
     if Directory.Exists suiteRoot && suiteRoot.Contains("taskruntime-findings-", StringComparison.Ordinal) then
         Directory.Delete(suiteRoot, true)
+}
+// Standalone entry bridge: FSI requires one synchronous top-level boundary.
+|> Async.RunSynchronously

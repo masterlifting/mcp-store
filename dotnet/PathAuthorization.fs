@@ -46,7 +46,7 @@ module PathAuthorization =
         with
         | :? FileNotFoundException
         | :? DirectoryNotFoundException -> false
-        | _ -> true
+        | :? UnauthorizedAccessException -> true
 
     let workspaceNamespace (canonicalWorkspace: string) : string =
         // Windows path comparison is case-insensitive, so one workspace must not
@@ -98,8 +98,11 @@ module PathAuthorization =
                     Error(UnauthorizedPath "trusted workspace must not be a reparse point")
                 else
                     Ok root
-        with error ->
-            Error(InvalidInput $"workspace root is invalid: {error.Message}")
+        with
+        | :? IOException as error -> Error(InvalidInput $"workspace root is invalid: {error.Message}")
+        | :? UnauthorizedAccessException as error -> Error(InvalidInput $"workspace root is invalid: {error.Message}")
+        | :? ArgumentException as error -> Error(InvalidInput $"workspace root is invalid: {error.Message}")
+        | :? NotSupportedException as error -> Error(InvalidInput $"workspace root is invalid: {error.Message}")
 
     let validateArtifactRoot workspaceRoot artifactRoot : Result<string, VerificationError> =
         try
@@ -128,8 +131,11 @@ module PathAuthorization =
                         do! validateAncestors None normalized
                         return normalized
             }
-        with error ->
-            Error(InvalidInput $"artifact root is invalid: {error.Message}")
+        with
+        | :? IOException as error -> Error(InvalidInput $"artifact root is invalid: {error.Message}")
+        | :? UnauthorizedAccessException as error -> Error(InvalidInput $"artifact root is invalid: {error.Message}")
+        | :? ArgumentException as error -> Error(InvalidInput $"artifact root is invalid: {error.Message}")
+        | :? NotSupportedException as error -> Error(InvalidInput $"artifact root is invalid: {error.Message}")
 
     let ensureArtifactRoot (artifactRoot: string) : Result<unit, VerificationError> =
         try
@@ -146,7 +152,9 @@ module PathAuthorization =
                     do! validateAncestors None normalized
                     return ()
             }
-        with error ->
+        with
+        | :? IOException as error -> Error(ArtifactFailure $"artifact root could not be created: {error.Message}")
+        | :? UnauthorizedAccessException as error ->
             Error(ArtifactFailure $"artifact root could not be created: {error.Message}")
 
     let private authorizeTarget root value : Result<AuthorizedPath, VerificationError> =
@@ -181,8 +189,11 @@ module PathAuthorization =
                             { WorkspaceRoot = root
                               Target = Some fullTarget }
             }
-        with error ->
-            Error(InvalidInput $"target is invalid: {error.Message}")
+        with
+        | :? IOException as error -> Error(InvalidInput $"target is invalid: {error.Message}")
+        | :? UnauthorizedAccessException as error -> Error(InvalidInput $"target is invalid: {error.Message}")
+        | :? ArgumentException as error -> Error(InvalidInput $"target is invalid: {error.Message}")
+        | :? NotSupportedException as error -> Error(InvalidInput $"target is invalid: {error.Message}")
 
     let authorize workspaceRoot target : Result<AuthorizedPath, VerificationError> =
         result {

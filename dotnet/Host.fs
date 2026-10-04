@@ -141,6 +141,7 @@ module private McpHost =
         | VerificationError.ProcessStartFailure _ -> "PROCESS_START_FAILURE"
         | VerificationError.ArtifactQuotaExceeded _ -> "ARTIFACT_QUOTA_EXCEEDED"
         | VerificationError.ArtifactFailure _ -> "ARTIFACT_FAILURE"
+        | VerificationError.InternalFailure _ -> "INTERNAL_FAILURE"
 
     let private boundedMessage (message: string) =
         let value = if isNull message then "operation failed" else message
@@ -375,9 +376,12 @@ module private McpHost =
                     match parseDetails arguments with
                     | Error message -> return failure (VerificationError.InvalidInput message)
                     | Ok request ->
-                        match service.Details request with | Ok value -> return detailsResult value | Error error -> return failure error
+                        let! result = service.Details request
+                        match result with | Ok value -> return detailsResult value | Error error -> return failure error
                 | _ -> return failure (VerificationError.InvalidInput $"tool '{name}' is not registered")
-            with _ -> return failure (VerificationError.ArtifactFailure "dotnet operation failed")
+            with
+            | :? OperationCanceledException as error -> return raise error
+            | _ -> return failure (VerificationError.InternalFailure "dotnet operation failed")
         }
 
     let private handleImmediate id methodName parameters =
@@ -410,82 +414,108 @@ module private McpHost =
         | "shutdown" -> response id (JsonObject())
         | _ -> protocolError id -32601 $"method '{methodName}' is not supported"
 
-    let run (service: DotnetService) =
-        let outputGate = obj ()
-        let logGate = obj ()
-        let active = ConcurrentDictionary<string, CancellationTokenSource>(StringComparer.Ordinal)
-        let running = ConcurrentBag<Task>()
-        use shutdown = new CancellationTokenSource()
-        let mutable accepting = true
+    let run (service: DotnetService) : Async<unit> =
+        async {
+            let outputGate = new SemaphoreSlim(1, 1)
+            let logGate = obj ()
+            let active = ConcurrentDictionary<string, CancellationTokenSource>(StringComparer.Ordinal)
+            let running = ConcurrentBag<Task>()
+            use shutdown = new CancellationTokenSource()
+            let mutable accepting = true
 
-        let write output = lock outputGate (fun () -> printfn "%s" output; Console.Out.Flush())
-        let log message = lock logGate (fun () -> Console.Error.WriteLine(boundedMessage message))
+            let write (output: string) =
+                task {
+                    do! outputGate.WaitAsync()
 
-        let dispatch id name arguments =
-            let cancellation = CancellationTokenSource.CreateLinkedTokenSource(shutdown.Token)
+                    try
+                        do! Console.Out.WriteLineAsync output
+                        do! Console.Out.FlushAsync()
+                    finally
+                        outputGate.Release() |> ignore
+                }
 
-            if not (active.TryAdd(id, cancellation)) then
-                cancellation.Dispose()
-                write (protocolError id -32600 "request id is already active")
-            else
+            let log message = lock logGate (fun () -> Console.Error.WriteLine(boundedMessage message))
+
+            let dispatch id name arguments =
                 let work =
                     task {
-                        try
-                            let! result = invokeTool service name arguments cancellation.Token
-                            write (response id result)
-                            let runId =
-                                result.AsObject()["structuredContent"]
-                                |> Option.ofObj
-                                |> Option.bind (fun value -> Option.ofObj (value.AsObject()["runId"]))
-                                |> Option.map (fun value -> value.GetValue<string>())
-                                |> Option.defaultValue "n/a"
-                            log $"{name} completed runId={runId}"
-                        with error ->
-                            write (response id (failure (VerificationError.ArtifactFailure "dotnet operation failed")))
-                            log $"{name} failed: {error.Message}"
+                        let cancellation = CancellationTokenSource.CreateLinkedTokenSource(shutdown.Token)
 
-                        let mutable removed: CancellationTokenSource = null
-                        active.TryRemove(id, &removed) |> ignore
-                        cancellation.Dispose()
+                        if not (active.TryAdd(id, cancellation)) then
+                            cancellation.Dispose()
+                            do! write (protocolError id -32600 "request id is already active")
+                        else
+                            try
+                                try
+                                    let! result = invokeTool service name arguments cancellation.Token
+                                    do! write (response id result)
+
+                                    let runId =
+                                        result.AsObject()["structuredContent"]
+                                        |> Option.ofObj
+                                        |> Option.bind (fun value -> Option.ofObj (value.AsObject()["runId"]))
+                                        |> Option.map (fun value -> value.GetValue<string>())
+                                        |> Option.defaultValue "n/a"
+
+                                    log $"{name} completed runId={runId}"
+                                with
+                                | :? OperationCanceledException -> log $"{name} cancelled"
+                                | error ->
+                                    do! write (response id (failure (VerificationError.InternalFailure "dotnet operation failed")))
+                                    log $"{name} failed: {error.Message}"
+                            finally
+                                let mutable removed: CancellationTokenSource = null
+                                active.TryRemove(id, &removed) |> ignore
+                                cancellation.Dispose()
                     }
+
                 running.Add(work)
 
-        while accepting do
-            let line = Console.ReadLine()
-            if isNull line then
-                accepting <- false
-                shutdown.Cancel()
-            elif not (String.IsNullOrWhiteSpace line) then
-                match parseRequest line with
-                | Error message -> write (protocolError "null" -32600 message)
-                | Ok(id, methodName, parameters) ->
-                    match methodName, id with
-                    | "notifications/initialized", _ -> ()
-                    | "notifications/cancelled", _ ->
-                        match cancelledRequestId parameters with
-                        | Ok requestId ->
-                            match active.TryGetValue requestId with
-                            | true, cancellation ->
-                                try cancellation.Cancel() with :? ObjectDisposedException -> ()
-                            | false, _ -> ()
-                        | Error message -> log $"ignored cancellation notification: {message}"
-                    | "exit", _ ->
-                        accepting <- false
-                        shutdown.Cancel()
-                    | "tools/call", Some requestId ->
-                        match parseToolCall parameters with
-                        | Error message -> write (protocolError requestId -32602 message)
-                        | Ok(name, arguments) -> dispatch requestId name arguments
-                    | _, Some requestId ->
-                        let output = handleImmediate requestId methodName parameters
-                        write output
-                        if methodName = "shutdown" then
+            while accepting do
+                let! line = Console.In.ReadLineAsync() |> Async.AwaitTask
+
+                if isNull line then
+                    accepting <- false
+                    shutdown.Cancel()
+                elif not (String.IsNullOrWhiteSpace line) then
+                    match parseRequest line with
+                    | Error message -> do! write (protocolError "null" -32600 message) |> Async.AwaitTask
+                    | Ok(id, methodName, parameters) ->
+                        match methodName, id with
+                        | "notifications/initialized", _ -> ()
+                        | "notifications/cancelled", _ ->
+                            match cancelledRequestId parameters with
+                            | Ok requestId ->
+                                match active.TryGetValue requestId with
+                                | true, cancellation ->
+                                    try cancellation.Cancel() with :? ObjectDisposedException -> ()
+                                | false, _ -> ()
+                            | Error message -> log $"ignored cancellation notification: {message}"
+                        | "exit", _ ->
                             accepting <- false
                             shutdown.Cancel()
-                    | _, None -> ()
+                        | "tools/call", Some requestId ->
+                            match parseToolCall parameters with
+                            | Error message -> do! write (protocolError requestId -32602 message) |> Async.AwaitTask
+                            | Ok(name, arguments) -> dispatch requestId name arguments
+                        | _, Some requestId ->
+                            let output = handleImmediate requestId methodName parameters
+                            do! write output |> Async.AwaitTask
 
-        shutdown.Cancel()
-        try Task.WaitAll(running.ToArray()) with :? AggregateException -> log "one or more dotnet operations did not shut down cleanly"
+                            if methodName = "shutdown" then
+                                accepting <- false
+                                shutdown.Cancel()
+                        | _, None -> ()
+
+            shutdown.Cancel()
+            let pending = running.ToArray()
+
+            if pending.Length > 0 then
+                try
+                    do! Task.WhenAll pending |> Async.AwaitTask
+                with :? AggregateException ->
+                    log "one or more dotnet operations did not shut down cleanly"
+        }
 
 module Program =
     [<EntryPoint>]
@@ -506,7 +536,9 @@ module Program =
                             artifactRoot = artifactRoot
                         )
 
-                    McpHost.run service
+                    // Standalone entry bridge: the only synchronous wait in the
+                    // dotnet MCP flow; the host itself composes asynchronously.
+                    McpHost.run service |> Async.RunSynchronously
                     0
                 with error ->
                     let message =

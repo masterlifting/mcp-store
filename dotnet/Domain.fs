@@ -1,6 +1,7 @@
 namespace Mcp.Dotnet
 
 open System
+open System.Threading.Tasks
 
 [<RequireQualifiedAccess>]
 type VerificationOperation =
@@ -32,6 +33,7 @@ type VerificationError =
     | ProcessStartFailure of string
     | ArtifactQuotaExceeded of string
     | ArtifactFailure of string
+    | InternalFailure of string
 
 type RunId = private RunId of string
 
@@ -198,6 +200,7 @@ module VerificationError =
         | ProcessStartFailure text -> text
         | ArtifactQuotaExceeded text -> text
         | ArtifactFailure text -> text
+        | InternalFailure text -> text
 
 module VerificationStatus =
     let ofProcessStatus status =
@@ -274,3 +277,28 @@ type internal ResultBuilder() =
 [<AutoOpen>]
 module internal ResultWorkflow =
     let result = ResultBuilder()
+
+[<RequireQualifiedAccess>]
+module internal TaskAwait =
+    // Async.AwaitTask reports a faulted task as AggregateException; surface its
+    // single operational cause so focused catches can classify it. Multi-fault
+    // aggregates and cancellation observables are re-raised unchanged.
+    let operational (work: Task<'T>) : Async<'T> =
+        async {
+            try
+                return! Async.AwaitTask work
+            with
+            | :? AggregateException as aggregate when aggregate.InnerExceptions.Count = 1 ->
+                return raise aggregate.InnerExceptions.[0]
+            | error -> return raise error
+        }
+
+    let complete (work: Task) : Async<unit> =
+        async {
+            try
+                do! Async.AwaitTask work
+            with
+            | :? AggregateException as aggregate when aggregate.InnerExceptions.Count = 1 ->
+                return raise aggregate.InnerExceptions.[0]
+            | error -> return raise error
+        }

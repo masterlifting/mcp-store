@@ -46,8 +46,10 @@ module ProcessRunner =
         try
             if not child.HasExited then
                 child.Kill(true)
-        with _ ->
-            ()
+        with
+        | :? InvalidOperationException -> ()
+        | :? System.ComponentModel.Win32Exception -> ()
+        | :? NotSupportedException -> ()
 
     let runWithQuotas invocation paths cancellationToken quotas (quotaCheck: unit -> Result<unit, VerificationError>) : Task<Result<CapturedProcess, VerificationError>> =
         task {
@@ -111,7 +113,7 @@ module ProcessRunner =
                             if obj.ReferenceEquals(winner, quotaTask) && quotaFailure.IsSome then
                                 try
                                     do! waitTask
-                                with _ ->
+                                with :? OperationCanceledException ->
                                     ()
                             else
                                 try
@@ -133,7 +135,7 @@ module ProcessRunner =
 
                             try
                                 do! quotaTask
-                            with _ ->
+                            with :? OperationCanceledException ->
                                 ()
 
                             if quotaFailure.IsSome then
@@ -157,8 +159,18 @@ module ProcessRunner =
                                           StderrBytes = byteCounts.[1] }
                 with
                 | :? OperationCanceledException when cancellationToken.IsCancellationRequested ->
+                    // Caller cancellation is a semantic outcome, not an error; no
+                    // output was retained before capture completed.
                     terminate child
-                    return Error(ProcessStartFailure "dotnet process was cancelled before output capture completed")
+
+                    return
+                        Ok
+                            { Status = ProcessStatus.Cancelled
+                              Duration = stopwatch.Elapsed
+                              StdoutPath = paths.Stdout
+                              StderrPath = paths.Stderr
+                              StdoutBytes = 0L
+                              StderrBytes = 0L }
                 | error ->
                     terminate child
                     return Error(ProcessStartFailure $"dotnet process execution failed: {error.Message}")

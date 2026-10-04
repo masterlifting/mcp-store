@@ -15,4 +15,6 @@ let main argv =
               ProcessIntegrationTests.tests
               McpHostTests.tests
               QuotaTests.tests
-              DotnetSchemaParityTests.tests ])
+              DotnetSchemaParityTests.tests
+              SyncOverAsyncCheckerTests.tests
+              AsyncTypedFailureTests.tests ])

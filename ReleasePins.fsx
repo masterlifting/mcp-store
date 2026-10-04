@@ -1,19 +1,55 @@
-// Repo-shared consumer-pin mechanism. Each producer keeps its release policy,
-// paths, and diagnostics local; this module single-sources the clean-HEAD
-// revision validation and the exact five-field pin shape so the producers
-// cannot drift. The file name supplies the implicit module name, so `#load`
-// exposes these as ReleasePins.*.
+// Repo-shared consumer-pin mechanism; the file name is the implicit module name
+// for `#load`. Single-sources clean-HEAD revision validation and the exact
+// five-field pin shape so producer pins cannot drift.
 #load "BuildProvenance.fsx"
 
 open System
 open System.IO
-open System.Security.Cryptography
-open System.Text.Json
 open System.Text.Json.Nodes
+open BuildProvenance
 
-let private sha256 path =
-    use stream = File.OpenRead path
-    SHA256.HashData stream |> Convert.ToHexString |> fun value -> value.ToLowerInvariant()
+// The expected field list and diagnostics stay producer-local; only the
+// parse/compare mechanics are shared.
+let validateManifestIdentity
+    (manifestPath: string)
+    (expected: (string * string) list)
+    : Async<Result<unit, ReleaseError>> =
+    async {
+        match! readAllTextAsync manifestPath with
+        | Error error -> return Error error
+        | Ok text ->
+            try
+                let node = JsonNode.Parse text
+
+                if isNull node then
+                    return Error(MalformedArtifact(manifestPath, "the document is empty"))
+                else
+                    let document = node.AsObject()
+
+                    let mismatch =
+                        expected
+                        |> List.tryPick (fun (field, expectedValue) ->
+                            if not (document.ContainsKey field) || isNull document[field] then
+                                Some(MalformedArtifact(manifestPath, $"the '{field}' field is missing"))
+                            else
+                                let actual = document[field].GetValue<string>()
+
+                                if actual = expectedValue then
+                                    None
+                                else
+                                    Some(IdentityMismatch(field, expectedValue, actual)))
+
+                    match mismatch with
+                    | Some error -> return Error error
+                    | None -> return Ok()
+            with
+            | :? System.Text.Json.JsonException as error ->
+                return Error(MalformedArtifact(manifestPath, $"the manifest is not valid JSON: {error.Message}"))
+            | :? FormatException as error ->
+                return Error(MalformedArtifact(manifestPath, $"the manifest is not valid JSON: {error.Message}"))
+            | :? InvalidOperationException as error ->
+                return Error(MalformedArtifact(manifestPath, $"the manifest is not valid JSON: {error.Message}"))
+    }
 
 // Validates the packaged manifest against the committed clean HEAD, then writes
 // the canonical consumer pin for one producer. Returns the archive hash,
@@ -26,20 +62,23 @@ let writeConsumerPins
     (componentId: string)
     (archiveName: string)
     (assetUri: string)
-    =
-    BuildProvenance.assertCleanTree root
-    let revision = BuildProvenance.assertManifestRevision manifestPath (BuildProvenance.committedHead root)
-    let archiveSha256 = sha256 archivePath
-    let manifestSha256 = sha256 manifestPath
+    : Async<Result<string * string * string, ReleaseError>> =
+    releaseResult {
+        do! BuildProvenance.assertCleanTree root
+        let! head = BuildProvenance.committedHead root
+        let! revision = BuildProvenance.assertManifestRevision manifestPath head
+        let! archiveSha256 = BuildProvenance.sha256FileAsync archivePath
+        let! manifestSha256 = BuildProvenance.sha256FileAsync manifestPath
 
-    let pins = JsonObject()
-    let value = JsonObject()
-    value["assetName"] <- JsonValue.Create archiveName
-    value["assetUri"] <- JsonValue.Create assetUri
-    value["archiveSha256"] <- JsonValue.Create archiveSha256
-    value["manifestSha256"] <- JsonValue.Create manifestSha256
-    value["revision"] <- JsonValue.Create revision
-    pins[componentId] <- value
+        let pins = JsonObject()
+        let value = JsonObject()
+        value["assetName"] <- JsonValue.Create archiveName
+        value["assetUri"] <- JsonValue.Create assetUri
+        value["archiveSha256"] <- JsonValue.Create archiveSha256
+        value["manifestSha256"] <- JsonValue.Create manifestSha256
+        value["revision"] <- JsonValue.Create revision
+        pins[componentId] <- value
 
-    File.WriteAllText(outputPath, pins.ToJsonString(JsonSerializerOptions(WriteIndented = true)))
-    archiveSha256, manifestSha256, revision
+        do! BuildProvenance.writeJsonAsync outputPath (pins :> JsonNode)
+        return archiveSha256, manifestSha256, revision
+    }

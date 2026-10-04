@@ -16,34 +16,29 @@ module private DetailSource =
         |> List.filter (fun item -> item.Outcome = TestOutcome.Failed)
         |> List.map Budgets.testText
 
-    let output stdoutPath stderrPath =
-        if not (File.Exists stdoutPath) || not (File.Exists stderrPath) then
-            Error(MissingArtifact "captured output artifact is missing")
-        else
-            let readLines path =
+    // The detail boundary owns reading both captured output artifacts and
+    // converts failures here; callers page over the resulting owned list.
+    let output stdoutPath stderrPath : Async<Result<string list, VerificationError>> =
+        async {
+            if not (File.Exists stdoutPath) || not (File.Exists stderrPath) then
+                return Error(MissingArtifact "captured output artifact is missing")
+            else
                 try
-                    Ok(
-                        seq {
-                            use reader = new StreamReader(path: string)
-                            let mutable line = reader.ReadLine()
+                    let! stdoutLines = TaskAwait.operational (File.ReadAllLinesAsync stdoutPath)
+                    let! stderrLines = TaskAwait.operational (File.ReadAllLinesAsync stderrPath)
 
-                            while not (isNull line) do
-                                yield line
-                                line <- reader.ReadLine()
-                        }
-                    )
-                with error ->
-                    Error(MissingArtifact $"captured output artifact could not be read: {error.Message}")
-
-            result {
-                let! stdout = readLines stdoutPath
-                let! stderr = readLines stderrPath
-
-                return
-                    Seq.append
-                        (stdout |> Seq.map (fun line -> $"stdout: {line}"))
-                        (stderr |> Seq.map (fun line -> $"stderr: {line}"))
-            }
+                    return
+                        Ok(
+                            [ yield! stdoutLines |> Array.map (fun line -> $"stdout: {line}")
+                              yield! stderrLines |> Array.map (fun line -> $"stderr: {line}") ]
+                        )
+                with
+                | :? OperationCanceledException as error -> return raise error
+                | :? IOException as error ->
+                    return Error(MissingArtifact $"captured output artifact could not be read: {error.Message}")
+                | :? UnauthorizedAccessException as error ->
+                    return Error(MissingArtifact $"captured output artifact could not be read: {error.Message}")
+        }
 
 type DotnetService(
     workspaceRoot: string,
@@ -91,7 +86,10 @@ type DotnetService(
 
     let readOutput execution =
         task {
-            match ArtifactFiles.read execution.StdoutPath, ArtifactFiles.read execution.StderrPath with
+            let! stdoutResult = ArtifactFiles.readAsync execution.StdoutPath
+            let! stderrResult = ArtifactFiles.readAsync execution.StderrPath
+
+            match stdoutResult, stderrResult with
             | Ok stdout, Ok stderr -> return Ok(stdout, stderr)
             | Error error, _ -> return Error error
             | _, Error error -> return Error error
@@ -107,7 +105,7 @@ type DotnetService(
                   MetadataPath = handle.Paths.Metadata
                   ParsedEvidencePath = handle.Paths.ParsedEvidence }
 
-            match ArtifactFiles.writeEvidence handle evidence with
+            match! ArtifactFiles.writeEvidence handle evidence with
             | Error error -> return Error error
             | Ok() -> return registry.Complete(handle, evidence)
         }
@@ -196,7 +194,7 @@ type DotnetService(
                             match outputResult with
                             | Error error -> return abort handle error
                             | Ok(stdout, stderr) ->
-                                let evidence = Parsers.tests handle.Paths.Trx stdout stderr
+                                let! evidence = Parsers.tests handle.Paths.Trx stdout stderr
                                 let diagnostics = Parsers.buildDiagnostics stdout stderr
 
                                 let! completion =
@@ -213,34 +211,43 @@ type DotnetService(
                                     return Ok(Budgets.compactTest effectiveBudgets handle.RunId processExecution evidence)
         }
 
-    member _.Details(request: DetailRequest) : Result<DetailPage, VerificationError> =
-        let runIdResult =
-            if String.IsNullOrWhiteSpace request.RunId then
-                Error(UnknownRunId "runId must be non-empty")
-            else
-                Ok request.RunId
+    member _.Details(request: DetailRequest) : Task<Result<DetailPage, VerificationError>> =
+        task {
+            let runIdResult =
+                if String.IsNullOrWhiteSpace request.RunId then
+                    Error(UnknownRunId "runId must be non-empty")
+                else
+                    Ok request.RunId
 
-        result {
-            let! _ = runIdResult
-            let! evidence = registry.Get request.RunId
+            match runIdResult with
+            | Error error -> return Error error
+            | Ok _ ->
+                match registry.Get request.RunId with
+                | Error error -> return Error error
+                | Ok evidence ->
+                    if not (File.Exists evidence.MetadataPath) || not (File.Exists evidence.ParsedEvidencePath) then
+                        return Error(MissingArtifact "verification evidence artifact is missing")
+                    else
+                        let! valuesResult =
+                            match request.Kind with
+                            | DetailKind.Errors ->
+                                task { return Ok(DetailSource.diagnosticValues DiagnosticSeverity.ErrorDiagnostic evidence.Diagnostics) }
+                            | DetailKind.Warnings ->
+                                task { return Ok(DetailSource.diagnosticValues DiagnosticSeverity.WarningDiagnostic evidence.Diagnostics) }
+                            | DetailKind.FailedTests ->
+                                match evidence.Tests with
+                                | Some tests when tests.TrxAvailable -> task { return Ok(DetailSource.failedTests tests.Cases) }
+                                | Some _ ->
+                                    task { return Error(UnavailableTestDetail "failed-test details require a retained TRX artifact") }
+                                | None ->
+                                    task { return Error(UnavailableTestDetail "failed-test details are unavailable for this run") }
+                            | DetailKind.Output ->
+                                DetailSource.output evidence.Process.StdoutPath evidence.Process.StderrPath
+                                |> Async.StartImmediateAsTask
 
-            if not (File.Exists evidence.MetadataPath) || not (File.Exists evidence.ParsedEvidencePath) then
-                return! Error(MissingArtifact "verification evidence artifact is missing")
-
-            let! values =
-                match request.Kind with
-                | DetailKind.Errors ->
-                    Ok(DetailSource.diagnosticValues DiagnosticSeverity.ErrorDiagnostic evidence.Diagnostics |> Seq.ofList)
-                | DetailKind.Warnings ->
-                    Ok(DetailSource.diagnosticValues DiagnosticSeverity.WarningDiagnostic evidence.Diagnostics |> Seq.ofList)
-                | DetailKind.FailedTests ->
-                    match evidence.Tests with
-                    | Some tests when tests.TrxAvailable -> Ok(DetailSource.failedTests tests.Cases |> Seq.ofList)
-                    | Some _ -> Error(UnavailableTestDetail "failed-test details require a retained TRX artifact")
-                    | None -> Error(UnavailableTestDetail "failed-test details are unavailable for this run")
-                | DetailKind.Output -> DetailSource.output evidence.Process.StdoutPath evidence.Process.StderrPath
-
-            return! Budgets.pageSequence effectiveBudgets request values
+                        match valuesResult with
+                        | Error error -> return Error error
+                        | Ok values -> return Budgets.page effectiveBudgets request values
         }
 
     member _.EndSession() = registry.EndSession()

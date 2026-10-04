@@ -1,8 +1,6 @@
-// Repo-shared distribution-contract assertions. Producer tests keep their own
-// setup (clean/build, script invocation, and the Dotnet PE no-debug check) while
-// these generated artifact, manifest, archive, and pin checks stay identical
-// across producers. The file name supplies the implicit module name, so `#load`
-// exposes these as DistributionTestHelper.*.
+// Repo-shared distribution-contract assertions; the file name is the implicit
+// module name for `#load`. Assertion failure stays a test-framework exception
+// while only effectful acquisition is asynchronous and Result-valued.
 #load "BuildProvenance.fsx"
 
 open System
@@ -10,6 +8,8 @@ open System.IO
 open System.IO.Compression
 open System.Security.Cryptography
 open System.Text.Json.Nodes
+open System.Threading
+open BuildProvenance
 
 type Producer =
     { ComponentId: string
@@ -56,120 +56,142 @@ let assertConsumerRelativePath label (path: string) =
     assertTrue $"{label} has no traversal or empty segments"
         (segments |> Array.forall (fun segment -> segment <> "" && segment <> "." && segment <> ".."))
 
-let sha256 path =
-    use stream = File.OpenRead path
-    SHA256.HashData stream |> Convert.ToHexString |> fun value -> value.ToLowerInvariant()
+let private hashStreamAsync (stream: Stream) : Async<string> =
+    async {
+        let! bytes = SHA256.HashDataAsync(stream, CancellationToken.None).AsTask() |> Async.AwaitTask
+        return bytes |> Convert.ToHexString |> fun value -> value.ToLowerInvariant()
+    }
 
-let sha256Stream (stream: Stream) =
-    SHA256.HashData stream |> Convert.ToHexString |> fun value -> value.ToLowerInvariant()
+let sha256Async (path: string) : Async<string> =
+    async {
+        use stream = File.OpenRead path
+        return! hashStreamAsync stream
+    }
 
-let assertDistributionContract (producer: Producer) (layout: Layout) =
-    let archiveFiles = producer.PublishedFiles @ [ "NOTICE.txt"; "distribution.json" ] |> List.sort
+// Converts the typed provenance failure into the test-framework assertion
+// exception that this helper reports to its callers.
+let private headRevisionAsync (repoRoot: string) : Async<string> =
+    async {
+        match! BuildProvenance.committedHead repoRoot with
+        | Ok value -> return value
+        | Error error -> return failwith (ReleaseError.message error)
+    }
 
-    for path in [ layout.DistributionDirectory; layout.ArchivePath; layout.ManifestPath; layout.PinsPath ] do
-        assertTrue ($"required release artifact exists: {path}") (File.Exists path || Directory.Exists path)
+let assertDistributionContract (producer: Producer) (layout: Layout) : Async<unit> =
+    async {
+        let archiveFiles = producer.PublishedFiles @ [ "NOTICE.txt"; "distribution.json" ] |> List.sort
 
-    let manifest = JsonNode.Parse(File.ReadAllText layout.ManifestPath).AsObject()
-    assertEqual "manifest id" producer.ComponentId (manifest["id"].GetValue<string>())
-    assertEqual "manifest version" producer.Version (manifest["version"].GetValue<string>())
-    assertEqual "manifest sdk" producer.SdkVersion (manifest["sdk"].GetValue<string>())
-    assertEqual "manifest archive" producer.ArchiveName (manifest["archive"].GetValue<string>())
-    assertEqual "manifest entry DLL" producer.EntryDll (manifest["entryDll"].GetValue<string>())
+        for path in [ layout.DistributionDirectory; layout.ArchivePath; layout.ManifestPath; layout.PinsPath ] do
+            assertTrue ($"required release artifact exists: {path}") (File.Exists path || Directory.Exists path)
 
-    let manifestRevision = manifest["revision"].GetValue<string>()
+        let! manifestText = File.ReadAllTextAsync layout.ManifestPath |> Async.AwaitTask
+        let manifest = JsonNode.Parse(manifestText).AsObject()
+        assertEqual "manifest id" producer.ComponentId (manifest["id"].GetValue<string>())
+        assertEqual "manifest version" producer.Version (manifest["version"].GetValue<string>())
+        assertEqual "manifest sdk" producer.SdkVersion (manifest["sdk"].GetValue<string>())
+        assertEqual "manifest archive" producer.ArchiveName (manifest["archive"].GetValue<string>())
+        assertEqual "manifest entry DLL" producer.EntryDll (manifest["entryDll"].GetValue<string>())
 
-    assertTrue "manifest revision is a full commit SHA"
-        (manifestRevision.Length = 40 && manifestRevision |> Seq.forall Uri.IsHexDigit)
+        let manifestRevision = manifest["revision"].GetValue<string>()
 
-    let headRevision = BuildProvenance.committedHead layout.RepoRoot
-    assertEqual "manifest revision equals the committed HEAD" headRevision manifestRevision
+        assertTrue "manifest revision is a full commit SHA"
+            (manifestRevision.Length = 40 && manifestRevision |> Seq.forall Uri.IsHexDigit)
 
-    let manifestEntries =
-        manifest["files"].AsArray()
-        |> Seq.map (fun value ->
-            let entry = value.AsObject()
+        let! headRevision = headRevisionAsync layout.RepoRoot
+        assertEqual "manifest revision equals the committed HEAD" headRevision manifestRevision
 
-            assertExactFiles
-                "manifest file entry properties"
-                [ "path"; "sha256" ]
-                (entry |> Seq.map (fun pair -> pair.Key) |> Seq.toList)
+        let manifestEntries =
+            manifest["files"].AsArray()
+            |> Seq.map (fun value ->
+                let entry = value.AsObject()
 
-            entry["path"].GetValue<string>(), entry["sha256"].GetValue<string>())
-        |> Seq.toList
+                assertExactFiles
+                    "manifest file entry properties"
+                    [ "path"; "sha256" ]
+                    (entry |> Seq.map (fun pair -> pair.Key) |> Seq.toList)
 
-    let manifestFileNames = manifestEntries |> List.map fst
-    assertExactFiles "manifest runtime files are the deterministic allowlist" producer.PublishedFiles manifestFileNames
-    assertNoCaseInsensitiveDuplicates "manifest paths are unique case-insensitively" manifestFileNames
+                entry["path"].GetValue<string>(), entry["sha256"].GetValue<string>())
+            |> Seq.toList
 
-    assertEqual
-        "manifest archive files are the deterministic allowlist"
-        archiveFiles
-        (manifest["archiveFiles"].AsArray() |> Seq.map (fun value -> value.GetValue<string>()) |> Seq.toList)
+        let manifestFileNames = manifestEntries |> List.map fst
+        assertExactFiles "manifest runtime files are the deterministic allowlist" producer.PublishedFiles manifestFileNames
+        assertNoCaseInsensitiveDuplicates "manifest paths are unique case-insensitively" manifestFileNames
 
-    assertNoCaseInsensitiveDuplicates "archive allowlist paths are unique case-insensitively" archiveFiles
+        assertEqual
+            "manifest archive files are the deterministic allowlist"
+            archiveFiles
+            (manifest["archiveFiles"].AsArray() |> Seq.map (fun value -> value.GetValue<string>()) |> Seq.toList)
 
-    for file, hash in manifestEntries do
-        assertConsumerRelativePath $"manifest path {file}" file
+        assertNoCaseInsensitiveDuplicates "archive allowlist paths are unique case-insensitively" archiveFiles
 
-        assertTrue
-            $"manifest path {file} is not distribution.json"
-            (not (file.Equals("distribution.json", StringComparison.OrdinalIgnoreCase)))
+        for file, hash in manifestEntries do
+            assertConsumerRelativePath $"manifest path {file}" file
 
-        assertEqual $"manifest path is the exact runtime allowlist entry {file}" file (producer.PublishedFiles |> List.find ((=) file))
-        assertEqual $"manifest SHA-256 for {file}" (sha256 (Path.Combine(layout.DistributionDirectory, file))) hash
+            assertTrue
+                $"manifest path {file} is not distribution.json"
+                (not (file.Equals("distribution.json", StringComparison.OrdinalIgnoreCase)))
 
-        assertTrue
-            $"manifest SHA-256 is lowercase hexadecimal for {file}"
-            (hash.Length = 64 && hash = hash.ToLowerInvariant() && hash |> Seq.forall Uri.IsHexDigit)
+            assertEqual $"manifest path is the exact runtime allowlist entry {file}" file (producer.PublishedFiles |> List.find ((=) file))
+            let! fileHash = sha256Async (Path.Combine(layout.DistributionDirectory, file))
+            assertEqual $"manifest SHA-256 for {file}" fileHash hash
 
-    let archive = ZipFile.OpenRead layout.ArchivePath
-    let entries = archive.Entries |> Seq.map (fun entry -> entry.FullName.Replace('\\', '/')) |> Seq.toList
-    assertExactFiles "archive entries are the deterministic allowlist" archiveFiles entries
-    assertNoCaseInsensitiveDuplicates "archive entries are unique case-insensitively" entries
+            assertTrue
+                $"manifest SHA-256 is lowercase hexadecimal for {file}"
+                (hash.Length = 64 && hash = hash.ToLowerInvariant() && hash |> Seq.forall Uri.IsHexDigit)
 
-    for entry in entries do
-        assertConsumerRelativePath $"archive entry {entry}" entry
-        let lower = entry.ToLowerInvariant()
-        let segments = lower.Split('/')
+        let archive = ZipFile.OpenRead layout.ArchivePath
+        let entries = archive.Entries |> Seq.map (fun entry -> entry.FullName.Replace('\\', '/')) |> Seq.toList
+        assertExactFiles "archive entries are the deterministic allowlist" archiveFiles entries
+        assertNoCaseInsensitiveDuplicates "archive entries are unique case-insensitively" entries
 
-        assertTrue
-            ($"archive entry is not a source/build artifact: {entry}")
-            (not (
-                segments |> Array.exists (fun segment -> segment = "src" || segment = "bin" || segment = "obj")
-                || lower.StartsWith("src/")
-                || lower.StartsWith("bin/")
-                || lower.StartsWith("obj/")
-                || lower.EndsWith(".fs")
-                || lower.EndsWith(".fsproj")
-                || lower.EndsWith(".pdb")
-                || lower.EndsWith(".exe")
-                || lower.Contains("apphost")
-            ))
+        for entry in entries do
+            assertConsumerRelativePath $"archive entry {entry}" entry
+            let lower = entry.ToLowerInvariant()
+            let segments = lower.Split('/')
 
-    let manifestHashes = manifestEntries |> Map.ofList
+            assertTrue
+                ($"archive entry is not a source/build artifact: {entry}")
+                (not (
+                    segments |> Array.exists (fun segment -> segment = "src" || segment = "bin" || segment = "obj")
+                    || lower.StartsWith("src/")
+                    || lower.StartsWith("bin/")
+                    || lower.StartsWith("obj/")
+                    || lower.EndsWith(".fs")
+                    || lower.EndsWith(".fsproj")
+                    || lower.EndsWith(".pdb")
+                    || lower.EndsWith(".exe")
+                    || lower.Contains("apphost")
+                ))
 
-    for entry in archive.Entries do
-        match manifestHashes |> Map.tryFind (entry.FullName.Replace('\\', '/')) with
-        | Some expectedHash ->
-            use payload = entry.Open()
-            assertEqual $"archive payload hash for {entry.FullName}" expectedHash (sha256Stream payload)
-        | None -> ()
+        let manifestHashes = manifestEntries |> Map.ofList
 
-    archive.Dispose()
+        for entry in archive.Entries do
+            match manifestHashes |> Map.tryFind (entry.FullName.Replace('\\', '/')) with
+            | Some expectedHash ->
+                use payload = entry.Open()
+                let! payloadHash = hashStreamAsync payload
+                assertEqual $"archive payload hash for {entry.FullName}" expectedHash payloadHash
+            | None -> ()
 
-    let pins = JsonNode.Parse(File.ReadAllText layout.PinsPath).AsObject()
-    let pinKeys = pins |> Seq.map (fun pair -> pair.Key) |> Set.ofSeq
-    assertEqual $"consumer pins contain only {producer.ComponentId}" (Set.singleton producer.ComponentId) pinKeys
-    let pin = pins[producer.ComponentId].AsObject()
+        archive.Dispose()
 
-    assertExactFiles
-        "pin properties"
-        ([ "assetName"; "assetUri"; "archiveSha256"; "manifestSha256"; "revision" ] |> List.sort)
-        (pin |> Seq.map (fun pair -> pair.Key) |> Seq.toList)
+        let! pinsText = File.ReadAllTextAsync layout.PinsPath |> Async.AwaitTask
+        let pins = JsonNode.Parse(pinsText).AsObject()
+        let pinKeys = pins |> Seq.map (fun pair -> pair.Key) |> Set.ofSeq
+        assertEqual $"consumer pins contain only {producer.ComponentId}" (Set.singleton producer.ComponentId) pinKeys
+        let pin = pins[producer.ComponentId].AsObject()
 
-    assertEqual "pin asset name" producer.ArchiveName (pin["assetName"].GetValue<string>())
-    assertEqual "pin asset uri" producer.AssetUri (pin["assetUri"].GetValue<string>())
-    assertEqual "pin archive SHA-256" (sha256 layout.ArchivePath) (pin["archiveSha256"].GetValue<string>())
-    assertEqual "pin manifest SHA-256" (sha256 layout.ManifestPath) (pin["manifestSha256"].GetValue<string>())
-    assertEqual "pin revision equals validated manifest revision" manifestRevision (pin["revision"].GetValue<string>())
-    assertEqual "pin revision equals the committed HEAD" headRevision (pin["revision"].GetValue<string>())
+        assertExactFiles
+            "pin properties"
+            ([ "assetName"; "assetUri"; "archiveSha256"; "manifestSha256"; "revision" ] |> List.sort)
+            (pin |> Seq.map (fun pair -> pair.Key) |> Seq.toList)
+
+        let! archiveSha256 = sha256Async layout.ArchivePath
+        let! manifestSha256 = sha256Async layout.ManifestPath
+        assertEqual "pin asset name" producer.ArchiveName (pin["assetName"].GetValue<string>())
+        assertEqual "pin asset uri" producer.AssetUri (pin["assetUri"].GetValue<string>())
+        assertEqual "pin archive SHA-256" archiveSha256 (pin["archiveSha256"].GetValue<string>())
+        assertEqual "pin manifest SHA-256" manifestSha256 (pin["manifestSha256"].GetValue<string>())
+        assertEqual "pin revision equals validated manifest revision" manifestRevision (pin["revision"].GetValue<string>())
+        assertEqual "pin revision equals the committed HEAD" headRevision (pin["revision"].GetValue<string>())
+    }

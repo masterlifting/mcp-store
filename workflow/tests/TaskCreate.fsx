@@ -59,7 +59,8 @@ let request =
                   Children = [] } ]
           | values -> values }
 
-match execute (CreateTask { Root = root; ProfileId = profile; Request = request }) with
+// Standalone entry bridge: the only synchronous wait in this CLI's flow.
+match execute (CreateTask { Root = root; ProfileId = profile; Request = request }) |> Async.RunSynchronously with
 | Ok task ->
     printfn "%s" (serialize task)
 | Error error ->

@@ -40,48 +40,74 @@ type ArtifactRegistry(artifactRoot: string, workspaceNamespace: string, retentio
         with
         | :? FileNotFoundException
         | :? DirectoryNotFoundException -> false
-        | _ -> true
 
     let fileLength path =
         if File.Exists path then FileInfo(path).Length else 0L
 
-    let rec sumFiles directory =
+    // A reparse point inside an owned artifact directory is an expected denial,
+    // returned directly as a typed error instead of raised and reclassified later.
+    let rec sumFiles directory : Result<int64, VerificationError> =
         if isReparse directory then
-            raise (IOException "artifact root contains a reparse point")
+            Error(ArtifactFailure "artifact root contains a reparse point")
+        else
+            try
+                let mutable failure = None
+                let mutable total = 0L
 
-        let files =
-            Directory.EnumerateFiles(directory, "*", SearchOption.TopDirectoryOnly)
-            |> Seq.sumBy (fun path ->
-                if isReparse path then
-                    raise (IOException "artifact root contains a reparse point")
+                for path in Directory.EnumerateFiles(directory, "*", SearchOption.TopDirectoryOnly) do
+                    if failure.IsNone then
+                        if isReparse path then
+                            failure <- Some(ArtifactFailure "artifact root contains a reparse point")
+                        else
+                            total <- total + fileLength path
 
-                fileLength path)
+                if failure.IsNone then
+                    for subdirectory in Directory.EnumerateDirectories(directory, "*", SearchOption.TopDirectoryOnly) do
+                        if failure.IsNone then
+                            match sumFiles subdirectory with
+                            | Ok value -> total <- total + value
+                            | Error error -> failure <- Some error
 
-        let directories =
-            Directory.EnumerateDirectories(directory, "*", SearchOption.TopDirectoryOnly)
-            |> Seq.sumBy sumFiles
+                match failure with
+                | Some error -> Error error
+                | None -> Ok total
+            with
+            | :? IOException as error -> Error(ArtifactFailure $"artifact size could not be measured: {error.Message}")
+            | :? UnauthorizedAccessException as error ->
+                Error(ArtifactFailure $"artifact size could not be measured: {error.Message}")
 
-        files + directories
-
-    let quotaFailure (handle: RunHandle) =
+    let quotaFailure (handle: RunHandle) : Result<unit, VerificationError> =
         try
             let stdoutBytes = fileLength handle.Paths.Stdout
             let stderrBytes = fileLength handle.Paths.Stderr
             let binlogBytes = fileLength handle.Paths.Binlog
             let trxBytes = fileLength handle.Paths.Trx
-            let runBytes = sumFiles handle.Paths.Directory
-            // Aggregate owns only this workspace namespace, never sibling workspaces.
-            let aggregateBytes = sumFiles workspaceDirectory
 
-            if stdoutBytes > effectiveQuotas.MaxStdoutBytes then Some(ArtifactQuotaExceeded "stdout artifact quota exceeded")
-            elif stderrBytes > effectiveQuotas.MaxStderrBytes then Some(ArtifactQuotaExceeded "stderr artifact quota exceeded")
-            elif binlogBytes > effectiveQuotas.MaxBinlogBytes then Some(ArtifactQuotaExceeded "build binlog quota exceeded")
-            elif trxBytes > effectiveQuotas.MaxTrxBytes then Some(ArtifactQuotaExceeded "TRX artifact quota exceeded")
-            elif runBytes > effectiveQuotas.MaxRunBytes then Some(ArtifactQuotaExceeded "per-run artifact quota exceeded")
-            elif aggregateBytes > effectiveQuotas.MaxAggregateBytes then Some(ArtifactQuotaExceeded "aggregate artifact quota exceeded")
-            else None
-        with error ->
-            Some(ArtifactFailure $"artifact quota could not be measured: {error.Message}")
+            match sumFiles handle.Paths.Directory with
+            | Error error -> Error error
+            | Ok runBytes ->
+                // Aggregate owns only this workspace namespace, never sibling workspaces.
+                match sumFiles workspaceDirectory with
+                | Error error -> Error error
+                | Ok aggregateBytes ->
+                    if stdoutBytes > effectiveQuotas.MaxStdoutBytes then
+                        Error(ArtifactQuotaExceeded "stdout artifact quota exceeded")
+                    elif stderrBytes > effectiveQuotas.MaxStderrBytes then
+                        Error(ArtifactQuotaExceeded "stderr artifact quota exceeded")
+                    elif binlogBytes > effectiveQuotas.MaxBinlogBytes then
+                        Error(ArtifactQuotaExceeded "build binlog quota exceeded")
+                    elif trxBytes > effectiveQuotas.MaxTrxBytes then
+                        Error(ArtifactQuotaExceeded "TRX artifact quota exceeded")
+                    elif runBytes > effectiveQuotas.MaxRunBytes then
+                        Error(ArtifactQuotaExceeded "per-run artifact quota exceeded")
+                    elif aggregateBytes > effectiveQuotas.MaxAggregateBytes then
+                        Error(ArtifactQuotaExceeded "aggregate artifact quota exceeded")
+                    else
+                        Ok()
+        with
+        | :? IOException as error -> Error(ArtifactFailure $"artifact quota could not be measured: {error.Message}")
+        | :? UnauthorizedAccessException as error ->
+            Error(ArtifactFailure $"artifact quota could not be measured: {error.Message}")
 
     let randomToken byteCount =
         let bytes = Array.zeroCreate<byte> byteCount
@@ -98,7 +124,11 @@ type ArtifactRegistry(artifactRoot: string, workspaceNamespace: string, retentio
           ParsedEvidence = Path.Combine(directory, "parsed-evidence.json") }
 
     let removeRunDirectory (directory: string) =
-        try Directory.Delete(directory, true) with _ -> ()
+        try
+            Directory.Delete(directory, true)
+        with
+        | :? IOException -> ()
+        | :? UnauthorizedAccessException -> ()
 
         // The namespace may be shared with sibling run state, so it is removed only
         // when empty and never recursively. The consumer-owned root is never removed.
@@ -108,8 +138,9 @@ type ArtifactRegistry(artifactRoot: string, workspaceNamespace: string, retentio
                 && (Directory.EnumerateFileSystemEntries workspaceDirectory |> Seq.isEmpty)
             then
                 Directory.Delete(workspaceDirectory, false)
-        with _ ->
-            ()
+        with
+        | :? IOException -> ()
+        | :? UnauthorizedAccessException -> ()
 
     let removeExpired now =
         for pair in entries do
@@ -140,9 +171,11 @@ type ArtifactRegistry(artifactRoot: string, workspaceNamespace: string, retentio
 
     let allocateRun () : Result<RunHandle, VerificationError> =
         try
-            if sumFiles workspaceDirectory >= effectiveQuotas.MaxAggregateBytes then
+            match sumFiles workspaceDirectory with
+            | Error error -> Error error
+            | Ok currentBytes when currentBytes >= effectiveQuotas.MaxAggregateBytes ->
                 Error(ArtifactQuotaExceeded "aggregate artifact quota is already exhausted")
-            else
+            | Ok _ ->
                 let mutable created = None
                 let mutable attempt = 0
 
@@ -173,12 +206,16 @@ type ArtifactRegistry(artifactRoot: string, workspaceNamespace: string, retentio
                                     removeRunDirectory directory
                             else
                                 removeRunDirectory directory
-                    with _ -> ()
+                    with
+                    | :? IOException -> ()
+                    | :? UnauthorizedAccessException -> ()
 
                 match created with
                 | Some handle -> Ok handle
                 | None -> Error(ArtifactFailure "could not allocate an isolated verification artifact directory")
-        with error -> Error(ArtifactFailure $"artifact quota could not be measured: {error.Message}")
+        with
+        | :? IOException as error -> Error(ArtifactFailure $"artifact allocation failed: {error.Message}")
+        | :? UnauthorizedAccessException as error -> Error(ArtifactFailure $"artifact allocation failed: {error.Message}")
 
     member _.Start(operation) : Result<RunHandle, VerificationError> =
         lock gate (fun () ->
@@ -205,8 +242,8 @@ type ArtifactRegistry(artifactRoot: string, workspaceNamespace: string, retentio
                 Error(ArtifactFailure "verification evidence is not owned by its registry run")
             | true, entry ->
                 match quotaFailure handle with
-                | Some error -> Error error
-                | None ->
+                | Error error -> Error error
+                | Ok() ->
                     let completed = { entry with Completed = Some evidence; CompletedAt = Some DateTimeOffset.UtcNow }
                     if entries.TryUpdate(key, completed, entry) then Ok() else Error(ArtifactFailure "verification run completion conflicted"))
 
@@ -238,8 +275,8 @@ type ArtifactRegistry(artifactRoot: string, workspaceNamespace: string, retentio
             | true, entry when entry.Handle <> handle -> Error(ArtifactFailure "verification run handle is not owned by its registry")
             | true, _ ->
                 match quotaFailure handle with
-                | Some error -> Error error
-                | None -> Ok())
+                | Error error -> Error error
+                | Ok() -> Ok())
 
     member _.EndSession() =
         lock gate (fun () ->
@@ -257,62 +294,85 @@ module ArtifactFiles =
     let private jsonOptions =
         JsonSerializerOptions(WriteIndented = true, PropertyNamingPolicy = JsonNamingPolicy.CamelCase)
 
-    let read path =
-        try Ok(File.ReadAllText path) with error -> Error(MissingArtifact $"artifact could not be read: {error.Message}")
+    let readAsync path : Async<Result<string, VerificationError>> =
+        async {
+            try
+                let! text = TaskAwait.operational (File.ReadAllTextAsync path)
+                return Ok text
+            with
+            | :? OperationCanceledException as error -> return raise error
+            | :? IOException as error -> return Error(MissingArtifact $"artifact could not be read: {error.Message}")
+            | :? UnauthorizedAccessException as error ->
+                return Error(MissingArtifact $"artifact could not be read: {error.Message}")
+        }
 
-    let writeEvidence (handle: RunHandle) (evidence: RetainedEvidence) =
-        try
-            let metadata =
-                {| operation = evidence.Operation.ToString().ToLowerInvariant()
-                   status = VerificationStatus.ofProcessStatus evidence.Process.Status |> string
-                   exitCode =
-                    match evidence.Process.Status with
-                    | ProcessStatus.Completed code -> Some code
-                    | _ -> None
-                   durationMs = int64 evidence.Process.Duration.TotalMilliseconds
-                   stdoutBytes = evidence.Process.StdoutBytes
-                   stderrBytes = evidence.Process.StderrBytes
-                   stdoutTruncated = evidence.Process.StdoutBytes >= Budgets.DefaultArtifactQuotas.MaxStdoutBytes
-                   stderrTruncated = evidence.Process.StderrBytes >= Budgets.DefaultArtifactQuotas.MaxStderrBytes
-                   binlog = File.Exists handle.Paths.Binlog
-                   binlogUnavailableReason = if File.Exists handle.Paths.Binlog then None else Some "binlog was not produced by the selected invocation"
-                   trx = File.Exists handle.Paths.Trx
-                   trxUnavailableReason = if File.Exists handle.Paths.Trx then None else Some "TRX was not produced by the selected invocation"
-                   artifactQuotas =
-                    {| maxStdoutBytes = Budgets.DefaultArtifactQuotas.MaxStdoutBytes
-                       maxStderrBytes = Budgets.DefaultArtifactQuotas.MaxStderrBytes
-                       maxBinlogBytes = Budgets.DefaultArtifactQuotas.MaxBinlogBytes
-                       maxTrxBytes = Budgets.DefaultArtifactQuotas.MaxTrxBytes
-                       maxRunBytes = Budgets.DefaultArtifactQuotas.MaxRunBytes
-                       maxAggregateBytes = Budgets.DefaultArtifactQuotas.MaxAggregateBytes |} |}
+    let writeEvidence (handle: RunHandle) (evidence: RetainedEvidence) : Async<Result<unit, VerificationError>> =
+        async {
+            try
+                let metadata =
+                    {| operation = evidence.Operation.ToString().ToLowerInvariant()
+                       status = VerificationStatus.ofProcessStatus evidence.Process.Status |> string
+                       exitCode =
+                        match evidence.Process.Status with
+                        | ProcessStatus.Completed code -> Some code
+                        | _ -> None
+                       durationMs = int64 evidence.Process.Duration.TotalMilliseconds
+                       stdoutBytes = evidence.Process.StdoutBytes
+                       stderrBytes = evidence.Process.StderrBytes
+                       stdoutTruncated = evidence.Process.StdoutBytes >= Budgets.DefaultArtifactQuotas.MaxStdoutBytes
+                       stderrTruncated = evidence.Process.StderrBytes >= Budgets.DefaultArtifactQuotas.MaxStderrBytes
+                       binlog = File.Exists handle.Paths.Binlog
+                       binlogUnavailableReason = if File.Exists handle.Paths.Binlog then None else Some "binlog was not produced by the selected invocation"
+                       trx = File.Exists handle.Paths.Trx
+                       trxUnavailableReason = if File.Exists handle.Paths.Trx then None else Some "TRX was not produced by the selected invocation"
+                       artifactQuotas =
+                        {| maxStdoutBytes = Budgets.DefaultArtifactQuotas.MaxStdoutBytes
+                           maxStderrBytes = Budgets.DefaultArtifactQuotas.MaxStderrBytes
+                           maxBinlogBytes = Budgets.DefaultArtifactQuotas.MaxBinlogBytes
+                           maxTrxBytes = Budgets.DefaultArtifactQuotas.MaxTrxBytes
+                           maxRunBytes = Budgets.DefaultArtifactQuotas.MaxRunBytes
+                           maxAggregateBytes = Budgets.DefaultArtifactQuotas.MaxAggregateBytes |} |}
 
-            File.WriteAllText(handle.Paths.Metadata, JsonSerializer.Serialize(metadata, jsonOptions), Encoding.UTF8)
+                do!
+                    TaskAwait.complete (
+                        File.WriteAllTextAsync(handle.Paths.Metadata, JsonSerializer.Serialize(metadata, jsonOptions), Encoding.UTF8)
+                    )
 
-            let diagnostics =
-                evidence.Diagnostics
-                |> List.map (fun item ->
-                    {| severity = item.Severity.ToString().ToLowerInvariant()
-                       code = item.Code
-                       file = item.File
-                       line = item.Line
-                       column = item.Column
-                       message = item.Message |})
+                let diagnostics =
+                    evidence.Diagnostics
+                    |> List.map (fun item ->
+                        {| severity = item.Severity.ToString().ToLowerInvariant()
+                           code = item.Code
+                           file = item.File
+                           line = item.Line
+                           column = item.Column
+                           message = item.Message |})
 
-            let tests =
-                evidence.Tests
-                |> Option.map (fun testEvidence ->
-                    {| counts = testEvidence.Counts
-                       trxAvailable = testEvidence.TrxAvailable
-                       trxUnavailableReason = testEvidence.TrxUnavailableReason
-                       cases =
-                        testEvidence.Cases
-                        |> List.map (fun item ->
-                            {| name = item.Name
-                               outcome = item.Outcome.ToString().ToLowerInvariant()
-                               message = item.Message |}) |})
+                let tests =
+                    evidence.Tests
+                    |> Option.map (fun testEvidence ->
+                        {| counts = testEvidence.Counts
+                           trxAvailable = testEvidence.TrxAvailable
+                           trxUnavailableReason = testEvidence.TrxUnavailableReason
+                           cases =
+                            testEvidence.Cases
+                            |> List.map (fun item ->
+                                {| name = item.Name
+                                   outcome = item.Outcome.ToString().ToLowerInvariant()
+                                   message = item.Message |}) |})
 
-            let parsed = {| diagnostics = diagnostics; tests = tests |}
-            File.WriteAllText(handle.Paths.ParsedEvidence, JsonSerializer.Serialize(parsed, jsonOptions), Encoding.UTF8)
-            Ok()
-        with error ->
-            Error(ArtifactFailure $"verification evidence could not be persisted: {error.Message}")
+                let parsed = {| diagnostics = diagnostics; tests = tests |}
+
+                do!
+                    TaskAwait.complete (
+                        File.WriteAllTextAsync(handle.Paths.ParsedEvidence, JsonSerializer.Serialize(parsed, jsonOptions), Encoding.UTF8)
+                    )
+
+                return Ok()
+            with
+            | :? OperationCanceledException as error -> return raise error
+            | :? IOException as error ->
+                return Error(ArtifactFailure $"verification evidence could not be persisted: {error.Message}")
+            | :? UnauthorizedAccessException as error ->
+                return Error(ArtifactFailure $"verification evidence could not be persisted: {error.Message}")
+        }
