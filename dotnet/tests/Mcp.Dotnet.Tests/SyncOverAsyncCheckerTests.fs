@@ -78,6 +78,28 @@ let private fixtureTests =
                 "// task.Result\nlet text = \"task.Result and stream.ReadToEnd()\"\nlet longText = \"\"\"task.Wait()\"\"\"\n(* task.Wait() *)\n"
             Expect.isEmpty (checkText "sample.fs" source) "non-code text is masked"
 
+        testCase "ordinary strings consume escapes forward and verbatim strings use doubled quotes" <| fun _ ->
+            let source =
+                """let even = "value\\"
+let afterEven = pendingTask.Result
+let odd = "value\\\" pendingTask.Result and pendingTask.Wait() still"
+let afterOdd = pendingTask.Wait()
+let continued = "value\
+    pendingTask.Result"
+let afterContinuation = pendingTask.Wait()
+let verbatim = @"quoted "" pendingTask.Wait() "" value"
+let afterVerbatim = pendingTask.Result
+"""
+            let lines = source.Split('\n')
+            let findings = checkText "sample.fs" source |> violations
+            Expect.equal
+                (findings |> List.map (fun finding -> finding.Pattern, finding.Line, finding.Column))
+                [ "Task.Result", 2, lines.[1].IndexOf(".Result", StringComparison.Ordinal) + 1
+                  "Task.Result", 9, lines.[8].IndexOf(".Result", StringComparison.Ordinal) + 1
+                  "Task.Wait", 4, lines.[3].IndexOf(".Wait(", StringComparison.Ordinal) + 1
+                  "Task.Wait", 7, lines.[6].IndexOf(".Wait(", StringComparison.Ordinal) + 1 ]
+                "escaped literals stay masked without swallowing later receiver tokens"
+
         testCase "native mutex arbitration does not match Task.WaitAny" <| fun _ ->
             let findings = checkText "sample.fs" "WaitHandle.WaitAny [| releaseRequested; mutex |]\nTask.WaitAny [||]\n" |> violations
             Expect.equal (findings |> List.map _.Pattern) [ "Task.WaitAny" ] "only the Task wait primitive is forbidden"

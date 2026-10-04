@@ -213,11 +213,11 @@ let private maskStringsAndComments (source: string) =
                     if chars.[i] = '"' then
                         if verbatim && i + 1 < chars.Length && chars.[i + 1] = '"' then
                             i <- i + 2
-                        elif not verbatim && i > 0 && chars.[i - 1] = '\\' then
-                            i <- i + 1
                         else
                             i <- i + 1
                             closed <- true
+                    elif not verbatim && chars.[i] = '\\' && i + 1 < chars.Length then
+                        i <- i + 2
                     else
                         i <- i + 1
             blankRange chars startIndex i
