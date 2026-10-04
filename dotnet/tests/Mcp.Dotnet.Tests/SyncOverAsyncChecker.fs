@@ -194,6 +194,7 @@ let private maskStringsAndComments (source: string) =
                     chars.Length
         elif chars.[i] = '"' || ((chars.[i] = '$' || chars.[i] = '@') && i + 1 < chars.Length && chars.[i + 1] = '"') then
             let startIndex = i
+            let verbatim = chars.[i] = '@'
             if chars.[i] <> '"' then i <- i + 1
 
             if i + 2 < chars.Length && chars.[i] = '"' && chars.[i + 1] = '"' && chars.[i + 2] = '"' then
@@ -206,7 +207,6 @@ let private maskStringsAndComments (source: string) =
                     else
                         i <- i + 1
             else
-                let verbatim = chars.[i] = '@'
                 i <- i + 1
                 let mutable closed = false
                 while i < chars.Length && not closed do

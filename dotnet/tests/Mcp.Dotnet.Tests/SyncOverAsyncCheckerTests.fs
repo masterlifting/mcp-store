@@ -100,6 +100,28 @@ let afterVerbatim = pendingTask.Result
                   "Task.Wait", 7, lines.[6].IndexOf(".Wait(", StringComparison.Ordinal) + 1 ]
                 "escaped literals stay masked without swallowing later receiver tokens"
 
+        testCase "verbatim prefix keeps trailing backslashes from escaping the closing quote" <| fun _ ->
+            let source =
+                """let trailingBackslash = @"path\"
+let afterTrailingBackslash = pendingTask.Result
+let evenBackslashes = @"path\\"
+let afterEvenBackslashes = pendingTask.Wait()
+let doubledQuotes = @"quoted ""value"" with pendingTask.Result in literal"
+let afterDoubledQuotes = pendingTask.GetAwaiter().GetResult()
+let trailingBackslashAndDoubledQuotes = @"path\ ""value"" still"
+let afterCombo = pendingTask.Wait()
+let literalCalls = @"pendingTask.Result pendingTask.Wait()"
+"""
+            let lines = source.Split('\n')
+            let findings = checkText "sample.fs" source |> violations
+            Expect.equal
+                (findings |> List.map (fun finding -> finding.Pattern, finding.Line, finding.Column))
+                [ "Task.Result", 2, lines.[1].IndexOf(".Result", StringComparison.Ordinal) + 1
+                  "Task.Wait", 4, lines.[3].IndexOf(".Wait(", StringComparison.Ordinal) + 1
+                  "Task.Wait", 8, lines.[7].IndexOf(".Wait(", StringComparison.Ordinal) + 1
+                  "GetAwaiter().GetResult", 6, lines.[5].IndexOf("GetAwaiter()", StringComparison.Ordinal) + 1 ]
+                "verbatim strings close at unpaired quotes regardless of backslash runs"
+
         testCase "native mutex arbitration does not match Task.WaitAny" <| fun _ ->
             let findings = checkText "sample.fs" "WaitHandle.WaitAny [| releaseRequested; mutex |]\nTask.WaitAny [||]\n" |> violations
             Expect.equal (findings |> List.map _.Pattern) [ "Task.WaitAny" ] "only the Task wait primitive is forbidden"
