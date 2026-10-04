@@ -142,6 +142,108 @@ let verifyCancelledWaiterReleasesMutex root id : Async<unit> =
         | Choice2Of2 error -> return raise error
     }
 
+let verifyPostAcquisitionCancellationKeepsMutexLeased root id : Async<unit> =
+    async {
+        let sidecar = Path.Combine(taskDirectory root id, SidecarFileName)
+        let firstEntered = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+        let firstGate = TaskCompletionSource<Result<string, RuntimeError>>(TaskCreationOptions.RunContinuationsAsynchronously)
+        let secondEntered = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+        let baselineOwnerCount = activeLockOwnerThreads ()
+        use cancellation = new CancellationTokenSource()
+        let mutable firstTask: Task<Result<string, RuntimeError>> option = None
+        let mutable secondTask: Task<Result<string, RuntimeError>> option = None
+
+        let! outcome =
+            async {
+                let first =
+                    Async.StartAsTask(
+                        withLock sidecar (fun () ->
+                            async {
+                                firstEntered.TrySetResult(()) |> ignore
+                                // AwaitTask keeps the protected action gated after caller cancellation.
+                                return! Async.AwaitTask firstGate.Task
+                            }),
+                        cancellationToken = cancellation.Token
+                    )
+
+                firstTask <- Some first
+                do! firstEntered.Task.WaitAsync(TimeSpan.FromSeconds 5.0) |> Async.AwaitTask
+                let firstOwnerCount = activeLockOwnerThreads ()
+                assertTrue "first action owns a native lock thread" (firstOwnerCount > baselineOwnerCount)
+                cancellation.Cancel()
+
+                let secondScheduled = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+                let second =
+                    Async.StartAsTask(async {
+                        secondScheduled.TrySetResult(()) |> ignore
+                        return!
+                            withLock sidecar (fun () ->
+                                async {
+                                    secondEntered.TrySetResult(()) |> ignore
+                                    return Ok "second"
+                                })
+                    })
+
+                secondTask <- Some second
+                do! secondScheduled.Task.WaitAsync(TimeSpan.FromSeconds 5.0) |> Async.AwaitTask
+
+                let deadline = DateTime.UtcNow.AddSeconds 5.0
+                while not secondEntered.Task.IsCompleted
+                      && not second.IsCompleted
+                      && activeLockOwnerThreads () <= firstOwnerCount
+                      && DateTime.UtcNow < deadline do
+                    do! Task.Delay 10 |> Async.AwaitTask
+
+                assertTrue "second contender starts its owner thread" (activeLockOwnerThreads () > firstOwnerCount || secondEntered.Task.IsCompleted)
+                assertTrue "second protected action remains outside while first action is gated" (not secondEntered.Task.IsCompleted)
+                assertTrue "second contender remains incomplete while first action is gated" (not second.IsCompleted)
+
+                let observationWindow = Task.Delay 200
+                let! raced =
+                    Task.WhenAny([| secondEntered.Task :> Task; second :> Task; observationWindow |])
+                    |> Async.AwaitTask
+
+                assertTrue "second contender stays blocked for the bounded observation window" (obj.ReferenceEquals(raced, observationWindow))
+
+                firstGate.TrySetResult(Ok "first") |> ignore
+                let! firstOutcome = Async.Catch(first.WaitAsync(TimeSpan.FromSeconds 5.0) |> Async.AwaitTask)
+
+                let rec isCancellation (error: exn) =
+                    match error with
+                    | :? OperationCanceledException -> true
+                    | :? AggregateException as aggregate when aggregate.InnerExceptions.Count = 1 ->
+                        isCancellation aggregate.InnerExceptions.[0]
+                    | _ -> false
+
+                match firstOutcome with
+                | Choice2Of2 error when isCancellation error -> ()
+                | Choice2Of2 error -> return failwithf "cancelled first lease raised an unexpected error: %s" error.Message
+                | Choice1Of2(Error(PersistenceFailure message)) ->
+                    return failwithf "first cancellation became a normal persistence failure: %s" message
+                | Choice1Of2(Ok _) -> ()
+                | Choice1Of2(Error error) -> return failwithf "first lease returned an unexpected error: %s" (renderError error)
+
+                do! secondEntered.Task.WaitAsync(TimeSpan.FromSeconds 5.0) |> Async.AwaitTask
+                let! secondResult = second.WaitAsync(TimeSpan.FromSeconds 5.0) |> Async.AwaitTask
+                assertEqual "second lease completes after the first unwinds" (Ok "second") secondResult
+                return ()
+            }
+            |> Async.Catch
+
+        firstGate.TrySetResult(Ok "cleanup") |> ignore
+
+        for task in [ firstTask |> Option.map (fun pending -> pending :> Task); secondTask |> Option.map (fun pending -> pending :> Task) ] do
+            match task with
+            | Some pending ->
+                let! _ = Async.Catch(pending.WaitAsync(TimeSpan.FromSeconds 5.0) |> Async.AwaitTask)
+                ()
+            | None -> ()
+
+        match outcome with
+        | Choice1Of2 () -> return ()
+        | Choice2Of2 error -> return raise error
+    }
+
 // Recursive listing relative to the task directory. Tolerant of a directory
 // that does not exist yet or is being created concurrently.
 let enumerateEntries directory =
@@ -212,6 +314,7 @@ async {
         let! _ = expectOk "valid read after failed read releases mutex lease" (getTask tempRoot taskId)
         assertOnlyRuntimeJson "after failed read" tempRoot taskId
         do! verifyCancelledWaiterReleasesMutex tempRoot taskId
+        do! verifyPostAcquisitionCancellationKeepsMutexLeased tempRoot taskId
 
         let! _ = expectOk "get" (getTask tempRoot taskId)
         assertOnlyRuntimeJson "after task_get" tempRoot taskId

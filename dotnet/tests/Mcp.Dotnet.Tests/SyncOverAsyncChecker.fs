@@ -97,12 +97,20 @@ let private interpolatedStringStart (chars: char array) startIndex =
             while cursor < chars.Length && chars.[cursor] = '"' do cursor <- cursor + 1
             Some(quoteStart, cursor - quoteStart, verbatim)
 
+let private hasOpenInterpolationHole (chars: char array) startIndex endIndex =
+    let mutable lastOpen = -1
+    let mutable lastClose = -1
+    for index in startIndex .. endIndex - 1 do
+        if chars.[index] = '{' then lastOpen <- index
+        elif chars.[index] = '}' then lastClose <- index
+    lastOpen > lastClose
+
 let private interpolatedStringEnd (chars: char array) quoteStart quoteCount verbatim =
     let mutable cursor = quoteStart + quoteCount
     let mutable closing = -1
 
     if quoteCount >= 3 then
-        while cursor + quoteCount <= chars.Length && closing < 0 do
+        while cursor + quoteCount <= chars.Length && closing = -1 do
             if chars.[cursor] = '"' then
                 let mutable count = 0
                 while cursor + count < chars.Length && chars.[cursor + count] = '"' do count <- count + 1
@@ -111,11 +119,13 @@ let private interpolatedStringEnd (chars: char array) quoteStart quoteCount verb
             else
                 cursor <- cursor + 1
     else
-        while cursor < chars.Length && closing < 0 do
+        while cursor < chars.Length && closing = -1 do
             if not verbatim && chars.[cursor] = '\\' && cursor + 1 < chars.Length then
                 cursor <- cursor + 2
             elif chars.[cursor] = '"' then
-                if verbatim && cursor + 1 < chars.Length && chars.[cursor + 1] = '"' then
+                if hasOpenInterpolationHole chars (quoteStart + 1) cursor then
+                    closing <- -2
+                elif verbatim && cursor + 1 < chars.Length && chars.[cursor + 1] = '"' then
                     cursor <- cursor + 2
                 else
                     closing <- cursor
@@ -168,7 +178,7 @@ let private maskStringsAndComments (source: string) =
                 else
                     i <- i + 1
             blankRange chars startIndex i
-        // Interpolation bodies stay visible so executable expressions cannot hide blockers; literal text can false-positive.
+        // Ambiguous holes keep the remaining source visible; literal text and comments may false-positive.
         elif interpolatedStringStart chars i |> Option.isSome then
             let quoteStart, quoteCount, verbatim = interpolatedStringStart chars i |> Option.get
             let close = interpolatedStringEnd chars quoteStart quoteCount verbatim
@@ -223,8 +233,9 @@ let private lineColumn (text: string) offset =
             lineStart <- i + 1
     line, bounded - lineStart + 1
 
-let private precedingResultMarker (lines: string array) lineNumber =
-    if lineNumber < 2 then None
+let private precedingResultMarker (lines: string array) lineNumber resultOccurrenceCount =
+    // A line-level reason cannot distinguish multiple member occurrences.
+    if lineNumber < 2 || resultOccurrenceCount <> 1 then None
     else
         let candidate = lines.[lineNumber - 2].Trim()
         let prefix = "// Non-Task Result field:"
@@ -266,13 +277,23 @@ let checkText (path: string) (source: string) : Finding list =
     let code = maskStringsAndComments source
     let lines = source.Replace("\r\n", "\n").Split('\n')
     let relative = path.Replace('\\', '/')
+    let matches =
+        [ for rule in rules do
+              for matched in rule.Regex.Matches(code) do
+                  let line, column = lineColumn code matched.Index
+                  yield rule, matched, line, column ]
 
-    [ for rule in rules do
-          for matched in rule.Regex.Matches(code) do
-              let line, column = lineColumn code matched.Index
+    let resultCounts =
+        matches
+        |> List.choose (fun (rule, _, line, _) -> if rule.Name = "Task.Result" then Some line else None)
+        |> List.countBy id
+
+    [ for rule, matched, line, column in matches do
               let exemption =
                   match rule.Name with
-                  | "Task.Result" -> precedingResultMarker lines line
+                  | "Task.Result" ->
+                      let count = resultCounts |> List.tryPick (fun (sourceLine, amount) -> if sourceLine = line then Some amount else None) |> Option.defaultValue 0
+                      precedingResultMarker lines line count
                   | "Async.RunSynchronously" -> documentedBridge relative code lines line
                   | _ -> None
               yield

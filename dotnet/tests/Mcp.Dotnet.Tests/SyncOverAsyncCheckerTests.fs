@@ -31,6 +31,19 @@ let private fixtureTests =
             let findings = checkText "sample.fs" source |> violations
             Expect.equal (findings |> List.map (fun finding -> finding.Line, finding.Column)) [ 3, 24 ] "only the member token is reported"
 
+        testCase "nested interpolation quotes trigger fail-closed raw scanning" <| fun _ ->
+            let source =
+                "let nestedResult = $\"{(if \"x\" = \"x\" then pendingTask else otherTask).Result}\"\nlet nestedWait = $\"{(if \"x\" = \"x\" then pendingTask else otherTask).Wait()}\"\nlet multipleHoles = $\"{(if \"x\" = \"x\" then pendingTask else otherTask).Result}{(if \"y\" = \"y\" then pendingTask else otherTask).Wait()}\"\n"
+            let lines = source.Split('\n')
+            let findings = checkText "sample.fs" source |> violations
+            Expect.equal
+                (findings |> List.map (fun finding -> finding.Pattern, finding.Line, finding.Column))
+                [ "Task.Result", 1, lines.[0].IndexOf(".Result", StringComparison.Ordinal) + 1
+                  "Task.Result", 3, lines.[2].IndexOf(".Result", StringComparison.Ordinal) + 1
+                  "Task.Wait", 2, lines.[1].IndexOf(".Wait(", StringComparison.Ordinal) + 1
+                  "Task.Wait", 3, lines.[2].IndexOf(".Wait(", StringComparison.Ordinal) + 1 ]
+                "quotes inside open holes cannot hide member blockers"
+
         testCase "interpolated contents remain visible, including conservative literal matches" <| fun _ ->
             let source =
                 "let formatted = $\"{task.Result}\"\nlet literal = $\"literal task.Wait()\"\nlet verbatim = $@\"literal task.Result\"\nlet verbatimAlt = @$\"literal task.Wait()\"\nlet raw = $\"\"\"literal task.Result\"\"\"\n"
@@ -74,6 +87,16 @@ let private fixtureTests =
 
             let emptyReason = "// Non-Task Result field:\nlet saved = workItem.Result\n"
             Expect.equal (violations (checkText "sample.fs" emptyReason) |> List.length) 1 "empty marker is not an exemption"
+
+            let mixed =
+                "// Non-Task Result field: the left member is a Workflow record field.\nlet pair = workItem.Result + pendingTask.Result\n"
+            let mixedFindings = checkText "sample.fs" mixed |> violations
+            Expect.equal (mixedFindings |> List.map _.Exemption) [ None; None ] "one marker cannot exempt a record/task pair"
+
+            let multiple =
+                "// Non-Task Result field: generic reason cannot identify one occurrence.\nlet pair = left.Result + right.Result\n"
+            let multipleFindings = checkText "sample.fs" multiple |> violations
+            Expect.equal (multipleFindings |> List.map _.Exemption) [ None; None ] "one marker cannot exempt multiple same-line occurrences"
 
         testCase "only listed top-level entry bridge site is accepted" <| fun _ ->
             let documented =

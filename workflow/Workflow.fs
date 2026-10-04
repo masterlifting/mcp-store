@@ -3885,12 +3885,13 @@ module private Domain =
                 | None -> Ok None
                 | Some value -> ownerFromDto value |> Result.map Some
             let! children = dto.Children |> List.map workItemFromDto |> collectResults
+            // Non-Task Result field: WorkItemDto.Result is a plain string payload.
+            let resultText = dto.Result
             let item : WorkItem =
                 { Id = id
                   Title = title
                   State = state
-                  // Non-Task Result field: this is the WorkItemDto record payload.
-                  Result = if dto.Result = "" then None else Some dto.Result
+                  Result = if resultText = "" then None else Some resultText
                   AcceptanceRefs = refs
                   DependsOn = dependsOn
                   EvidenceRefs = evidenceRefs
@@ -5978,13 +5979,14 @@ let private adjustLockOwnerThreads delta = lock lockOwnerGate (fun () -> lockOwn
 
 // Named OS mutexes are thread-affine, so a dedicated background owner thread
 // acquires and releases while the async transaction runs on the thread pool.
-let private withLock
+let internal withLock
     (path: string)
     (action: unit -> Async<Result<'a, RuntimeError>>)
     : Async<Result<'a, RuntimeError>> =
     async {
         let! cancellationToken = Async.CancellationToken
         let name = coordinationName path
+        let acquisitionCancelled = new ManualResetEvent(false)
         let releaseRequested = new ManualResetEvent(false)
 
         // Carries the raw exception so expected coordination failures can be typed
@@ -5993,7 +5995,14 @@ let private withLock
 
         let released = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
 
-        // The async only signals; the owner thread owns the event lifetime.
+        // The async only signals; the owner thread owns both event lifetimes.
+        // Cancellation may abandon acquisition only; it must never release a held mutex.
+        let signalAcquisitionCancelled () =
+            try
+                acquisitionCancelled.Set() |> ignore
+            with :? ObjectDisposedException ->
+                ()
+
         let signalRelease () =
             try
                 releaseRequested.Set() |> ignore
@@ -6011,12 +6020,13 @@ let private withLock
                         try
                             mutex <- new Mutex(false, name)
 
-                            // Wait on the cancel signal and the mutex together so an
-                            // external holder that never releases cannot pin this
-                            // thread forever once the caller cancels; the release
-                            // handle is first so cancellation wins a tie.
+                            // Wait on the acquisition-cancel signal and the mutex
+                            // together; the cancel handle is first so a canceled
+                            // caller lets this thread exit while an external holder
+                            // still owns the mutex. After acquisition only
+                            // releaseRequested (set post-action) releases it.
                             let handles: WaitHandle[] =
-                                [| releaseRequested :> WaitHandle; mutex :> WaitHandle |]
+                                [| acquisitionCancelled :> WaitHandle; mutex :> WaitHandle |]
 
                             let mutable signalled = -1
 
@@ -6058,14 +6068,16 @@ let private withLock
                         if not (isNull mutex) then
                             mutex.Dispose()
 
+                        acquisitionCancelled.Dispose()
                         releaseRequested.Dispose()
                         adjustLockOwnerThreads -1
                 )
             )
 
-        // Async.AwaitTask ignores F# cancellation, so the cancellation signal is
-        // registered on the ambient token to release the owner even mid-await.
-        use cancellationRegistration = cancellationToken.Register(signalRelease)
+        // Async.AwaitTask ignores F# cancellation, so the token is registered to
+        // abandon acquisition only; a held mutex is released solely by the async
+        // caller's post-action completion/finally.
+        use cancellationRegistration = cancellationToken.Register(signalAcquisitionCancelled)
 
         owner.IsBackground <- true
         owner.Name <- "Mcp.Workflow.LockOwner"
