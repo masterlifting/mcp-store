@@ -167,8 +167,7 @@ let runFsiReturnExit name script arguments : Async<int * string * string> =
     return child.ExitCode, stdout, stderr
     }
 
-// ARCH-INFRA005-001 binds projectRoot to the MCP process working directory, so
-// the harness anchors the host at its own task workspace rather than the repo.
+// The host validates projectRoot against its process workspace; multiple consumer identities must share that producer instance.
 let startMcp (workingDirectory: string) =
     requireReleaseEntry ()
     let catalog = Path.Combine(workingDirectory, "profiles.json")
@@ -338,7 +337,20 @@ async {
     assertEqual "initialize id" 1 (initialized.["id"].GetValue<int>())
     let initResult = resultOf "initialize" initialized
     assertEqual "initialize protocolVersion" "2024-11-05" (nodeString initResult.["protocolVersion"])
-    assertEqual "initialize server name" "opencode-workflow" (nodeString initResult.["serverInfo"].["name"])
+    assertEqual "initialize server name" "mcp-store-workflow" (nodeString initResult.["serverInfo"].["name"])
+
+    let! secondConsumer =
+        send
+            mcp
+            "second consumer initialize"
+            24
+            "initialize"
+            (jobj
+                [ "protocolVersion", jstr "2024-11-05"
+                  "capabilities", jobj []
+                  "clientInfo", jobj [ "name", jstr "another-harness"; "version", jstr "9" ] ])
+    assertEqual "second consumer initialize id" 24 (secondConsumer.["id"].GetValue<int>())
+    assertEqual "same producer identity for second consumer" "mcp-store-workflow" (nodeString secondConsumer.["result"].["serverInfo"].["name"])
     assertEqual
         "initialize tools listChanged"
         false
