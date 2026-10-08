@@ -1,3 +1,4 @@
+// role: test entrypoint
 // Deterministic coverage for the platform-internal Workflow MCP boundary:
 // the native stdio handshake and tool surface, transport parity with the retained library and
 // CLI paths, structured results, bounded failures, workspace validation,

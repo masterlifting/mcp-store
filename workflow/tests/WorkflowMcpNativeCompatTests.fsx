@@ -1,3 +1,4 @@
+// role: test entrypoint
 open System
 open System.Diagnostics
 open System.IO

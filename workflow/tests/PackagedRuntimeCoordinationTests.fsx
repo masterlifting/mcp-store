@@ -1,3 +1,4 @@
+// role: test entrypoint
 // Process-boundary proof for the packaged Workflow distribution: the packaged
 // runtime coordinates cross-process work with an OS mutex, so a task directory
 // stays free of runtime.lock while two processes race and an owner is killed.

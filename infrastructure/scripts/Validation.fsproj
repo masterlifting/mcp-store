@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net11.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>Validation</AssemblyName>
+    <RootNamespace>Validation</RootNamespace>
+    <LangVersion>9.0</LangVersion>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <DebugType>None</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+    <!-- FCS reference uses the SDK-relative path so the build stays hermetic without NuGet or hard-coded ProgramFiles paths. -->
+    <FSharpCompilerServicePath>$(MSBuildSDKsPath)/../FSharp/FSharp.Compiler.Service.dll</FSharpCompilerServicePath>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="Analysis.fs" />
+    <Compile Include="Validate.fs" />
+  </ItemGroup>
+  <ItemGroup>
+    <Reference Include="FSharp.Compiler.Service">
+      <HintPath>$(FSharpCompilerServicePath)</HintPath>
+      <Private>true</Private>
+    </Reference>
+  </ItemGroup>
+</Project>

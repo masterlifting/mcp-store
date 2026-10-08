@@ -1,3 +1,4 @@
+// role: reusable module/helper
 // Repo-shared deterministic distribution flow loaded as the explicit
 // DistributionBuild module. One producer-supplied request keeps clean-tree
 // provenance, publish, staging, manifest, and archive identical across producers.

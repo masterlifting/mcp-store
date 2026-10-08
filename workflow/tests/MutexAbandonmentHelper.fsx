@@ -1,3 +1,4 @@
+// role: entrypoint/command
 // Test helper for the abandoned-owner recovery process-boundary test. It opens
 // the same OS-named runtime coordination mutex the packaged Workflow producer
 // uses for a given sidecar path, acquires it, signals readiness, and then blocks
