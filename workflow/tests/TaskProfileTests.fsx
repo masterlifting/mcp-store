@@ -580,31 +580,67 @@ async {
         do! expectRejected "legacy profile id is not registered" "unknown profile 'opencode'" (createTaskWithProfile rootH (Some "opencode") (createRequest "TST-924" "Retired identity"))
 
         let legacyRoot = root "legacy-opencode-task"
-        let! legacyDraft = expectOk "create legacy source profile draft" (createTask legacyRoot (createRequest "TST-925" "Legacy"))
-        let rewriteProfileIdentity (profile: string) (json: string) =
-            let node = System.Text.Json.Nodes.JsonNode.Parse(json).AsObject()
-            node["profile"] <- System.Text.Json.Nodes.JsonValue.Create(profile)
-            node.ToJsonString()
-        let legacyJson = rewriteProfileIdentity "opencode" (serialize legacyDraft)
+        let legacyFingerprint = "a85923f9017bf758521a4a2e67338458399f3e0f6f0ffb0ed2165e0b1413b71b"
+        let legacyDraftGuards =
+            """[{"id":"G1","target":"task","checkpoint":"beforeComplete","origin":"profileMaterialized","requirement":"evidenceRequired","evidenceKind":"test","minimumCount":1,"producerRole":"tester","requireIndependentProducer":false,"applicability":"explicitDecision:coordinator","waiver":"waivableBy:user","disposition":"applicable"},{"id":"G2","target":"task","checkpoint":"beforeComplete","origin":"profileMaterialized","requirement":"evidenceRequired","evidenceKind":"review","minimumCount":1,"producerRole":"reviewer","requireIndependentProducer":false,"applicability":"explicitDecision:user","waiver":"waivableBy:user","disposition":"applicable"}]"""
+        let legacyGuardKeys = """{"G1":"validation","G2":"review"}"""
+        let legacyJson (id: string) (lifecycle: string) (revision: int) (state: string) =
+            let document = System.Text.Json.Nodes.JsonNode.Parse(state).AsObject()
+            document["profile"] <- System.Text.Json.Nodes.JsonValue.Create("opencode")
+            document["profileFingerprint"] <- System.Text.Json.Nodes.JsonValue.Create(legacyFingerprint)
+            document["lifecycle"] <- System.Text.Json.Nodes.JsonValue.Create(lifecycle)
+            document["stateRevision"] <- System.Text.Json.Nodes.JsonValue.Create(revision)
+            document["id"] <- System.Text.Json.Nodes.JsonValue.Create(id)
+            document.ToJsonString()
+
+        let! legacyDraft = expectOk "create current-format legacy fixture template" (createTask legacyRoot (createRequest "TST-925" "Legacy"))
+        let draftTemplate = System.Text.Json.Nodes.JsonNode.Parse(serialize legacyDraft).AsObject()
+        draftTemplate["guards"] <- System.Text.Json.Nodes.JsonNode.Parse legacyDraftGuards
+        draftTemplate["profileGuardKeys"] <- System.Text.Json.Nodes.JsonNode.Parse legacyGuardKeys
         let legacySidecar = Path.Combine(legacyRoot, ".tasks", "TST-925", SidecarFileName)
-        File.WriteAllText(legacySidecar, legacyJson)
+        File.WriteAllText(legacySidecar, legacyJson "TST-925" "open" 0 (draftTemplate.ToJsonString()))
+        let draftFixture = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText legacySidecar)
+        assertEqual "historical Draft fixture contract state" "draft" (draftFixture["contractState"].GetValue<string>())
+        assertEqual "historical Draft fixture fingerprint" legacyFingerprint (draftFixture["profileFingerprint"].GetValue<string>())
+        assertEqual "historical Draft fixture keyed guards" ((System.Text.Json.Nodes.JsonNode.Parse legacyDraftGuards).ToJsonString()) (draftFixture["guards"].ToJsonString())
+        assertEqual "historical Draft fixture guard-key provenance" ((System.Text.Json.Nodes.JsonNode.Parse legacyGuardKeys).ToJsonString()) (draftFixture["profileGuardKeys"].ToJsonString())
+        let! draftBytesBeforeRejectedMutation = File.ReadAllBytesAsync(legacySidecar) |> Async.AwaitTask
         let! legacyRead = expectOk "legacy identity remains inspectable" (getTask legacyRoot "TST-925")
         assertEqual "legacy profile identity remains stored" "opencode" legacyRead.Profile
-        assertEqual "legacy profile fingerprint remains stored" legacyDraft.ProfileFingerprint legacyRead.ProfileFingerprint
+        assertEqual "legacy profile fingerprint remains stored" legacyFingerprint legacyRead.ProfileFingerprint
         do! expectRejected "legacy draft mutation fails closed" "PROFILE_DRIFT: profile 'opencode' is not available" (applyTask legacyRoot "TST-925" legacyRead.StateRevision (AddEvidence(makeEvidence "E1" EvidenceKind.Test "blocked")))
+        let! draftBytesAfterRejectedMutation = File.ReadAllBytesAsync(legacySidecar) |> Async.AwaitTask
+        assertEqual "unsupported Draft mutation preserves persisted bytes" (Convert.ToBase64String draftBytesBeforeRejectedMutation) (Convert.ToBase64String draftBytesAfterRejectedMutation)
         let! reclassifiedLegacyDraft = expectOk "Draft reclassification is explicit and Coordinator-permitted" (applyTask legacyRoot "TST-925" legacyRead.StateRevision (ReclassifyTask { Kind = None; Profile = Some HarnessProfileId; Reason = "operator compared legacy obligations" }))
         assertEqual "explicit Draft reclassification adopts harness" HarnessProfileId reclassifiedLegacyDraft.Profile
+        assertEqual "Draft reclassification replaces source keyed guards with target guards" (set [ "validation"; "review" ]) (reclassifiedLegacyDraft.ProfileGuardKeys |> Map.toSeq |> Seq.map snd |> Set.ofSeq)
+        assertEqual "Draft reclassification adopts target profile fingerprint" harness.Fingerprint reclassifiedLegacyDraft.ProfileFingerprint
 
-        let! baselinedSource = expectOk "create baselined legacy source" (createTask legacyRoot (createRequest "TST-926" "Legacy baseline"))
-        let! baselineSource = expectOk "baseline legacy source" (applyTask legacyRoot "TST-926" baselinedSource.StateRevision (StartWorkItem "W1"))
-        let baselineJson = rewriteProfileIdentity "opencode" (serialize baselineSource)
+        let! baselinedSource = expectOk "create baselined current-format legacy fixture template" (createTask legacyRoot (createRequest "TST-926" "Legacy baseline"))
+        let! baselineSource = expectOk "baseline legacy fixture template" (applyTask legacyRoot "TST-926" baselinedSource.StateRevision (StartWorkItem "W1"))
+        let baselineTemplate = System.Text.Json.Nodes.JsonNode.Parse(serialize baselineSource).AsObject()
+        baselineTemplate["profile"] <- System.Text.Json.Nodes.JsonValue.Create("opencode")
+        baselineTemplate["profileFingerprint"] <- System.Text.Json.Nodes.JsonValue.Create(legacyFingerprint)
+        baselineTemplate["guards"] <- System.Text.Json.Nodes.JsonNode.Parse legacyDraftGuards
+        baselineTemplate["profileGuardKeys"] <- System.Text.Json.Nodes.JsonNode.Parse legacyGuardKeys
+        let baselineJson = baselineTemplate.ToJsonString()
         let baselineSidecar = Path.Combine(legacyRoot, ".tasks", "TST-926", SidecarFileName)
         File.WriteAllText(baselineSidecar, baselineJson)
+        let baselineFixture = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText baselineSidecar)
+        assertEqual "historical Baselined fixture contract state" "baselined" (baselineFixture["contractState"].GetValue<string>())
+        assertEqual "historical Baselined fixture fingerprint" legacyFingerprint (baselineFixture["profileFingerprint"].GetValue<string>())
+        assertEqual "historical Baselined fixture keyed guards" ((System.Text.Json.Nodes.JsonNode.Parse legacyDraftGuards).ToJsonString()) (baselineFixture["guards"].ToJsonString())
+        assertEqual "historical Baselined fixture guard-key provenance" ((System.Text.Json.Nodes.JsonNode.Parse legacyGuardKeys).ToJsonString()) (baselineFixture["profileGuardKeys"].ToJsonString())
+        let! baselineBytesBeforeRejectedMutations = File.ReadAllBytesAsync(baselineSidecar) |> Async.AwaitTask
         do! expectRejected "legacy baselined mutation fails closed" "PROFILE_DRIFT: profile 'opencode' is not available" (applyTask legacyRoot "TST-926" baselineSource.StateRevision (AddEvidence(makeEvidence "E1" EvidenceKind.Test "blocked")))
+        let! baselineBytesAfterRejectedMutation = File.ReadAllBytesAsync(baselineSidecar) |> Async.AwaitTask
+        assertEqual "unsupported Baselined AddEvidence preserves persisted bytes" (Convert.ToBase64String baselineBytesBeforeRejectedMutations) (Convert.ToBase64String baselineBytesAfterRejectedMutation)
         do! expectRejected "legacy baselined reclassification requires unavailable user authority" "operation requires user authority; ordinary Coordinator invocation cannot authorize it" (applyTask legacyRoot "TST-926" baselineSource.StateRevision (ReclassifyTask { Kind = None; Profile = Some HarnessProfileId; Reason = "source profile unavailable" }))
+        let! baselineBytesAfterRejectedReclassification = File.ReadAllBytesAsync(baselineSidecar) |> Async.AwaitTask
+        assertEqual "unsupported Baselined reclassification preserves persisted bytes" (Convert.ToBase64String baselineBytesBeforeRejectedMutations) (Convert.ToBase64String baselineBytesAfterRejectedReclassification)
         let! stillLegacy = expectOk "rejected legacy reclassification preserves identity" (getTask legacyRoot "TST-926")
         assertEqual "baselined legacy identity remains stored" "opencode" stillLegacy.Profile
-        assertEqual "baselined legacy fingerprint remains stored" baselineSource.ProfileFingerprint stillLegacy.ProfileFingerprint
+        assertEqual "baselined legacy fingerprint remains stored" legacyFingerprint stillLegacy.ProfileFingerprint
 
         assertTrue
             "harness fingerprint is content-derived, distinct from general"
