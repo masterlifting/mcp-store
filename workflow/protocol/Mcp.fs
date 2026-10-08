@@ -625,7 +625,7 @@ let private initializeResult protocolVersion =
     capabilities["tools"] <- toolsCapability
     result["capabilities"] <- capabilities
     let serverInfo = JsonObject()
-    serverInfo["name"] <- node "opencode-workflow"
+    serverInfo["name"] <- node "mcp-store-workflow"
     serverInfo["version"] <- node "1"
     result["serverInfo"] <- serverInfo
     result
