@@ -2,8 +2,8 @@
 // the native stdio handshake and tool surface, transport parity with the retained library and
 // CLI paths, structured results, bounded failures, workspace validation,
 // expected-revision CAS, and the absence of authority/receipt/effect ingress.
-// Every child process is a fixed repository script; there is no LLM, network,
-// or model dependency. Plain FSI harness because the frozen solution forbids
+// Every child process is a fixed repository script or producer artifact; there is no LLM, network, or model dependency.
+// Plain FSI harness because the frozen solution forbids
 // adding a project/package system.
 
 #load "../domain/ComputationExpressions.fs"
@@ -167,8 +167,7 @@ let runFsiReturnExit name script arguments : Async<int * string * string> =
     return child.ExitCode, stdout, stderr
     }
 
-// ARCH-INFRA005-001 binds projectRoot to the MCP process working directory, so
-// the harness anchors the host at its own task workspace rather than the repo.
+// The host validates projectRoot against its process workspace; multiple consumer identities must share that producer instance.
 let startMcp (workingDirectory: string) =
     requireReleaseEntry ()
     let catalog = Path.Combine(workingDirectory, "profiles.json")
@@ -338,7 +337,27 @@ async {
     assertEqual "initialize id" 1 (initialized.["id"].GetValue<int>())
     let initResult = resultOf "initialize" initialized
     assertEqual "initialize protocolVersion" "2024-11-05" (nodeString initResult.["protocolVersion"])
-    assertEqual "initialize server name" "opencode-workflow" (nodeString initResult.["serverInfo"].["name"])
+    assertEqual "initialize server name" "mcp-store-workflow" (nodeString initResult.["serverInfo"].["name"])
+    let secondRoot = Path.Combine(tempRoot, "second-client-workspace")
+    Directory.CreateDirectory secondRoot |> ignore
+    let secondMcp = startMcp secondRoot
+    let secondStderr = secondMcp.StandardError.ReadToEndAsync()
+    let! secondInitialized =
+        send
+            secondMcp
+            "independent client initialize"
+            24
+            "initialize"
+            (jobj
+                [ "protocolVersion", jstr "2024-11-05"
+                  "capabilities", jobj []
+                  "clientInfo", jobj [ "name", jstr "another-harness"; "version", jstr "9" ] ])
+    assertEqual "second client initialize id" 24 (secondInitialized.["id"].GetValue<int>())
+    let secondResult = resultOf "second client initialize" secondInitialized
+    assertEqual "second client protocol" "2024-11-05" (nodeString secondResult.["protocolVersion"])
+    assertEqual "same producer identity for independent process" "mcp-store-workflow" (nodeString secondResult.["serverInfo"].["name"])
+    assertEqual "same producer version for independent process" (nodeString initResult.["serverInfo"].["version"]) (nodeString secondResult.["serverInfo"].["version"])
+    do! notify secondMcp "notifications/initialized" (jobj [])
     assertEqual
         "initialize tools listChanged"
         false
@@ -353,6 +372,10 @@ async {
     let toolNames = tools |> Seq.map (fun tool -> nodeString tool.["name"]) |> List.ofSeq
     assertEqual "tools/list names" [ "task_create"; "task_get"; "task_apply"; "task_validate" ] toolNames
     let applyTool = tools |> Seq.find (fun tool -> nodeString tool.["name"] = "task_apply")
+    let toolsJson = (resultOf "tools/list" listed).["tools"].ToJsonString()
+    let! secondListed = send secondMcp "independent client tools/list" 25 "tools/list" (jobj [])
+    let secondTools = (resultOf "independent client tools/list" secondListed).["tools"]
+    assertTrue "independent clients receive compatible tool schemas" (JsonNode.DeepEquals(JsonNode.Parse toolsJson, secondTools))
     assertEqual
         "task_apply inputSchema additionalProperties"
         false
@@ -601,10 +624,18 @@ async {
 
     let! stderr = mcpStderr |> Async.AwaitTask
     assertTrue "MCP stderr carries no protocol responses" (not (stderr.Contains("\"jsonrpc\"", StringComparison.Ordinal)))
+    secondMcp.StandardInput.Close()
+    do! secondMcp.WaitForExitAsync().WaitAsync(TimeSpan.FromMilliseconds 120000.0) |> Async.AwaitTask
+    let! secondTrailing = secondMcp.StandardOutput.ReadToEndAsync() |> Async.AwaitTask
+    for line in secondTrailing.Split('\n') do
+        if not (String.IsNullOrWhiteSpace line) then validateProtocolLine (line.Trim()) |> ignore
+    let! independentStderr = secondStderr |> Async.AwaitTask
+    assertTrue "independent MCP stderr carries no protocol responses" (not (independentStderr.Contains("\"jsonrpc\"", StringComparison.Ordinal)))
 
     printfn
         "OK platform-internal task runtime MCP boundary: stdio handshake, tools/list, structured results, library/CLI parity, TaskApply CLI unknown-flag/authority fail-closed exit, workspace rejection, CAS preservation, authority/receipt/effect rejection, bounded failures, and stdout cleanliness"
     mcp.Dispose()
+    secondMcp.Dispose()
     if Directory.Exists tempRoot && tempRoot.Contains("taskruntime-mcp-tests-", StringComparison.Ordinal) then
         Directory.Delete(tempRoot, true)
 }

@@ -47,7 +47,7 @@ let GeneralProfileId = "general"
 let SoftwareProfileId = "software"
 
 [<Literal>]
-let OpenCodeProfileId = "opencode"
+let HarnessProfileId = "harness"
 
 [<Literal>]
 let SidecarFileName = "runtime.json"
@@ -1341,13 +1341,13 @@ let private builtinSoftwareDefinition: ProfileDefinition =
           Execution =
             "Engineer owns implementation and implementation-side build evidence; tester owns materially applicable test design, implementation, and execution; the reviewer stays independent and read-only. Build/test/review requirements are risk-driven structured Guards, and review is retained when applicability is uncertain. Execution complexity is distinct from architecture sensitivity: escalate to architecture only for contract, boundary, persistence, concurrency, security, or ownership impact. Debugging follows reproduce/evidence/hypothesis/falsification/fix/verify." } }
 
-// The shared `opencode` profile targets the harness itself. It references
+// The shared `harness` profile targets the harness itself. It references
 // external capabilities/roles without redefining them and never grants
 // permissions; its mandatory policy is structured Guards. Execution materializes
 // validation and fail-closed review obligations; Research materializes a
 // harness-investigation evidence expectation. TaskKind scopes each obligation to
 // its Kind, so both Kinds carry meaningful policy without prose reminders.
-let private builtinOpenCodeDefinition: ProfileDefinition =
+let private builtinHarnessDefinition: ProfileDefinition =
     let executionGuard key evidenceKind producerRole applicability waiver : ProfileGuardSpec =
         { Key = key
           Target = TaskTarget
@@ -1375,14 +1375,13 @@ let private builtinOpenCodeDefinition: ProfileDefinition =
           TaskKind = Some Research }
 
     { SchemaVersion = 1
-      Id = OpenCodeProfileId
+      Id = HarnessProfileId
       Description =
-        "Shared OpenCode profile: harness architecture/context, cross-file semantic consistency, and instruction-authority obligations."
+        "Shared harness profile: harness architecture/context, cross-file semantic consistency, and instruction-authority obligations."
       IdPrefix = None
       Routing =
         { Positive =
-            [ "opencode"
-              "agent"
+            [ "agent"
               "skill"
               "contract"
               "knowledge"
@@ -1420,16 +1419,16 @@ let private builtinOpenCodeDefinition: ProfileDefinition =
               { Purpose = "review"; Role = "reviewer" } ] }
       SemanticGuidance =
         { Common =
-            "Harness work targets OpenCode agents, skills, contracts, knowledge/composition, permissions, tools/plugins/MCP, model-facing Markdown, and cross-file semantic consistency; instruction authority and permission surfaces are high-impact."
+            "Harness work targets agent, skill, contract, knowledge, composition, permission, plugin, tool, mcp, instruction, markdown, and harness surfaces, and cross-file semantic consistency; instruction authority and permission surfaces are high-impact."
           Research =
             "Investigate the current harness read-only and record version-sensitive runtime/config evidence before concluding."
           Execution =
-            "Preserve #2 capability/role ownership and never grant permissions from Profile policy; keep instruction authority and composition consistent across files, and retain validation and independent review until their Guards are satisfied." } }
+            "Preserve capability/role ownership and never grant permissions from Profile policy; keep instruction authority and composition consistent across files, and retain validation and independent review until their Guards are satisfied." } }
 
 let private builtinProfiles =
     [ makeEffectiveProfile builtinGeneralDefinition BuiltIn
       makeEffectiveProfile builtinSoftwareDefinition BuiltIn
-      makeEffectiveProfile builtinOpenCodeDefinition BuiltIn ]
+      makeEffectiveProfile builtinHarnessDefinition BuiltIn ]
     |> List.map (fun profile -> profile.Definition.Id, profile)
     |> Map.ofList
 
@@ -1740,7 +1739,7 @@ let private definitionFromOverlay (overlay: ProfileOverlay) =
     validateProfileDefinition definition
 
 // project profile files are strict JSON read from
-// <project-root>/.opencode/task/profiles. A file whose id matches an existing
+// <project-root>/.workflow/profiles. A file whose id matches an existing
 // shared profile is an overlay; an unknown id introduces a project profile.
 module private ProfileSource =
     open System.Text.Json
@@ -2053,7 +2052,7 @@ let private readProjectProfile (path: string) : Async<Result<string * ProfileOve
 // composition.json is never consulted here.
 let resolveProfiles root : Async<Result<Map<string, EffectiveProfile>, RuntimeError>> =
     async {
-        let directory = Path.Combine(Path.GetFullPath root, ".opencode", "task", "profiles")
+        let directory = Path.Combine(Path.GetFullPath root, ".workflow", "profiles")
 
         if not (Directory.Exists directory) then
             return Ok builtinProfiles

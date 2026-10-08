@@ -6,7 +6,7 @@
 // baselined weakening reclassification. It also covers the built-in `software`
 // policy: Execution materializes build/test/review gates, Research materializes
 // none, and Draft reclassification syncs the gate set to the target profile/kind.
-// Finally it covers the shared built-in `opencode` profile: registry/default
+// Finally it covers the shared built-in `harness` profile: registry/default
 // resolution, policy-only capabilities, per-Kind guard materialization/isolation,
 // fail-closed review under Coordinator authority, a satisfiable non-waivable
 // research investigation gate, and monotonic same-ID overlay merge.
@@ -140,7 +140,7 @@ let root label =
     path
 
 let writeProfiles root (files: (string * string) list) =
-    let directory = Path.Combine(root, ".opencode", "task", "profiles")
+    let directory = Path.Combine(root, ".workflow", "profiles")
     Directory.CreateDirectory directory |> ignore
 
     for name, content in files do
@@ -152,7 +152,7 @@ let resolveWith label files =
     resolveProfiles profileRoot
 
 let profilePath profileRoot name =
-    Path.Combine(profileRoot, ".opencode", "task", "profiles", name)
+    Path.Combine(profileRoot, ".workflow", "profiles", name)
 
 // Standalone entry bridge: FSI needs one synchronous script entry.
 async {
@@ -162,7 +162,22 @@ async {
 
         let! builtins = expectOk "resolve builtins without profiles directory" (resolveProfiles rootA)
         assertEqual "builtin registry count" 3 (Map.count builtins)
-        assertTrue "opencode profile is registered by default" (builtins.ContainsKey OpenCodeProfileId)
+        assertTrue "harness profile is registered by default" (builtins.ContainsKey HarnessProfileId)
+        assertTrue "retired opencode profile is absent" (not (builtins.ContainsKey "opencode"))
+        assertTrue "profile resolution requires no OpenCode directory" (not (Directory.Exists(Path.Combine(rootA, ".opencode"))))
+
+        let previousDirectory = Environment.CurrentDirectory
+        let unrelatedCwd = root "unrelated-cwd"
+        try
+            Environment.CurrentDirectory <- unrelatedCwd
+            let canonicalDirectory = Path.Combine(rootA, ".workflow", "profiles")
+            Directory.CreateDirectory canonicalDirectory |> ignore
+            File.WriteAllText(Path.Combine(canonicalDirectory, "cwd-profile.json"), profileJson "cwd-profile" (Some "Found from project root") [] [])
+            let! fromUnrelatedCwd = expectOk "project profile discovery ignores current directory" (resolveProfiles rootA)
+            assertTrue "canonical profile under project root discovered from unrelated CWD" (fromUnrelatedCwd.ContainsKey "cwd-profile")
+            assertTrue "unrelated CWD profile directory is ignored" (not (Directory.Exists(Path.Combine(unrelatedCwd, ".workflow", "profiles"))))
+        finally
+            Environment.CurrentDirectory <- previousDirectory
 
         let general = builtins.[GeneralProfileId]
         assertEqual "general origin" BuiltIn general.Origin
@@ -552,173 +567,239 @@ async {
 
         assertEqual "software execution lifecycle complete" "complete" softwareExecCompleted.Lifecycle
 
-        // --- Built-in opencode profile: registry, policy-only capabilities, per-Kind
+        // --- Built-in harness profile: registry, policy-only capabilities, per-Kind
         //     guard materialization/isolation, fail-closed review, non-waivable
         //     research investigation, and monotonic same-ID overlay ---
-        let rootH = root "opencode-profile"
+        let rootH = root "harness-profile"
 
-        let! openCodeProfiles = expectOk "resolve built-in opencode profile" (resolveProfiles rootH)
-        let openCode = openCodeProfiles.[OpenCodeProfileId]
-        assertEqual "opencode origin" BuiltIn openCode.Origin
+        let! harnessProfiles = expectOk "resolve built-in harness profile" (resolveProfiles rootH)
+        let harness = harnessProfiles.[HarnessProfileId]
+        assertEqual "harness origin" BuiltIn harness.Origin
+
+        // Legacy identifiers have no registry alias, so resolution never consults the former consumer directory.
+        do! expectRejected "legacy profile id is not registered" "unknown profile 'opencode'" (createTaskWithProfile rootH (Some "opencode") (createRequest "TST-924" "Retired identity"))
+
+        let legacyRoot = root "legacy-opencode-task"
+        let legacyFingerprint = "a85923f9017bf758521a4a2e67338458399f3e0f6f0ffb0ed2165e0b1413b71b"
+        let legacyDraftGuards =
+            """[{"id":"G1","target":"task","checkpoint":"beforeComplete","origin":"profileMaterialized","requirement":"evidenceRequired","evidenceKind":"test","minimumCount":1,"producerRole":"tester","requireIndependentProducer":false,"applicability":"explicitDecision:coordinator","waiver":"waivableBy:user","disposition":"applicable"},{"id":"G2","target":"task","checkpoint":"beforeComplete","origin":"profileMaterialized","requirement":"evidenceRequired","evidenceKind":"review","minimumCount":1,"producerRole":"reviewer","requireIndependentProducer":false,"applicability":"explicitDecision:user","waiver":"waivableBy:user","disposition":"applicable"}]"""
+        let legacyGuardKeys = """{"G1":"validation","G2":"review"}"""
+        let legacyJson (id: string) (lifecycle: string) (revision: int) (state: string) =
+            let document = System.Text.Json.Nodes.JsonNode.Parse(state).AsObject()
+            document["profile"] <- System.Text.Json.Nodes.JsonValue.Create("opencode")
+            document["profileFingerprint"] <- System.Text.Json.Nodes.JsonValue.Create(legacyFingerprint)
+            document["lifecycle"] <- System.Text.Json.Nodes.JsonValue.Create(lifecycle)
+            document["stateRevision"] <- System.Text.Json.Nodes.JsonValue.Create(revision)
+            document["id"] <- System.Text.Json.Nodes.JsonValue.Create(id)
+            document.ToJsonString()
+
+        let! legacyDraft = expectOk "create current-format legacy fixture template" (createTask legacyRoot (createRequest "TST-925" "Legacy"))
+        let draftTemplate = System.Text.Json.Nodes.JsonNode.Parse(serialize legacyDraft).AsObject()
+        draftTemplate["guards"] <- System.Text.Json.Nodes.JsonNode.Parse legacyDraftGuards
+        draftTemplate["profileGuardKeys"] <- System.Text.Json.Nodes.JsonNode.Parse legacyGuardKeys
+        let legacySidecar = Path.Combine(legacyRoot, ".tasks", "TST-925", SidecarFileName)
+        File.WriteAllText(legacySidecar, legacyJson "TST-925" "open" 0 (draftTemplate.ToJsonString()))
+        let draftFixture = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText legacySidecar)
+        assertEqual "historical Draft fixture contract state" "draft" (draftFixture["contractState"].GetValue<string>())
+        assertEqual "historical Draft fixture fingerprint" legacyFingerprint (draftFixture["profileFingerprint"].GetValue<string>())
+        assertEqual "historical Draft fixture keyed guards" ((System.Text.Json.Nodes.JsonNode.Parse legacyDraftGuards).ToJsonString()) (draftFixture["guards"].ToJsonString())
+        assertEqual "historical Draft fixture guard-key provenance" ((System.Text.Json.Nodes.JsonNode.Parse legacyGuardKeys).ToJsonString()) (draftFixture["profileGuardKeys"].ToJsonString())
+        let! draftBytesBeforeRejectedMutation = File.ReadAllBytesAsync(legacySidecar) |> Async.AwaitTask
+        let! legacyRead = expectOk "legacy identity remains inspectable" (getTask legacyRoot "TST-925")
+        assertEqual "legacy profile identity remains stored" "opencode" legacyRead.Profile
+        assertEqual "legacy profile fingerprint remains stored" legacyFingerprint legacyRead.ProfileFingerprint
+        do! expectRejected "legacy draft mutation fails closed" "PROFILE_DRIFT: profile 'opencode' is not available" (applyTask legacyRoot "TST-925" legacyRead.StateRevision (AddEvidence(makeEvidence "E1" EvidenceKind.Test "blocked")))
+        let! draftBytesAfterRejectedMutation = File.ReadAllBytesAsync(legacySidecar) |> Async.AwaitTask
+        assertEqual "unsupported Draft mutation preserves persisted bytes" (Convert.ToBase64String draftBytesBeforeRejectedMutation) (Convert.ToBase64String draftBytesAfterRejectedMutation)
+        let! reclassifiedLegacyDraft = expectOk "Draft reclassification is explicit and Coordinator-permitted" (applyTask legacyRoot "TST-925" legacyRead.StateRevision (ReclassifyTask { Kind = None; Profile = Some HarnessProfileId; Reason = "operator compared legacy obligations" }))
+        assertEqual "explicit Draft reclassification adopts harness" HarnessProfileId reclassifiedLegacyDraft.Profile
+        assertEqual "Draft reclassification replaces source keyed guards with target guards" (set [ "validation"; "review" ]) (reclassifiedLegacyDraft.ProfileGuardKeys |> Map.toSeq |> Seq.map snd |> Set.ofSeq)
+        assertEqual "Draft reclassification adopts target profile fingerprint" harness.Fingerprint reclassifiedLegacyDraft.ProfileFingerprint
+
+        let! baselinedSource = expectOk "create baselined current-format legacy fixture template" (createTask legacyRoot (createRequest "TST-926" "Legacy baseline"))
+        let! baselineSource = expectOk "baseline legacy fixture template" (applyTask legacyRoot "TST-926" baselinedSource.StateRevision (StartWorkItem "W1"))
+        let baselineTemplate = System.Text.Json.Nodes.JsonNode.Parse(serialize baselineSource).AsObject()
+        baselineTemplate["profile"] <- System.Text.Json.Nodes.JsonValue.Create("opencode")
+        baselineTemplate["profileFingerprint"] <- System.Text.Json.Nodes.JsonValue.Create(legacyFingerprint)
+        baselineTemplate["guards"] <- System.Text.Json.Nodes.JsonNode.Parse legacyDraftGuards
+        baselineTemplate["profileGuardKeys"] <- System.Text.Json.Nodes.JsonNode.Parse legacyGuardKeys
+        let baselineJson = baselineTemplate.ToJsonString()
+        let baselineSidecar = Path.Combine(legacyRoot, ".tasks", "TST-926", SidecarFileName)
+        File.WriteAllText(baselineSidecar, baselineJson)
+        let baselineFixture = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText baselineSidecar)
+        assertEqual "historical Baselined fixture contract state" "baselined" (baselineFixture["contractState"].GetValue<string>())
+        assertEqual "historical Baselined fixture fingerprint" legacyFingerprint (baselineFixture["profileFingerprint"].GetValue<string>())
+        assertEqual "historical Baselined fixture keyed guards" ((System.Text.Json.Nodes.JsonNode.Parse legacyDraftGuards).ToJsonString()) (baselineFixture["guards"].ToJsonString())
+        assertEqual "historical Baselined fixture guard-key provenance" ((System.Text.Json.Nodes.JsonNode.Parse legacyGuardKeys).ToJsonString()) (baselineFixture["profileGuardKeys"].ToJsonString())
+        let! baselineBytesBeforeRejectedMutations = File.ReadAllBytesAsync(baselineSidecar) |> Async.AwaitTask
+        do! expectRejected "legacy baselined mutation fails closed" "PROFILE_DRIFT: profile 'opencode' is not available" (applyTask legacyRoot "TST-926" baselineSource.StateRevision (AddEvidence(makeEvidence "E1" EvidenceKind.Test "blocked")))
+        let! baselineBytesAfterRejectedMutation = File.ReadAllBytesAsync(baselineSidecar) |> Async.AwaitTask
+        assertEqual "unsupported Baselined AddEvidence preserves persisted bytes" (Convert.ToBase64String baselineBytesBeforeRejectedMutations) (Convert.ToBase64String baselineBytesAfterRejectedMutation)
+        do! expectRejected "legacy baselined reclassification requires unavailable user authority" "operation requires user authority; ordinary Coordinator invocation cannot authorize it" (applyTask legacyRoot "TST-926" baselineSource.StateRevision (ReclassifyTask { Kind = None; Profile = Some HarnessProfileId; Reason = "source profile unavailable" }))
+        let! baselineBytesAfterRejectedReclassification = File.ReadAllBytesAsync(baselineSidecar) |> Async.AwaitTask
+        assertEqual "unsupported Baselined reclassification preserves persisted bytes" (Convert.ToBase64String baselineBytesBeforeRejectedMutations) (Convert.ToBase64String baselineBytesAfterRejectedReclassification)
+        let! stillLegacy = expectOk "rejected legacy reclassification preserves identity" (getTask legacyRoot "TST-926")
+        assertEqual "baselined legacy identity remains stored" "opencode" stillLegacy.Profile
+        assertEqual "baselined legacy fingerprint remains stored" legacyFingerprint stillLegacy.ProfileFingerprint
 
         assertTrue
-            "opencode fingerprint is content-derived, distinct from general"
-            (openCode.Fingerprint <> generalFingerprint && openCode.Fingerprint <> "general-v1")
+            "harness fingerprint is content-derived, distinct from general"
+            (harness.Fingerprint <> generalFingerprint && harness.Fingerprint <> "general-v1")
 
-        let! openCodeAgain = expectOk "resolve built-in opencode profile again" (resolveProfiles rootH)
+        let! harnessAgain = expectOk "resolve built-in harness profile again" (resolveProfiles rootH)
 
         assertEqual
-            "opencode resolution deterministic"
-            (renderProfile openCode)
-            (renderProfile openCodeAgain.[OpenCodeProfileId])
+            "harness resolution deterministic"
+            (renderProfile harness)
+            (renderProfile harnessAgain.[HarnessProfileId])
 
         // Capabilities are a declarative envelope: the allowed set is selectable
         // policy, never an automatic capability or permission grant.
-        let openCodeEnvelope = openCode.Definition.CapabilityEnvelope
-        assertEqual "opencode required capabilities" [] openCodeEnvelope.Required
-        assertEqual "opencode default capabilities" [] openCodeEnvelope.Default
-        assertEqual "opencode allowed capabilities" [ "audit"; "dotnet"; "security"; "devops" ] openCodeEnvelope.Allowed
-        assertEqual "opencode allowed capabilities do not auto-activate" [] (effectiveCapabilities openCode [])
-        assertEqual "opencode declared capability is selectable" [ "dotnet"; "security" ] (effectiveCapabilities openCode [ "dotnet"; "security" ])
-        assertEqual "opencode undeclared capability is not granted" [] (effectiveCapabilities openCode [ "performance" ])
+        let harnessEnvelope = harness.Definition.CapabilityEnvelope
+        assertEqual "harness required capabilities" [] harnessEnvelope.Required
+        assertEqual "harness default capabilities" [] harnessEnvelope.Default
+        assertEqual "harness allowed capabilities" [ "audit"; "dotnet"; "security"; "devops" ] harnessEnvelope.Allowed
+        assertEqual "harness allowed capabilities do not auto-activate" [] (effectiveCapabilities harness [])
+        assertEqual "harness declared capability is selectable" [ "dotnet"; "security" ] (effectiveCapabilities harness [ "dotnet"; "security" ])
+        assertEqual "harness undeclared capability is not granted" [] (effectiveCapabilities harness [ "performance" ])
 
         // Execution materializes only the validation/review obligations.
-        let! openCodeExec = expectOk "create opencode execution task" (createTaskWithProfile rootH (Some OpenCodeProfileId) (createRequest "TST-920" "OpenCode execution"))
+        let! harnessExec = expectOk "create harness execution task" (createTaskWithProfile rootH (Some HarnessProfileId) (createRequest "TST-920" "Harness execution"))
 
-        assertEqual "opencode execution profile" OpenCodeProfileId openCodeExec.Profile
-        assertEqual "opencode execution fingerprint" openCode.Fingerprint openCodeExec.ProfileFingerprint
-        assertEqual "opencode execution materializes two guards" 2 openCodeExec.Guards.Length
+        assertEqual "harness execution profile" HarnessProfileId harnessExec.Profile
+        assertEqual "harness execution fingerprint" harness.Fingerprint harnessExec.ProfileFingerprint
+        assertEqual "harness execution materializes two guards" 2 harnessExec.Guards.Length
 
         assertTrue
-            "opencode execution guards are materialized task-completion obligations"
-            (openCodeExec.Guards
+            "harness execution guards are materialized task-completion obligations"
+            (harnessExec.Guards
              |> List.forall (fun guard ->
                  guard.Origin = ProfileMaterialized
                  && guard.Disposition = GuardDisposition.Applicable
                  && guard.Target = TaskTarget
                  && guard.Checkpoint = BeforeComplete))
 
-        let openCodeValidation = guardOfKind EvidenceKind.Test openCodeExec.Guards
-        let openCodeReview = guardOfKind EvidenceKind.Review openCodeExec.Guards
+        let harnessValidation = guardOfKind EvidenceKind.Test harnessExec.Guards
+        let harnessReview = guardOfKind EvidenceKind.Review harnessExec.Guards
 
-        assertEqual "opencode validation producer role" (Some "tester") ((requirementOf openCodeValidation).ProducerRole)
-        assertEqual "opencode review producer role" (Some "reviewer") ((requirementOf openCodeReview).ProducerRole)
+        assertEqual "harness validation producer role" (Some "tester") ((requirementOf harnessValidation).ProducerRole)
+        assertEqual "harness review producer role" (Some "reviewer") ((requirementOf harnessReview).ProducerRole)
 
         assertEqual
-            "opencode validation applicability"
+            "harness validation applicability"
             (ExplicitDecision MinimumAuthority.CoordinatorAuthority)
-            openCodeValidation.Applicability
+            harnessValidation.Applicability
 
         assertEqual
-            "opencode review applicability"
+            "harness review applicability"
             (ExplicitDecision MinimumAuthority.UserAuthority)
-            openCodeReview.Applicability
+            harnessReview.Applicability
 
         assertTrue
-            "opencode execution gates are user-waivable"
-            (openCodeExec.Guards
+            "harness execution gates are user-waivable"
+            (harnessExec.Guards
              |> List.forall (fun guard -> guard.Waiver = WaivableBy MinimumAuthority.UserAuthority))
 
         assertTrue
-            "opencode execution does not materialize the research investigation gate"
-            (openCodeExec.Guards |> List.forall (fun guard -> (requirementOf guard).Kind <> EvidenceKind.Research))
+            "harness execution does not materialize the research investigation gate"
+            (harnessExec.Guards |> List.forall (fun guard -> (requirementOf guard).Kind <> EvidenceKind.Research))
 
         // Review is fail-closed under ordinary Coordinator invocation: neither the
         // direct path nor a Coordinator-authored Decision can dispose it.
-        do! expectRejected "opencode review not-applicable fails closed under coordinator" "operation requires user authority; ordinary Coordinator invocation cannot authorize it" (applyTask rootH "TST-920" openCodeExec.StateRevision (MarkGuardNotApplicable(openCodeReview.Id, None)))
+        do! expectRejected "harness review not-applicable fails closed under coordinator" "operation requires user authority; ordinary Coordinator invocation cannot authorize it" (applyTask rootH "TST-920" harnessExec.StateRevision (MarkGuardNotApplicable(harnessReview.Id, None)))
 
-        do! expectRejected "opencode review waiver fails closed under coordinator" "operation requires user authority; ordinary Coordinator invocation cannot authorize it" (applyTask rootH "TST-920" openCodeExec.StateRevision (WaiveGuard(openCodeReview.Id, None)))
+        do! expectRejected "harness review waiver fails closed under coordinator" "operation requires user authority; ordinary Coordinator invocation cannot authorize it" (applyTask rootH "TST-920" harnessExec.StateRevision (WaiveGuard(harnessReview.Id, None)))
 
-        let! withCoordinatorDecision = expectOk "add coordinator decision for review guard" (applyTask rootH "TST-920" openCodeExec.StateRevision (AddDecision { Kind = ApplicabilityDecision; Targets = [ GuardDispositionTarget openCodeReview.Id ]; Rationale = "coordinator attempts to dispose a user-required guard" }))
+        let! withCoordinatorDecision = expectOk "add coordinator decision for review guard" (applyTask rootH "TST-920" harnessExec.StateRevision (AddDecision { Kind = ApplicabilityDecision; Targets = [ GuardDispositionTarget harnessReview.Id ]; Rationale = "coordinator attempts to dispose a user-required guard" }))
 
         let coordinatorDecision =
             withCoordinatorDecision.Decisions
-            |> List.find (fun decision -> decision.Targets |> List.contains (GuardDispositionTarget openCodeReview.Id))
+            |> List.find (fun decision -> decision.Targets |> List.contains (GuardDispositionTarget harnessReview.Id))
 
         assertEqual "coordinator decision authority" Coordinator coordinatorDecision.Authority
 
-        do! expectRejected "coordinator-authored decision cannot dispose user-required review guard" "does not authorize the exact operation" (applyTask rootH "TST-920" withCoordinatorDecision.StateRevision (MarkGuardNotApplicable(openCodeReview.Id, Some(DecisionRef coordinatorDecision.Id))))
+        do! expectRejected "coordinator-authored decision cannot dispose user-required review guard" "does not authorize the exact operation" (applyTask rootH "TST-920" withCoordinatorDecision.StateRevision (MarkGuardNotApplicable(harnessReview.Id, Some(DecisionRef coordinatorDecision.Id))))
 
         // Research materializes only the non-waivable investigation obligation.
-        let! openCodeResearch = expectOk "create opencode research task" (createTaskWithProfile rootH (Some OpenCodeProfileId) { createRequest "TST-921" "OpenCode research" with Kind = Research })
+        let! harnessResearch = expectOk "create harness research task" (createTaskWithProfile rootH (Some HarnessProfileId) { createRequest "TST-921" "Harness research" with Kind = Research })
 
-        assertEqual "opencode research profile" OpenCodeProfileId openCodeResearch.Profile
-        assertEqual "opencode research materializes one guard" 1 openCodeResearch.Guards.Length
+        assertEqual "harness research profile" HarnessProfileId harnessResearch.Profile
+        assertEqual "harness research materializes one guard" 1 harnessResearch.Guards.Length
 
-        let investigation = openCodeResearch.Guards.Head
-        assertEqual "opencode investigation origin" ProfileMaterialized investigation.Origin
-        assertEqual "opencode investigation kind" EvidenceKind.Research ((requirementOf investigation).Kind)
-        assertEqual "opencode investigation minimum count" 1 ((requirementOf investigation).MinimumCount)
-        assertEqual "opencode investigation producer role" None ((requirementOf investigation).ProducerRole)
-        assertEqual "opencode investigation applicability" Always investigation.Applicability
-        assertEqual "opencode investigation waiver" NotWaivable investigation.Waiver
+        let investigation = harnessResearch.Guards.Head
+        assertEqual "harness investigation origin" ProfileMaterialized investigation.Origin
+        assertEqual "harness investigation kind" EvidenceKind.Research ((requirementOf investigation).Kind)
+        assertEqual "harness investigation minimum count" 1 ((requirementOf investigation).MinimumCount)
+        assertEqual "harness investigation producer role" None ((requirementOf investigation).ProducerRole)
+        assertEqual "harness investigation applicability" Always investigation.Applicability
+        assertEqual "harness investigation waiver" NotWaivable investigation.Waiver
 
         assertTrue
-            "opencode research does not materialize execution validation/review gates"
-            (openCodeResearch.Guards
+            "harness research does not materialize execution validation/review gates"
+            (harnessResearch.Guards
              |> List.forall (fun guard ->
                  let kind = (requirementOf guard).Kind
                  kind <> EvidenceKind.Test && kind <> EvidenceKind.Review))
 
-        do! expectRejected "opencode investigation cannot be waived" "is not waivable" (applyTask rootH "TST-921" openCodeResearch.StateRevision (WaiveGuard(investigation.Id, None)))
+        do! expectRejected "harness investigation cannot be waived" "is not waivable" (applyTask rootH "TST-921" harnessResearch.StateRevision (WaiveGuard(investigation.Id, None)))
 
-        do! expectRejected "opencode investigation is always applicable" "is always applicable and cannot be marked NotApplicable" (applyTask rootH "TST-921" openCodeResearch.StateRevision (MarkGuardNotApplicable(investigation.Id, None)))
+        do! expectRejected "harness investigation is always applicable" "is always applicable and cannot be marked NotApplicable" (applyTask rootH "TST-921" harnessResearch.StateRevision (MarkGuardNotApplicable(investigation.Id, None)))
 
         // Investigation is satisfiable by task-level Research evidence and blocks
         // completion until that evidence exists.
-        let! researchStarted = expectOk "start opencode research work" (applyTask rootH "TST-921" openCodeResearch.StateRevision (StartWorkItem "W1"))
+        let! researchStarted = expectOk "start harness research work" (applyTask rootH "TST-921" harnessResearch.StateRevision (StartWorkItem "W1"))
 
         let! researchWorkDone = expectOk "complete opencode research work" (applyTask rootH "TST-921" researchStarted.StateRevision (CompleteWorkItem("W1", { Result = "harness investigated"; EvidenceRefs = [] })))
 
         let! researchSeedEvidence = expectOk "add non-research evidence for acceptance" (applyTask rootH "TST-921" researchWorkDone.StateRevision (AddEvidence(makeEvidence "E1" EvidenceKind.Test "non-research evidence")))
 
-        let! researchVerified = expectOk "verify opencode research acceptance" (applyTask rootH "TST-921" researchSeedEvidence.StateRevision (VerifyAcceptanceCriterion("AC1", [ "E1" ])))
+        let! researchVerified = expectOk "verify harness research acceptance" (applyTask rootH "TST-921" researchSeedEvidence.StateRevision (VerifyAcceptanceCriterion("AC1", [ "E1" ])))
 
-        do! expectRejected "opencode research completion blocked until investigation evidence exists" "is not satisfied" (applyTask rootH "TST-921" researchVerified.StateRevision (CompleteTask defaultHandoff))
+        do! expectRejected "harness research completion blocked until investigation evidence exists" "is not satisfied" (applyTask rootH "TST-921" researchVerified.StateRevision (CompleteTask defaultHandoff))
 
-        let! researchEvidenceAdded = expectOk "add opencode research investigation evidence" (applyTask rootH "TST-921" researchVerified.StateRevision (AddEvidence(makeEvidence "E2" EvidenceKind.Research "harness investigation recorded")))
+        let! researchEvidenceAdded = expectOk "add harness research investigation evidence" (applyTask rootH "TST-921" researchVerified.StateRevision (AddEvidence(makeEvidence "E2" EvidenceKind.Research "harness investigation recorded")))
 
-        let! researchCompleted = expectOk "complete opencode research task" (applyTask rootH "TST-921" researchEvidenceAdded.StateRevision (CompleteTask defaultHandoff))
+        let! researchCompleted = expectOk "complete harness research task" (applyTask rootH "TST-921" researchEvidenceAdded.StateRevision (CompleteTask defaultHandoff))
 
         assertEqual "opencode research completed lifecycle" "complete" researchCompleted.Lifecycle
 
-        // Same-ID overlay over the shared opencode profile merges monotonically:
+        // Same-ID overlay over the shared harness profile merges monotonically:
         // same-key guards strengthen without loss of the research investigation policy.
-        let rootI = root "opencode-overlay"
+        let rootI = root "harness-overlay"
 
-        writeProfiles rootI [ "opencode-overlay.json", profileJson OpenCodeProfileId None [] [ guardJson "validation" "test" 2 ] ]
+        writeProfiles rootI [ "harness-overlay.json", profileJson HarnessProfileId None [] [ guardJson "validation" "test" 2 ] ]
 
-        let! overlaidProfiles = expectOk "resolve opencode overlay" (resolveProfiles rootI)
-        let overlaidOpenCode = overlaidProfiles.[OpenCodeProfileId]
-        assertEqual "opencode overlay origin" Overlay overlaidOpenCode.Origin
-        assertEqual "opencode overlay retains three guards" 3 overlaidOpenCode.Definition.Policy.Guards.Length
+        let! overlaidProfiles = expectOk "resolve harness overlay" (resolveProfiles rootI)
+        let overlaidHarness = overlaidProfiles.[HarnessProfileId]
+        assertEqual "harness overlay origin" Overlay overlaidHarness.Origin
+        assertEqual "harness overlay retains three guards" 3 overlaidHarness.Definition.Policy.Guards.Length
 
         let overlaidValidation =
-            overlaidOpenCode.Definition.Policy.Guards |> List.find (fun guard -> guard.Key = "validation")
+            overlaidHarness.Definition.Policy.Guards |> List.find (fun guard -> guard.Key = "validation")
 
-        assertEqual "opencode overlay strengthens validation minimum count" 2 overlaidValidation.Requirement.MinimumCount
+        assertEqual "harness overlay strengthens validation minimum count" 2 overlaidValidation.Requirement.MinimumCount
 
         let overlaidInvestigation =
-            overlaidOpenCode.Definition.Policy.Guards |> List.find (fun guard -> guard.Key = "investigation")
+            overlaidHarness.Definition.Policy.Guards |> List.find (fun guard -> guard.Key = "investigation")
 
-        assertEqual "opencode overlay retains investigation applicability" Always overlaidInvestigation.Applicability
-        assertEqual "opencode overlay retains investigation waiver" NotWaivable overlaidInvestigation.Waiver
+        assertEqual "harness overlay retains investigation applicability" Always overlaidInvestigation.Applicability
+        assertEqual "harness overlay retains investigation waiver" NotWaivable overlaidInvestigation.Waiver
 
-        let! overlaidExec = expectOk "create overlaid opencode execution task" (createTaskWithProfile rootI (Some OpenCodeProfileId) (createRequest "TST-922" "Overlaid opencode"))
+        let! overlaidExec = expectOk "create overlaid harness execution task" (createTaskWithProfile rootI (Some HarnessProfileId) (createRequest "TST-922" "Overlaid harness"))
 
-        assertEqual "opencode overlay execution materializes two guards" 2 overlaidExec.Guards.Length
+        assertEqual "harness overlay execution materializes two guards" 2 overlaidExec.Guards.Length
 
         assertEqual
-            "opencode overlay materializes strengthened validation"
+            "harness overlay materializes strengthened validation"
             2
             ((requirementOf (guardOfKind EvidenceKind.Test overlaidExec.Guards)).MinimumCount)
 
-        do! expectRejected "opencode overlay cannot weaken investigation applicability" "overlay weakens its applicability" (resolveWith "b-opencode-weaken-applicability" [ "overlay.json", profileJson OpenCodeProfileId None [] [ guardJsonWith "investigation" "research" 1 "explicitDecision:coordinator" "notWaivable" ] ])
+        do! expectRejected "harness overlay cannot weaken investigation applicability" "overlay weakens its applicability" (resolveWith "b-harness-weaken-applicability" [ "overlay.json", profileJson HarnessProfileId None [] [ guardJsonWith "investigation" "research" 1 "explicitDecision:coordinator" "notWaivable" ] ])
 
-        do! expectRejected "opencode overlay cannot weaken investigation waiver" "overlay weakens its waiver policy" (resolveWith "b-opencode-weaken-waiver" [ "overlay.json", profileJson OpenCodeProfileId None [] [ guardJsonWith "investigation" "research" 1 "always" "waivableBy:coordinator" ] ])
+        do! expectRejected "harness overlay cannot weaken investigation waiver" "overlay weakens its waiver policy" (resolveWith "b-harness-weaken-waiver" [ "overlay.json", profileJson HarnessProfileId None [] [ guardJsonWith "investigation" "research" 1 "always" "waivableBy:coordinator" ] ])
 
         printfn
-            "OK slice-8 profile resolver: no-overlay general default, strict JSON/unknown-property/schema/duplicate/weakening rejection, deterministic same-ID overlay monotonic merge, mandatory profile Guard materialization and non-removal, missing-profile mutation block with lenient get, Draft drift absorption vs Baselined drift block/monotonic reconcile, fail-closed baselined weakening reclassification, built-in software Execution gates enforced end-to-end / Research exclusion / Draft gate sync, and built-in opencode registry/policy-only capabilities / per-Kind guard isolation / fail-closed review / non-waivable satisfiable investigation / monotonic same-ID overlay"
+            "OK profile resolver: harness registry without OpenCode files or identity, explicit Draft reclassification vs fail-closed Baselined legacy profile, no automatic migration, strict profiles, monotonic overlays/guards, drift lifecycle, and built-in software and harness policies"
     finally
      if Directory.Exists parentRoot && parentRoot.Contains("taskprofile-tests-", StringComparison.Ordinal) then
          Directory.Delete(parentRoot, true)
