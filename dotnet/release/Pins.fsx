@@ -1,12 +1,12 @@
-#load "ReleaseConfig.fsx"
-#load "../ReleasePins.fsx"
+#load "Config.fsx"
+#load "../../infrastructure/Pins.fsx"
 
 open System
 open System.IO
 open BuildProvenance
 
-let root = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, ".."))
-let dist = Path.Combine(root, "workflow", "dist")
+let root = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", ".."))
+let dist = Path.Combine(root, "dotnet", "dist")
 let output = Path.Combine(dist, "consumer-pins.json")
 let componentId = ReleaseConfig.componentId
 let version = ReleaseConfig.version
@@ -18,7 +18,7 @@ let archivePath = Path.Combine(dist, archiveName)
 
 let run () : Async<Result<string * string * string, ReleaseError>> =
     if not (File.Exists archivePath) || not (File.Exists manifestPath) then
-        async { return Error(MissingArtifact "run BuildDistributions.fsx before preparing workflow v1 pins") }
+        async { return Error(MissingArtifact "run dotnet/release/Build.fsx before preparing dotnet v1 pins") }
     else
         releaseResult {
             do!
@@ -37,7 +37,7 @@ let archiveSha256, manifestSha256, revision =
     | Error error -> failwith (ReleaseError.message error)
 
 printfn
-    "workflow asset=%s archiveSha256=%s manifestSha256=%s revision=%s"
+    "dotnet asset=%s archiveSha256=%s manifestSha256=%s revision=%s"
     archiveName
     archiveSha256
     manifestSha256

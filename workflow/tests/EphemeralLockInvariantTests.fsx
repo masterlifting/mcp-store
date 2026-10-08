@@ -3,8 +3,8 @@
 // sampler watches for any sub-second runtime.lock appearance while task_create,
 // task_get, task_apply, and task_validate run against one real task directory.
 
-#load "../ComputationExpressions.fs"
-#load "../Workflow.fs"
+#load "../domain/ComputationExpressions.fs"
+#load "../domain/Workflow.fs"
 
 open System
 open System.Collections.Concurrent

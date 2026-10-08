@@ -1,6 +1,6 @@
-#load "../ComputationExpressions.fs"
-#load "../Workflow.fs"
-#load "../WorkflowAdapter.fs"
+#load "../domain/ComputationExpressions.fs"
+#load "../domain/Workflow.fs"
+#load "../protocol/Adapter.fs"
 
 open System
 open Workflow

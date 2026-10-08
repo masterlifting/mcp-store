@@ -1,5 +1,5 @@
-#load "../ReleaseConfig.fsx"
-#load "../../DistributionTestHelper.fsx"
+#load "../release/Config.fsx"
+#load "../../infrastructure/Testing.fsx"
 
 open System
 open System.Diagnostics
@@ -65,9 +65,9 @@ async {
     try
         Directory.CreateDirectory(Path.GetDirectoryName stalePublishPath) |> ignore
         File.WriteAllText(stalePublishPath, "stale staging output")
-        do! runScript (Path.Combine(dotnet, "BuildDistribution.fsx")) |> Async.Ignore
+        do! runScript (Path.Combine(dotnet, "release", "Build.fsx")) |> Async.Ignore
         DistributionTestHelper.assertTrue "regeneration removes dotnet staging output" (not (File.Exists stalePublishPath))
-        do! runScript (Path.Combine(dotnet, "PrepareReleasePins.fsx")) |> Async.Ignore
+        do! runScript (Path.Combine(dotnet, "release", "Pins.fsx")) |> Async.Ignore
     finally
         if File.Exists stalePublishPath then File.Delete stalePublishPath
 

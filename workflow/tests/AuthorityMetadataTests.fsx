@@ -3,8 +3,8 @@
 // authority denial; non-authority errors stay envelope-identical. End-to-end
 // authorization through the live MCP boundary is exercised by WorkflowMcpTests.fsx.
 
-#load "../ComputationExpressions.fs"
-#load "../Workflow.fs"
+#load "../domain/ComputationExpressions.fs"
+#load "../domain/Workflow.fs"
 
 open System
 open System.IO
@@ -170,8 +170,8 @@ async {
 
         // Case 6: ensure the published `task_apply` schema description warns about
         // the fail-closed authority contract. Read the inline `tools` JSON literal
-        // from WorkflowMcp.fs (read-only — the test does not modify source).
-        let toolsSource = File.ReadAllText(Path.Combine(__SOURCE_DIRECTORY__, "..", "WorkflowMcp.fs"))
+        // from protocol/Mcp.fs (read-only — the test does not modify source).
+        let toolsSource = File.ReadAllText(Path.Combine(__SOURCE_DIRECTORY__, "..", "protocol", "Mcp.fs"))
 
         assertTrue
             "Case 6 schema description mentions fail closed"

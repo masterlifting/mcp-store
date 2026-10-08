@@ -183,10 +183,17 @@ let private repositorySurfaceTests =
         testCase "all active root, dotnet, and workflow source files are checked" <| fun _ ->
             let root = repositoryRoot ()
             let allFiles = enumerateFiles root
-            let hasRootHelpers = allFiles |> List.exists (fun path -> Path.GetFileName(path) = "BuildProvenance.fsx")
+            let hasInfrastructureProvenance =
+                allFiles
+                |> List.exists (fun path ->
+                    String.Equals(
+                        Path.GetRelativePath(root, path).Replace('\\', '/'),
+                        "infrastructure/Provenance.fsx",
+                        StringComparison.Ordinal
+                    ))
             let hasDotnet = allFiles |> List.exists (fun path -> path.Contains("dotnet", StringComparison.OrdinalIgnoreCase))
             let hasWorkflow = allFiles |> List.exists (fun path -> path.Contains("workflow", StringComparison.OrdinalIgnoreCase))
-            Expect.isTrue hasRootHelpers "root helper scripts are included"
+            Expect.isTrue hasInfrastructureProvenance "shared infrastructure provenance is included"
             Expect.isTrue hasDotnet "dotnet source and tests are included"
             Expect.isTrue hasWorkflow "workflow source and tests are included"
 

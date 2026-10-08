@@ -1,10 +1,10 @@
-#load "ReleaseConfig.fsx"
-#load "../DistributionBuild.fsx"
+#load "Config.fsx"
+#load "../../infrastructure/Distribution.fsx"
 
 open System.IO
 open BuildProvenance
 
-let root = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, ".."))
+let root = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", ".."))
 
 // Framework-dependent publish of this producer; the allowlist is the launcher
 // contract and the shared builder rejects any extra publish output.

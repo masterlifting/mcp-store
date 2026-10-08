@@ -1,6 +1,8 @@
-// Repo-shared build provenance and release-process mechanics; the file name is
-// the implicit module name for `#load`. Owns the shared release error vocabulary
-// and async process boundary so expected failures stay typed at that boundary.
+// Repo-shared build provenance and release-process mechanics loaded as the
+// explicit BuildProvenance module. Owns the shared release error vocabulary and
+// async process boundary so expected failures stay typed at that boundary.
+module BuildProvenance
+
 open System
 open System.Diagnostics
 open System.IO

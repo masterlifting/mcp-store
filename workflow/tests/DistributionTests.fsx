@@ -1,5 +1,5 @@
-#load "../ReleaseConfig.fsx"
-#load "../../DistributionTestHelper.fsx"
+#load "../release/Config.fsx"
+#load "../../infrastructure/Testing.fsx"
 
 open System
 open System.Diagnostics
@@ -58,9 +58,9 @@ async {
         async {
         Directory.CreateDirectory(Path.GetDirectoryName stalePublishPath) |> ignore
         File.WriteAllText(stalePublishPath, "stale staging output")
-        let! _ = runScript (Path.Combine(workflow, "BuildDistributions.fsx"))
+        let! _ = runScript (Path.Combine(workflow, "release", "Build.fsx"))
         DistributionTestHelper.assertTrue "regeneration removes workflow staging output" (not (File.Exists stalePublishPath))
-        let! _ = runScript (Path.Combine(workflow, "PrepareReleasePins.fsx"))
+        let! _ = runScript (Path.Combine(workflow, "release", "Pins.fsx"))
         return ()
         }
         |> Async.Catch

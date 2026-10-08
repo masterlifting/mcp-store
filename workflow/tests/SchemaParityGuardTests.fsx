@@ -1,7 +1,7 @@
 // Recursive schema/parser parity guard.
 //
 // This script parses the inline `tools` JSON literal published by
-// workflow/WorkflowMcp.fs and proves the published schemas stay
+// workflow/protocol/Mcp.fs and proves the published schemas stay
 // parser-equivalent for every machine-expressible call structure:
 //
 //   1. every object that declares `additionalProperties:false` together with a
@@ -14,8 +14,8 @@
 // It uses only System.Text.Json and FSharp.Reflection; there is no external
 // package or package-system dependency.
 
-#load "../ComputationExpressions.fs"
-#load "../Workflow.fs"
+#load "../domain/ComputationExpressions.fs"
+#load "../domain/Workflow.fs"
 
 open System
 open System.IO
@@ -47,7 +47,7 @@ let enumStrings (node: JsonNode) =
 
 // --- inline literal extraction ---------------------------------------------
 
-let sourcePath = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "WorkflowMcp.fs"))
+let sourcePath = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "protocol", "Mcp.fs"))
 
 let extractToolsJson () =
     let text = File.ReadAllText sourcePath

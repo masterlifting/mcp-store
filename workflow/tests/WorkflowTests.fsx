@@ -7,8 +7,8 @@
 // project/package system. All fixtures live under one fresh GUID temp root and
 // only that root is removed.
 
-#load "../ComputationExpressions.fs"
-#load "../Workflow.fs"
+#load "../domain/ComputationExpressions.fs"
+#load "../domain/Workflow.fs"
 
 open System
 open System.Diagnostics
