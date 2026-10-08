@@ -70,8 +70,8 @@ From the repository root, build and pin the immutable `v1.0.3.zip`
 release with:
 
 ```text
-dotnet fsi dotnet/BuildDistribution.fsx
-dotnet fsi dotnet/PrepareReleasePins.fsx
+dotnet fsi dotnet/release/Build.fsx
+dotnet fsi dotnet/release/Pins.fsx
 dotnet fsi dotnet/tests/DistributionTests.fsx
 ```
 

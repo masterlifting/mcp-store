@@ -2,8 +2,8 @@
 // task-directory layout. Reparse points fail closed and runtime.lock is never
 // a supported persistence boundary.
 
-#load "../ComputationExpressions.fs"
-#load "../Workflow.fs"
+#load "../domain/ComputationExpressions.fs"
+#load "../domain/Workflow.fs"
 
 open System
 open System.Diagnostics

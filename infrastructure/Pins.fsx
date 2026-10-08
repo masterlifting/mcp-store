@@ -1,7 +1,9 @@
-// Repo-shared consumer-pin mechanism; the file name is the implicit module name
-// for `#load`. Single-sources clean-HEAD revision validation and the exact
-// five-field pin shape so producer pins cannot drift.
-#load "BuildProvenance.fsx"
+// Repo-shared consumer-pin mechanism loaded as the explicit ReleasePins module.
+// Single-sources clean-HEAD revision validation and the exact five-field pin
+// shape so producer pins cannot drift.
+module ReleasePins
+
+#load "Provenance.fsx"
 
 open System
 open System.IO

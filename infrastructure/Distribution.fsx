@@ -1,7 +1,9 @@
-// Repo-shared deterministic distribution flow; the file name is the implicit
-// module name for `#load`. One producer-supplied request keeps clean-tree
+// Repo-shared deterministic distribution flow loaded as the explicit
+// DistributionBuild module. One producer-supplied request keeps clean-tree
 // provenance, publish, staging, manifest, and archive identical across producers.
-#load "BuildProvenance.fsx"
+module DistributionBuild
+
+#load "Provenance.fsx"
 
 open System
 open System.IO

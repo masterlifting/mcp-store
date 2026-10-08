@@ -2,8 +2,8 @@
 // No alternative readers, aliases, co-located layouts, or persisted locks are
 // part of the Workflow contract.
 
-#load "../ComputationExpressions.fs"
-#load "../Workflow.fs"
+#load "../domain/ComputationExpressions.fs"
+#load "../domain/Workflow.fs"
 
 open System
 open System.IO

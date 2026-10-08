@@ -6,9 +6,9 @@
 // or model dependency. Plain FSI harness because the frozen solution forbids
 // adding a project/package system.
 
-#load "../ComputationExpressions.fs"
-#load "../Workflow.fs"
-#load "../WorkflowAdapter.fs"
+#load "../domain/ComputationExpressions.fs"
+#load "../domain/Workflow.fs"
+#load "../protocol/Adapter.fs"
 
 open System
 open System.Diagnostics

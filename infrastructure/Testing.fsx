@@ -1,7 +1,9 @@
-// Repo-shared distribution-contract assertions; the file name is the implicit
-// module name for `#load`. Assertion failure stays a test-framework exception
-// while only effectful acquisition is asynchronous and Result-valued.
-#load "BuildProvenance.fsx"
+// Repo-shared distribution-contract assertions loaded as the explicit
+// DistributionTestHelper module. Assertion failure stays a test-framework
+// exception while only effectful acquisition is asynchronous and Result-valued.
+module DistributionTestHelper
+
+#load "Provenance.fsx"
 
 open System
 open System.IO

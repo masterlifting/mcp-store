@@ -9,7 +9,7 @@ open Mcp.Dotnet
 open Mcp.Dotnet.Tests.Support
 
 // The published tools/list schema must encode the same bounds the runtime parser
-// enforces. This suite extracts the literal from Host.fs so the shipped schema is
+// enforces. This suite extracts the literal from protocol/Host.fs so the shipped schema is
 // the only schema under test, then compares the shared runtime definitions to it
 // so a future change makes the schema test fail.
 
@@ -24,13 +24,13 @@ let private expectedLimitDefault = Budgets.Defaults.DetailsPageSize
 let private expectedLimitMaximum = Budgets.Defaults.DetailsMaxPageSize
 
 let private extractToolsJson () =
-    let hostPath = Path.Combine(repositoryRoot (), "dotnet", "Host.fs")
+    let hostPath = Path.Combine(repositoryRoot (), "dotnet", "protocol", "Host.fs")
     let source = File.ReadAllText hostPath
     let marker = "let private toolsJson ="
     let markerIndex = source.IndexOf(marker, StringComparison.Ordinal)
 
     if markerIndex < 0 then
-        fail "DotnetSchemaParityTests" "toolsJson marker was not found in Host.fs"
+        fail "DotnetSchemaParityTests" "toolsJson marker was not found in protocol/Host.fs"
 
     let openIndex = source.IndexOf("\"\"\"", markerIndex, StringComparison.Ordinal)
 

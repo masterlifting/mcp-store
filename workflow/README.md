@@ -26,8 +26,8 @@ dotnet run --project workflow/Mcp.Workflow.fsproj -c Release --no-build
 ```
 
 For the immutable `v1.0.3.zip` asset, run
-`dotnet fsi workflow/BuildDistributions.fsx`, then
-`dotnet fsi workflow/PrepareReleasePins.fsx`, and verify with
+`dotnet fsi workflow/release/Build.fsx`, then
+`dotnet fsi workflow/release/Pins.fsx`, and verify with
 `dotnet fsi workflow/tests/DistributionTests.fsx`. The build stages only
 `workflow/Mcp.Workflow.fsproj` under `workflow/dist/workflow/` and emits:
 

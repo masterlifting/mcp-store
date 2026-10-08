@@ -38,14 +38,14 @@ let private sourceExtensions = Set.ofList [ ".fs"; ".fsx" ]
 
 let private topLevelBridgeSites =
     Map.ofList
-        [ "dotnet/BuildDistribution.fsx", "match run () |> Async.RunSynchronously with"
-          "dotnet/PrepareReleasePins.fsx", "match run () |> Async.RunSynchronously with"
+        [ "dotnet/release/Build.fsx", "match run () |> Async.RunSynchronously with"
+          "dotnet/release/Pins.fsx", "match run () |> Async.RunSynchronously with"
           "dotnet/tests/DistributionTests.fsx", "|> Async.RunSynchronously"
           "dotnet/tests/ProvenanceTests.fsx", "suite () |> Async.RunSynchronously"
-          "dotnet/Host.fs", "McpHost.run service |> Async.RunSynchronously"
-          "workflow/BuildDistributions.fsx", "match run () |> Async.RunSynchronously with"
-          "workflow/PrepareReleasePins.fsx", "match run () |> Async.RunSynchronously with"
-          "workflow/WorkflowMcp.fs", "run () |> Async.RunSynchronously"
+          "dotnet/protocol/Host.fs", "McpHost.run service |> Async.RunSynchronously"
+          "workflow/release/Build.fsx", "match run () |> Async.RunSynchronously with"
+          "workflow/release/Pins.fsx", "match run () |> Async.RunSynchronously with"
+          "workflow/protocol/Mcp.fs", "run () |> Async.RunSynchronously"
           "workflow/tests/DistributionTests.fsx", "|> Async.RunSynchronously"
           "workflow/tests/TaskApply.fsx", "|> Async.RunSynchronously"
           "workflow/tests/TaskCreate.fsx", "match execute (CreateTask { Root = root; ProfileId = profile; Request = request }) |> Async.RunSynchronously with"

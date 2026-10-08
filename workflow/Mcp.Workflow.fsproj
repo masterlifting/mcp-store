@@ -12,9 +12,9 @@
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
   </PropertyGroup>
   <ItemGroup>
-    <Compile Include="ComputationExpressions.fs" />
-    <Compile Include="Workflow.fs" />
-    <Compile Include="WorkflowAdapter.fs" />
-    <Compile Include="WorkflowMcp.fs" />
+    <Compile Include="domain/ComputationExpressions.fs" />
+    <Compile Include="domain/Workflow.fs" />
+    <Compile Include="protocol/Adapter.fs" />
+    <Compile Include="protocol/Mcp.fs" />
   </ItemGroup>
 </Project>
