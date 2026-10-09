@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net11.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>ReleaseRunner</AssemblyName>
+    <RootNamespace>Release</RootNamespace>
+    <LangVersion>9.0</LangVersion>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <DebugType>None</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../infrastructure/Provenance.fsx" />
+    <Compile Include="Bootstrap.fsx" />
+    <Compile Include="Compare.fsx" />
+    <Compile Include="Decide.fsx" />
+    <Compile Include="Metadata.fsx" />
+    <Compile Include="Publish.fsx" />
+    <Compile Include="Transaction.fsx" />
+    <Compile Include="Runner.fs" />
+  </ItemGroup>
+</Project>

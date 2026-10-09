@@ -6,9 +6,25 @@
 module ReleaseConfig
 
 let componentId = "dotnet"
-let version = "1.0.3"
+// Version bump 1.0.3 -> 1.0.4 (GHI-24 implementation PR). Rationale: byte
+// comparison against the published v1.0.3 archive
+// (Temp/opencode/ghi-24-bootstrap/dotnet-v1.0.3.zip,
+//  da3acb20007f8015e541ee7d68b48adf49d232c4eea41190a62073073d1a1614)
+// shows Mcp.Dotnet.dll CRC32 differs from the post-#21/#23/#26/#27 refactor
+// binary, so the strict revision-only exception cannot apply. The bump is
+// authored here exactly so the build stamps it into the manifest; CI never
+// auto-increments.
+let version = "1.0.4"
 let entryDll = "Mcp.Dotnet.dll"
 let sdkVersion = "11.0.100-rc.1.26425.128"
+// Canonical toolchain selection for reproducible packaging. The release
+// workflow projects these literals before installing an SDK, then verifies the
+// executing SDK/runtime/platform against them; no workflow YAML or root
+// global.json is permitted to restate them. `platform` is the rid-style
+// `os-arch` moniker and `runtimeVersion` is the exact shared-framework build the
+// distribution runs on.
+let runtimeVersion = "11.0.0-rc.1.26425.128"
+let platform = "win-x64"
 
 // The archive name encodes the version only; the producer identity already
 // comes from the producer directory, the manifest `id`, the project/assembly

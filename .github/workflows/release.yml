@@ -1,0 +1,344 @@
+name: release
+
+# Root release workflow for the dotnet and workflow producers only. Telegram
+# source and Telegram-owned workflows are explicitly out of scope and are never
+# invoked here.
+#
+# Trigger: every push to `main` (merged PR or direct accepted push) runs the
+# deterministic release evaluation. There is no `workflow_dispatch` and no path
+# filter, so no producer can be skipped by a fragile path predicate and a manual
+# step is never required for the normal path.
+#
+# Source of truth: each producer's `*/release/Config.fsx` is the only source of
+# the component id, version, SDK, runtime, platform, archive name, asset URI,
+# and allowlist. No version/SDK/runtime/platform value is restated in this YAML
+# or in a root global.json; the workflow projects the canonical literals before
+# installing an SDK and cross-checks the executing toolchain against them.
+#
+# Concurrency: `queue: max` keeps up to 100 pending runs in the shared
+# `release-main` group instead of the default `single` queue silently replacing
+# an earlier pending run, and `cancel-in-progress: false` never cancels an
+# in-progress publication. `queue: max` cannot be combined with
+# `cancel-in-progress: true`; the workflow relies on the documented queue
+# semantics and a bounded GitHub Actions API reconciliation step to make any
+# overflow/cancellation observable rather than merely asserting YAML intent.
+#
+# Fail-closed release transaction: build, focused tests, distribution, and pin
+# preparation run per producer before the strict comparison/upload. A producer
+# failure never publishes an unvalidated artifact for that producer, and the
+# matrix (`fail-fast: false`) keeps the two producers independently reportable.
+
+run-name: release ${{ github.sha }}
+
+on:
+  push:
+    branches:
+      - main
+
+# Minimum default authority for the workflow. The release job that performs the
+# publication boundary grants the write scope it needs; the read-only jobs
+# never hold release write authority.
+permissions:
+  contents: read
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+  queue: max
+
+env:
+  DOTNET_NOLOGO: "1"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: "1"
+
+jobs:
+  bootstrap:
+    name: bootstrap canonical toolchain
+    runs-on: windows-latest
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      sdk: ${{ steps.project.outputs.sdk }}
+      runtime: ${{ steps.project.outputs.runtime }}
+      platform: ${{ steps.project.outputs.platform }}
+    steps:
+      - name: checkout exact event SHA
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: enforce exact event SHA and safe main ancestry
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $eventSha = "${{ github.sha }}"
+          $repo = "${{ github.repository }}"
+          $head = (git rev-parse HEAD).Trim()
+          if ($head -ne $eventSha) {
+            throw "checked out HEAD '$head' does not equal the event SHA '$eventSha'"
+          }
+          # Ancestry is resolved through the bounded compare API rather than a
+          # persisted git credential, so the checkout can keep
+          # persist-credentials: false.
+          $mainSha = (gh api "repos/$repo/commits/main" --jq ".sha").Trim()
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($mainSha)) {
+            throw "could not resolve the origin/main tip through the GitHub API"
+          }
+          if ($eventSha -eq $mainSha) {
+            Write-Host "event SHA '$eventSha' is the current origin/main tip"
+            exit 0
+          }
+          # status describes mainSha relative to eventSha: "ahead"/"identical"
+          # means eventSha is an ancestor of main; anything else is unsafe.
+          $status = (gh api "repos/$repo/compare/$eventSha...$mainSha" --jq ".status").Trim()
+          if ($LASTEXITCODE -ne 0) {
+            throw "could not compare event SHA ancestry against origin/main"
+          }
+          if ($status -ne "ahead" -and $status -ne "identical") {
+            throw "event SHA '$eventSha' is not a safe ancestor of origin/main '$mainSha' (compare status '$status'); refusing to release an orphaned or force-pushed revision"
+          }
+          Write-Host "::warning::event SHA '$eventSha' is a proven ancestor of origin/main '$mainSha' (stale but safe); releasing the exact event SHA and never the newer tip"
+
+      - name: project canonical toolchain (no F# pre-install assumption)
+        id: project
+        shell: pwsh
+        run: pwsh infrastructure/release/Update.ps1 -Project
+
+      - name: setup .NET SDK from canonical config
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: ${{ steps.project.outputs.sdk }}
+
+      - name: build release runner
+        run: dotnet build infrastructure/release/Release.fsproj -c Release
+
+      - name: verify executing toolchain against canonical config
+        shell: pwsh
+        run: pwsh infrastructure/release/Update.ps1 -Verify -Component dotnet
+
+      - name: queue cancellation/overflow reconciliation (bounded)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          # Observation must never fail the release: if a future runner enables
+          # native-command error action preference, keep the warn path reachable.
+          if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
+            $PSNativeCommandUseErrorActionPreference = $false
+          }
+          $repo = "${{ github.repository }}"
+          # Bounded retrieval: one page for this workflow on main, at most 100
+          # runs. No unbounded --paginate loop, and no fabricated echo output.
+          $raw = gh api "repos/$repo/actions/workflows/release.yml/runs?branch=main&event=push&per_page=100" 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::warning::queue reconciliation could not read workflow runs: $raw"
+            exit 0
+          }
+
+          $runs = @((($raw | Out-String) | ConvertFrom-Json).workflow_runs)
+          $summary = [System.Text.StringBuilder]::new()
+          [void]$summary.AppendLine("### release queue reconciliation")
+          [void]$summary.AppendLine("bounded observation: $($runs.Count) recent push run(s) for this workflow on main (per_page=100, single page)")
+          [void]$summary.AppendLine("")
+          [void]$summary.AppendLine("| run | sha | status | conclusion | created |")
+          [void]$summary.AppendLine("| --- | --- | --- | --- | --- |")
+          $cancelled = @()
+          foreach ($run in $runs) {
+            $sha = if ($run.head_sha) { $run.head_sha.Substring(0, 7) } else { "<none>" }
+            [void]$summary.AppendLine("| $($run.run_number) | $sha | $($run.status) | $($run.conclusion) | $($run.created_at) |")
+            if ($run.conclusion -eq "cancelled" -and $run.event -eq "push") { $cancelled += $run }
+          }
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value $summary.ToString()
+
+          if ($cancelled.Count -gt 0) {
+            $ids = ($cancelled | ForEach-Object { $_.run_number }) -join ", "
+            Write-Host "::warning::$($cancelled.Count) cancelled push run(s) observed (run_number: $ids). queue: max queues up to 100 pending runs and cancels only beyond that; reconcile these commits before trusting that every intermediate version was evaluated."
+          } else {
+            Write-Host "no cancelled push runs observed in the bounded window; release publication remains serialized by queue: max."
+          }
+
+  release:
+    name: release ${{ matrix.component }}
+    needs: bootstrap
+    runs-on: windows-latest
+    # The publication boundary. Write authority is scoped to this job only; the
+    # bootstrap/read-only job above never holds release write authority.
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        component:
+          - dotnet
+          - workflow
+    steps:
+      - name: checkout exact event SHA
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: setup .NET SDK from canonical config
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: ${{ needs.bootstrap.outputs.sdk }}
+
+      - name: build release runner
+        run: dotnet build infrastructure/release/Release.fsproj -c Release
+
+      - name: verify executing toolchain against canonical config
+        shell: pwsh
+        run: pwsh infrastructure/release/Update.ps1 -Verify -Component ${{ matrix.component }}
+
+      - name: run ${{ matrix.component }} release transaction
+        id: transaction
+        shell: pwsh
+        # The production transport and the upload gate are enabled only here.
+        # `GITHUB_TOKEN` is exposed only at this publication boundary; the
+        # build/test/pins work inside Release.fsx runs before the upload seam.
+        env:
+          MCP_RELEASE_GITHUB_OWNER: ${{ github.repository_owner }}
+          MCP_RELEASE_GITHUB_REPOSITORY: ${{ github.event.repository.name }}
+          MCP_RELEASE_DO_UPLOAD: "true"
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $log = Join-Path $env:RUNNER_TEMP "${{ matrix.component }}-release.log"
+          $exitFile = Join-Path $env:RUNNER_TEMP "${{ matrix.component }}-exit-code.txt"
+          $script = "${{ matrix.component }}/release/Release.fsx"
+          & dotnet fsi $script *>&1 | Tee-Object -FilePath $log
+          # Preserve the native process exit code. Tee-Object does not reset
+          # $LASTEXITCODE, and the explicit `exit` prevents a successful summary
+          # write from masking a non-zero producer/test/transaction result. The
+          # exit code is also persisted so the always() evidence step can label
+          # the run even when GitHub does not surface a failed step's outputs.
+          $code = $LASTEXITCODE
+          "$code" | Out-File -FilePath $exitFile -Encoding ascii
+          "exit_code=$code" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          exit $code
+
+      - name: append ${{ matrix.component }} verified release summary
+        if: always()
+        shell: pwsh
+        env:
+          COMPONENT: ${{ matrix.component }}
+        run: |
+          $log = Join-Path $env:RUNNER_TEMP "$env:COMPONENT-release.log"
+          $exitFile = Join-Path $env:RUNNER_TEMP "$env:COMPONENT-exit-code.txt"
+          $code = if (Test-Path -LiteralPath $exitFile) { [int]((Get-Content -LiteralPath $exitFile) -join "").Trim() } else { -1 }
+          $lines = if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log } else { @() }
+
+          $fields = @{}
+          $diagnostics = New-Object System.Collections.Generic.List[string]
+          foreach ($line in $lines) {
+            if ($line -match '^([A-Za-z][A-Za-z0-9]*)=(.*)$') {
+              $fields[$Matches[1]] = $Matches[2]
+            } elseif (-not [string]::IsNullOrWhiteSpace($line) -and -not $line.StartsWith("#")) {
+              [void]$diagnostics.Add($line)
+            }
+          }
+
+          $status = if ($fields.ContainsKey("status")) { $fields["status"] } else {
+            switch ($code) {
+              0  { "unknown-exit-0" }
+              1  { "failed" }
+              2  { "not-published-exit-2" }
+              4  { "failed-toolchain" }
+              5  { "failed-parse" }
+              default { "failed" }
+            }
+          }
+
+          # Only the runner's status=published path has verified both remote
+          # digests; status=unchanged has verified observed published values.
+          # Everything else is status-labelled evidence, never a published projection.
+          $verified = ($status -eq "published") -or ($status -eq "unchanged")
+          $publishedFields = [ordered]@{}
+          foreach ($k in @("publishedArchiveSha256","publishedManifestSha256","publishedRevision","publishedMetadataAssetName","publishedMetadataSha256")) {
+            if ($fields.ContainsKey($k)) { $publishedFields[$k] = $fields[$k] }
+          }
+
+          $record = [ordered]@{
+            component = $env:COMPONENT
+            status = $status
+            verified = $verified
+            projectionKind = if ($status -eq "published") { "verified-published" } elseif ($status -eq "unchanged") { "verified-observed-published" } else { "status-evidence-only" }
+            exitCode = $code
+            published = $publishedFields
+            diagnostics = @($diagnostics | Select-Object -First 20)
+          }
+          $record | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP "release-status-$env:COMPONENT.json") -Encoding utf8
+
+          $human = New-Object System.Collections.Generic.List[string]
+          [void]$human.Add("## $env:COMPONENT release")
+          [void]$human.Add("status=$status verified=$verified exitCode=$code projectionKind=$($record.projectionKind)")
+          if ($verified -and $publishedFields.Count -gt 0) {
+            [void]$human.Add("")
+            [void]$human.Add("### verified published values")
+            foreach ($k in $publishedFields.Keys) { [void]$human.Add("$k=$($publishedFields[$k])") }
+          }
+          if (-not $verified) {
+            [void]$human.Add("")
+            [void]$human.Add("### status-labelled evidence (no verified publication)")
+            if ($diagnostics.Count -gt 0) {
+              foreach ($d in ($diagnostics | Select-Object -First 20)) { [void]$human.Add($d) }
+            } else {
+              [void]$human.Add("<no diagnostic lines captured>")
+            }
+          }
+          # Copy the local metadata projection into the verified artifact only on
+          # status=published. The runner writes the file before the upload, so on
+          # any other status it must not be presented as published.
+          if ($status -eq "published" -and $fields.ContainsKey("metadataLocalPath")) {
+            $meta = $fields["metadataLocalPath"]
+            if (Test-Path -LiteralPath $meta) {
+              Copy-Item -LiteralPath $meta -Destination (Join-Path $env:RUNNER_TEMP "published-metadata-$env:COMPONENT.json") -Force
+              [void]$human.Add("")
+              [void]$human.Add("### verified published metadata projection")
+              [void]$human.Add('```json')
+              foreach ($l in (Get-Content -LiteralPath $meta)) { [void]$human.Add($l) }
+              [void]$human.Add('```')
+            } else {
+              [void]$human.Add("::warning::status=published but the local metadata projection was not found at $meta")
+            }
+          }
+          # Candidate pin preparation is distinctly labelled; it is never the
+          # release metadata artifact.
+          $pins = Join-Path (Get-Location) "$env:COMPONENT/dist/consumer-pins.json"
+          if (Test-Path -LiteralPath $pins) {
+            [void]$human.Add("")
+            [void]$human.Add("### candidate consumer pins (candidate pin preparation only; NOT release metadata)")
+            [void]$human.Add('```json')
+            foreach ($l in (Get-Content -LiteralPath $pins)) { [void]$human.Add($l) }
+            [void]$human.Add('```')
+          }
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value ($human -join "`n")
+
+      - name: upload ${{ matrix.component }} verified release metadata
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          # Contains only the status-labelled record and, on status=published,
+          # the verified metadata projection. Unverified candidate values are
+          # never emitted here.
+          name: release-metadata-${{ matrix.component }}
+          path: |
+            ${{ runner.temp }}/release-status-${{ matrix.component }}.json
+            ${{ runner.temp }}/published-metadata-${{ matrix.component }}.json
+          if-no-files-found: warn
+
+      - name: upload ${{ matrix.component }} candidate consumer pins
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          # Candidate pin preparation evidence, labelled distinctly from the
+          # verified release-metadata artifact.
+          name: candidate-consumer-pins-${{ matrix.component }}
+          path: ${{ matrix.component }}/dist/consumer-pins.json
+          if-no-files-found: warn
