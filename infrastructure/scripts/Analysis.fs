@@ -90,12 +90,22 @@ let private isExcludedDirectory (path: string) =
 let private isReparsePoint (path: string) =
     File.GetAttributes(path).HasFlag(FileAttributes.ReparsePoint)
 
-// Reject rooted or fully-qualified `#load` paths explicitly before resolution/typechecking: `Path.IsPathRooted` covers drive-root (`C:\foo`), drive-relative (`\foo`), UNC (`\\server\share`), and absolute (`/foo`) on the current platform; relative `../foo` cross-directory traversal stays inside the repository and is allowed.
+// `#load` is rooted by leading `/`, `\`, or `<letter>:` (Windows drive including drive-relative `C:foo`); syntax-only so drive forms reject on every host without resolving.
 let private isRootedLoadPath (value: string) : bool =
     if String.IsNullOrEmpty value then
         false
     else
-        Path.IsPathRooted value
+        let first = value.[0]
+
+        if first = '/' || first = '\\' then
+            true
+        elif value.Length >= 2
+             && (Char.IsAsciiLetter value.[0])
+             && value.[1] = ':' then
+            // Closed drive syntax only (letter immediately followed by `:`); a colon later in a relative filename is not banned.
+            true
+        else
+            false
 
 // True when any path component between the canonical root and the file (inclusive) is a reparse point. Physical containment is required because lexical `Path.GetFullPath` does not resolve symbolic links and a directory-level link would let a load target reach outside the repository.
 let private hasReparseComponent (canonicalRoot: string) (filePath: string) : bool =
@@ -303,7 +313,7 @@ let private findDirectives (source: string) : DirectiveScan =
     let includes = ResizeArray<string>()
     let unsupported = ResizeArray<string>()
     let mutable lexState = FSharpTokenizerLexState.Initial
-    // Module-body `#load` is a syntactic artifact in F# that FSI ignores; tracking `module X =` indentation keeps file-scope directives distinct from nested ones so the analyzer mirrors FSI semantics.
+    // Per-line FCS tokens drive module-body detection so a trailing `(* ... *)` or `// ...` cannot hide the opener from the analyzer.
     let mutable activeModuleIndent : int option = None
 
     for lineIndex in 0 .. lines.Length - 1 do
@@ -352,9 +362,27 @@ let private findDirectives (source: string) : DirectiveScan =
 
         // Update module-body state after the line is processed.
         let opensModuleBody =
-            trimmed.StartsWith("module ", StringComparison.Ordinal)
-            && (trimmed.EndsWith(" =", StringComparison.Ordinal)
-                || trimmed.EndsWith(" begin", StringComparison.Ordinal))
+            let significant =
+                tokens
+                |> Array.filter (fun t ->
+                    let n = string t.TokenName
+                    not (String.Equals(n, "WHITESPACE", StringComparison.Ordinal)
+                         || String.Equals(n, "COMMENT", StringComparison.Ordinal)
+                         || String.Equals(n, "LINE_COMMENT", StringComparison.Ordinal)))
+            let len = significant.Length
+            let mutable i = 0
+            if i < len
+               && String.Equals(string significant.[i].TokenName, "REC", StringComparison.Ordinal) then
+                i <- i + 1
+            if i < len
+               && String.Equals(string significant.[i].TokenName, "MODULE", StringComparison.Ordinal) then
+                i <- i + 1
+            if i < len
+               && String.Equals(string significant.[i].TokenName, "IDENT", StringComparison.Ordinal) then
+                i <- i + 1
+            i < len
+            && (String.Equals(string significant.[i].TokenName, "EQUALS", StringComparison.Ordinal)
+                || String.Equals(string significant.[i].TokenName, "BEGIN", StringComparison.Ordinal))
 
         if opensModuleBody then
             activeModuleIndent <- Some lineIndent

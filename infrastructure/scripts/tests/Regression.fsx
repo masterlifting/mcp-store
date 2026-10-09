@@ -239,6 +239,77 @@ test "drive and UNC rooted load syntax is rejected without resolving external pa
             if not ((output + error).Contains(source, StringComparison.Ordinal)) then failwithf "rooted syntax missing diagnostic for %s" source
         return () }))
 
+// Host-independent matrix rejects every Windows-style syntax form plus Unix-leading-slash before the analyzer resolves the target; retained columns (current, nested) resolve via the existing `../` test.
+test "rooted syntax matrix is rejected before target resolution; relative current and nested loads remain valid" (fun () ->
+    withFixture (fun root -> async {
+        let rejected =
+            [ "abs-slash.fsx",          "/outside.fsx"
+              "abs-slash-verb.fsx",     "/outside.fsx"
+              "drive-rel-bs.fsx",       "\\outside.fsx"
+              "drive-c-rel.fsx",        "C:outside.fsx"
+              "drive-c-rel-verb.fsx",   "C:outside.fsx"
+              "drive-c-root.fsx",       "C:\\outside.fsx"
+              "drive-c-fwd.fsx",        "C:/outside.fsx"
+              "unc.fsx",                "\\\\server\\share\\outside.fsx"
+              "unc-verb.fsx",           "\\\\server\\share\\outside.fsx"
+              "device.fsx",             "\\\\.\\COM1"
+              "device-verb.fsx",        "\\\\?\\C:\\outside.fsx"
+              "drive-z-rel.fsx",        "z:outside.fsx"
+              "drive-Z-root.fsx",       "Z:\\outside.fsx"
+              "drive-D-root.fsx",       "D:/outside.fsx"
+              "drive-a-rel-verb.fsx",   "a:relative-only" ]
+        for name, load in rejected do
+            write root name (role "entrypoint/command" ("#load \"" + load + "\"")) |> ignore
+        let! code, output, error = runCli "inventory" root root
+        requireExit 3 (code, output, error)
+        requireCode "ROOTED_LOAD_PATH" (code, output, error)
+        for name, _ in rejected do
+            if not ((output + error).Contains(name, StringComparison.Ordinal)) then
+                failwithf "rooted syntax matrix missing diagnostic for %s" name
+        // Root policy must fire before resolution; no class substitution is acceptable.
+        for other in [ "DIRECTORY_ESCAPE"; "MISSING_LOAD_TARGET"; "TYPECHECK_ERROR"; "SYMLINK_REPARSE" ] do
+            if (output + error).Contains(other, StringComparison.Ordinal) then
+                failwithf "rooted syntax must fire before %s; saw it in output" other
+        for name, _ in rejected do File.Delete(Path.Combine(root, name))
+        // Allowed forms must still resolve within the test root.
+        write root "keep.fsx" (role "reusable module/helper" "let v = 1") |> ignore
+        write root "subdir/keep.fsx" (role "reusable module/helper" "let v = 1") |> ignore
+        write root "rel-dot.fsx" (role "entrypoint/command" "#load \"./keep.fsx\"") |> ignore
+        write root "rel-nested.fsx" (role "entrypoint/command" "#load \"subdir/keep.fsx\"") |> ignore
+        let! graphCode, graph, graphError = runCli "graph" root root
+        requireExit 0 (graphCode, graph, graphError)
+        for edge in [ "-> keep.fsx" ] do
+            if not (containsLine edge graph) then failwithf "valid relative load missing edge %s" edge
+        if (graph + graphError).Contains("DIRECTORY_ESCAPE", StringComparison.Ordinal) then
+            failwith "valid in-repository relative load was rejected as a directory escape"
+        return () }))
+
+// `.fs` files never enter discovery, so the transitive scanner is exercised via the project-source chain; each row pairs an emitter `.fsx` with a loaded `.fs` that holds the rooted directive, and the diagnostic reports the loaded `.fs` path.
+test "transitive rooted project-source syntax matrix is rejected before target resolution" (fun () ->
+    withFixture (fun root -> async {
+        let cases =
+            [ "trans-emit-abs.fsx",  "trans-abs.fs",      "#load \"/outside.fs\""
+              "trans-emit-c-rel.fsx", "trans-c-rel.fs",    "#load \"C:outside.fs\""
+              "trans-emit-c-root.fsx", "trans-c-root.fs", "#load \"C:\\\\outside.fs\""
+              "trans-emit-unc.fsx",  "trans-unc.fs",      "#load \"\\\\\\\\server\\\\share\\\\outside.fs\""
+              "trans-emit-device.fsx", "trans-device.fs", "#load \"\\\\\\\\.\\\\outside.fs\"" ]
+        // Stage 1: emitter .fsx loads the project-source .fs.
+        for emitFile, projectFile, _ in cases do
+            write root emitFile (role "entrypoint/command" (sprintf "#load \"%s\"\nmodule ProjectEmitter" projectFile)) |> ignore
+        // Stage 2: loaded .fs holds the rooted directive under test (no role header: it's not a script).
+        for _, projectFile, directive in cases do
+            write root projectFile (sprintf "%s\nmodule ProjectWithRoot" directive) |> ignore
+        let! code, output, error = runCli "inventory" root root
+        requireExit 3 (code, output, error)
+        requireCode "ROOTED_LOAD_PATH" (code, output, error)
+        for _, projectFile, _ in cases do
+            if not ((output + error).Contains(projectFile, StringComparison.Ordinal)) then
+                failwithf "transitive rooted load missing diagnostic for %s" projectFile
+        for other in [ "DIRECTORY_ESCAPE"; "MISSING_LOAD_TARGET" ] do
+            if (output + error).Contains(other, StringComparison.Ordinal) then
+                failwithf "transitive root policy must fire before %s; saw it" other
+        return () }))
+
 test "dependency cycles are rejected by validate" (fun () ->
     withFixture (fun root -> async {
         write root "a.fsx" (role "reusable module/helper" "#load \"b.fsx\"") |> ignore
@@ -416,27 +487,92 @@ test "module-contained hash text is not treated as an FSI load directive" (fun (
         if containsLine "-> Dependency.fsx" graph then failwith "analyzer classified a module-body directive as a real FSI load"
         return () }))
 
-test "module body classifier comment boundaries match FSI for plausible opener forms" (fun () ->
+// Multi-signal evidence (unique-readback + helper sentinel) classifies the actual FSI load so a silent module-body-to-file-scope downgrade surfaces as a real mismatch.
+type FsiLoad =
+    | Loaded
+    | NotLoaded of reason: string
+
+let classifyFsiLoad (caseName: string) (fsiCode: int) (fsiOut: string) (fsiErr: string) (sentinelExists: bool) : FsiLoad =
+    let hasReadback = fsiOut.Contains("unique-reference=91201", StringComparison.Ordinal)
+    if fsiCode = 0 && hasReadback && sentinelExists then Loaded
+    elif fsiCode <> 0 && not sentinelExists then
+        let reason =
+            if fsiErr.Contains("FS1161", StringComparison.Ordinal) then "tab indentation (FS1161)"
+            elif fsiErr.Contains("FS0039", StringComparison.Ordinal) then "module-body load ignored (FS0039)"
+            elif fsiErr.Contains("Dependency", StringComparison.Ordinal) then "module-body load ignored"
+            else "fsi rejected"
+        NotLoaded reason
+    else
+        failwithf "%s: fsi evidence incoherent: code=%d hasReadback=%b sentinel=%b (err=%s)" caseName fsiCode hasReadback sentinelExists fsiErr
+
+let assertModuleClassifier (caseName: string) (fsiOutcome: FsiLoad) (graphCode: int) (graphText: string) =
+    let analyzerAccepted = graphCode = 0 && graphText.Contains("-> Dependency.fsx", StringComparison.Ordinal)
+    let analyzerRejected =
+        graphCode <> 0
+        && graphText.Contains("UNSUPPORTED_LOAD_FORM", StringComparison.Ordinal)
+        && not (graphText.Contains("-> Dependency.fsx", StringComparison.Ordinal))
+    match fsiOutcome, analyzerAccepted, analyzerRejected with
+    | Loaded, false, true ->
+        failwithf "%s: FSI loaded the dependency but analyzer rejected module-body load (graph=%s)" caseName graphText
+    | NotLoaded reason, true, _ ->
+        failwithf "%s: FSI did not load (%s) but analyzer accepted the edge (graph=%s)" caseName reason graphText
+    | _ ->
+        ()
+
+test "module body classifier agrees with FSI on opener forms via multi-signal evidence" (fun () ->
     withFixture (fun root -> async {
+        // Reference Dependency.uniqueValue in each body so an ignored `#load` surfaces FS0039 in stderr; a syntax error surfaces its own code separately.
         let cases =
-            [ "multiline-comment", "(*\nmodule Commented =\n*)\n#load \"Dependency.fsx\"\n"
-              "trailing-comment", "module Trailing = (* opener note *)\n    #load \"Dependency.fsx\"\n"
-              "attribute", "[<System.Obsolete>]\nmodule Attributed =\n    #load \"Dependency.fsx\"\n"
+            [ "multiline-comment", "(*\nmodule Commented =\n*)\n#load \"Dependency.fsx\"\nprintfn \"unique-reference=%d\" Dependency.uniqueValue\n"
+              "trailing-block-comment", "module Trailing = (* opener note *)\n    #load \"Dependency.fsx\"\n    printfn \"unique-reference=%d\" Dependency.uniqueValue\n"
+              "trailing-line-comment", "module TrailingLine = // opener note\n    #load \"Dependency.fsx\"\n    printfn \"unique-reference=%d\" Dependency.uniqueValue\n"
+              "attribute", "[<System.Obsolete>]\nmodule Attributed =\n    #load \"Dependency.fsx\"\n    printfn \"unique-reference=%d\" Dependency.uniqueValue\n"
               "tab-indentation", "module Tabbed =\n\t#load \"Dependency.fsx\"\n" ]
-        write root "Dependency.fsx" (role "reusable module/helper" "module Dependency\nlet value = 31") |> ignore
-        for name, source in cases do
-            let parent = write root (name + ".fsx") (role "reusable module/helper" source)
-            let! fsiCode, fsiOutput, fsiError = execute "dotnet" [ "fsi"; "--nologo"; parent ] root
-            let! graphCode, graph, graphError = runCli "graph" root root
-            if fsiCode = 0 then
-                if graphCode <> 0 || not (containsLine "-> Dependency.fsx" graph) then
-                    printfn "CLASSIFIER MISMATCH %s: FSI accepts load; analyzer output=%s error=%s" name graph graphError
-                else printfn "CLASSIFIER MATCH %s: FSI accepts load" name
-            elif graphCode = 0 || not ((graph + graphError).Contains("UNSUPPORTED_LOAD_FORM", StringComparison.Ordinal)) then
-                printfn "CLASSIFIER MISMATCH %s: FSI rejects load; FSI=%s %s analyzer=%s %s" name fsiOutput fsiError graph graphError
-            else printfn "CLASSIFIER MATCH %s: FSI rejects load" name
-            File.Delete parent
+        let sentinel = Path.Combine(root, "loaded-sentinel.marker")
+        let dependency = role "reusable module/helper" "module Dependency\nlet uniqueValue = 91201\nSystem.IO.File.WriteAllText(@\"" + sentinel + "\", \"loaded\")"
+        write root "Dependency.fsx" dependency |> ignore
+        try
+            for name, body in cases do
+                if File.Exists sentinel then File.Delete sentinel
+                let parent = write root (name + ".fsx") (role "reusable module/helper" body)
+                let! fsiCode, fsiOut, fsiErr = execute "dotnet" [ "fsi"; "--nologo"; parent ] root
+                let! graphCode, graph, graphError = runCli "graph" root root
+                let fsiOutcome = classifyFsiLoad name fsiCode fsiOut fsiErr (File.Exists sentinel)
+                assertModuleClassifier name fsiOutcome graphCode (graph + graphError)
+                File.Delete parent
+            if File.Exists sentinel then File.Delete sentinel
+            let positive = write root "file-scope.fsx" (role "reusable module/helper" "#load \"Dependency.fsx\"\nprintfn \"unique-reference=%d\" Dependency.uniqueValue")
+            let! posFsiCode, posFsiOut, posFsiErr = execute "dotnet" [ "fsi"; "--nologo"; positive ] root
+            let! posGraphCode, posGraph, posGraphErr = runCli "graph" root root
+            let posFsi = classifyFsiLoad "file-scope-positive" posFsiCode posFsiOut posFsiErr (File.Exists sentinel)
+            if not (match posFsi with Loaded -> true | _ -> false) then
+                failwithf "file-scope positive control: fsi did not load dependency (outcome=%A, code=%d out=%s err=%s)" posFsi posFsiCode posFsiOut posFsiErr
+            if posGraphCode <> 0 || not (containsLine "-> Dependency.fsx" posGraph) then
+                failwithf "file-scope load edge missing from analyzer (code=%d graph=%s err=%s)" posGraphCode posGraph posGraphErr
+        finally
+            if File.Exists sentinel then File.Delete sentinel
+            File.Delete(Path.Combine(root, "Dependency.fsx"))
         return () }))
+
+test "negative control: assertModuleClassifier throws on fabricated mismatch (unit corruption case)" (fun () ->
+    async {
+        let raised (label: string) (outcome: FsiLoad) (graphCode: int) (graphText: string) =
+            try
+                assertModuleClassifier label outcome graphCode graphText |> ignore
+                false
+            with _ ->
+                true
+        // Fabricated disagreements must raise; if any silently returns, the R2 harness is dead.
+        if not (raised "fabricated-ignored-accepted" (NotLoaded "fabricated") 0 "  -> Dependency.fsx") then
+            failwith "fabricated NotLoaded+accepted did not raise; R2 harness is dead"
+        if not (raised "fabricated-loaded-rejected" Loaded 3 "[UNSUPPORTED_LOAD_FORM]") then
+            failwith "fabricated Loaded+rejected did not raise; R2 harness is dead"
+        // Coherent agreement must NOT raise; if any raises, the helper is unsafe.
+        if raised "agree-loaded" Loaded 0 "  -> Dependency.fsx" then
+            failwith "agree-loaded should not raise; helper is rejecting a coherent case"
+        if raised "agree-not-loaded" (NotLoaded "ok") 3 "[UNSUPPORTED_LOAD_FORM]" then
+            failwith "agree-not-loaded should not raise; helper is rejecting a coherent case"
+        return () })
 
 let createFileLink link target =
     try File.CreateSymbolicLink(link, target) |> ignore

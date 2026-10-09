@@ -103,11 +103,18 @@ absolute path so a file reachable through more than one root is
 inventoried exactly once.
 
 `#load` targets must be script-relative. Rooted or fully-qualified paths
-(drive-root `C:\foo`, drive-relative `\foo`, UNC `\\server\share`,
-absolute `/foo`) fail with `ROOTED_LOAD_PATH` before any resolution or
-typechecking, even when the resolved path happens to land inside the
-repository; `../foo` cross-directory paths are allowed as long as they
-stay contained. Targets that resolve outside the repository root fail the
+fail with `ROOTED_LOAD_PATH` before any resolution or typechecking, even
+when the resolved path happens to land inside the repository; the
+classifier is syntax-based so every host rejects the same Windows
+forms:
+
+- absolute `/foo` and drive-relative `\foo`
+- Windows drive-relative `C:foo`, drive-rooted `C:\foo` and `C:/foo`
+- UNC `\\server\share` and device `\\.\foo`
+
+`./foo`, `../foo`, and `nested/foo` are script-relative and remain
+allowed; `../foo` cross-directory paths are allowed as long as they stay
+contained. Targets that resolve outside the repository root fail the
 `DIRECTORY_ESCAPE` check; targets that do not exist on disk fail the
 `MISSING_LOAD_TARGET` check. Reparse-point discovery roots, entries, and
 load-target components fail with `SYMLINK_REPARSE` and are not followed.
