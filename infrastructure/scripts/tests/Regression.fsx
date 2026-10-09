@@ -494,30 +494,47 @@ type FsiLoad =
 
 let classifyFsiLoad (caseName: string) (fsiCode: int) (fsiOut: string) (fsiErr: string) (sentinelExists: bool) : FsiLoad =
     let hasReadback = fsiOut.Contains("unique-reference=91201", StringComparison.Ordinal)
-    if fsiCode = 0 && hasReadback && sentinelExists then Loaded
-    elif fsiCode <> 0 && not sentinelExists then
-        let reason =
-            if fsiErr.Contains("FS1161", StringComparison.Ordinal) then "tab indentation (FS1161)"
-            elif fsiErr.Contains("FS0039", StringComparison.Ordinal) then "module-body load ignored (FS0039)"
-            elif fsiErr.Contains("Dependency", StringComparison.Ordinal) then "module-body load ignored"
-            else "fsi rejected"
-        NotLoaded reason
+    let hasErr = not (String.IsNullOrEmpty fsiErr)
+    if fsiCode = 0 && hasReadback && sentinelExists && not hasErr then Loaded
+    elif fsiCode <> 0
+         && not sentinelExists
+         && fsiErr.Contains("FS0039", StringComparison.Ordinal)
+         && fsiErr.Contains("Dependency", StringComparison.Ordinal) then
+        NotLoaded "module-body load ignored (FS0039)"
     else
-        failwithf "%s: fsi evidence incoherent: code=%d hasReadback=%b sentinel=%b (err=%s)" caseName fsiCode hasReadback sentinelExists fsiErr
+        failwithf "%s: fsi evidence incoherent: code=%d hasReadback=%b sentinel=%b hasErr=%b (err=%s)" caseName fsiCode hasReadback sentinelExists hasErr fsiErr
 
-let assertModuleClassifier (caseName: string) (fsiOutcome: FsiLoad) (graphCode: int) (graphText: string) =
-    let analyzerAccepted = graphCode = 0 && graphText.Contains("-> Dependency.fsx", StringComparison.Ordinal)
+let private extractDiagnosticCodes (stderr: string) : string list =
+    stderr.Split([| '\r'; '\n' |], StringSplitOptions.RemoveEmptyEntries)
+    |> Array.choose (fun line ->
+        if line.StartsWith("[", StringComparison.Ordinal) then
+            let closeIdx = line.IndexOf("]", StringComparison.Ordinal)
+            if closeIdx > 1 then Some (line.Substring(1, closeIdx - 1)) else None
+        else None)
+    |> Array.toList
+
+let private stderrAllUnsupported (stderr: string) : bool =
+    stderr.Split([| '\r'; '\n' |], StringSplitOptions.RemoveEmptyEntries)
+    |> Array.forall (fun line -> line.StartsWith("[UNSUPPORTED_LOAD_FORM]", StringComparison.Ordinal))
+
+let assertModuleClassifier (caseName: string) (fsiOutcome: FsiLoad) (graphCode: int) (graphStdout: string) (graphStderr: string) =
+    let codes = extractDiagnosticCodes graphStderr
+    let hasEdge = graphStdout.Contains("-> Dependency.fsx", StringComparison.Ordinal)
+    let analyzerAccepted = graphCode = 0 && hasEdge && String.IsNullOrEmpty graphStderr
     let analyzerRejected =
-        graphCode <> 0
-        && graphText.Contains("UNSUPPORTED_LOAD_FORM", StringComparison.Ordinal)
-        && not (graphText.Contains("-> Dependency.fsx", StringComparison.Ordinal))
-    match fsiOutcome, analyzerAccepted, analyzerRejected with
-    | Loaded, false, true ->
-        failwithf "%s: FSI loaded the dependency but analyzer rejected module-body load (graph=%s)" caseName graphText
-    | NotLoaded reason, true, _ ->
-        failwithf "%s: FSI did not load (%s) but analyzer accepted the edge (graph=%s)" caseName reason graphText
-    | _ ->
-        ()
+        graphCode = 3
+        && not hasEdge
+        && codes = [ "UNSUPPORTED_LOAD_FORM" ]
+        && stderrAllUnsupported graphStderr
+    match fsiOutcome with
+    | Loaded when analyzerAccepted -> ()
+    | NotLoaded _ when analyzerRejected -> ()
+    | Loaded when analyzerRejected ->
+        failwithf "%s: FSI loaded but analyzer rejected module-body load (graphCode=%d codes=%A)" caseName graphCode codes
+    | NotLoaded reason when analyzerAccepted ->
+        failwithf "%s: FSI did not load (%s) but analyzer accepted the edge (graphCode=%d graph=%s)" caseName reason graphCode graphStdout
+    | outcome ->
+        failwithf "%s: incoherent graph evidence (fsi=%A graphCode=%d codes=%A hasEdge=%b stderr=%s)" caseName outcome graphCode codes hasEdge graphStderr
 
 test "module body classifier agrees with FSI on opener forms via multi-signal evidence" (fun () ->
     withFixture (fun root -> async {
@@ -526,8 +543,7 @@ test "module body classifier agrees with FSI on opener forms via multi-signal ev
             [ "multiline-comment", "(*\nmodule Commented =\n*)\n#load \"Dependency.fsx\"\nprintfn \"unique-reference=%d\" Dependency.uniqueValue\n"
               "trailing-block-comment", "module Trailing = (* opener note *)\n    #load \"Dependency.fsx\"\n    printfn \"unique-reference=%d\" Dependency.uniqueValue\n"
               "trailing-line-comment", "module TrailingLine = // opener note\n    #load \"Dependency.fsx\"\n    printfn \"unique-reference=%d\" Dependency.uniqueValue\n"
-              "attribute", "[<System.Obsolete>]\nmodule Attributed =\n    #load \"Dependency.fsx\"\n    printfn \"unique-reference=%d\" Dependency.uniqueValue\n"
-              "tab-indentation", "module Tabbed =\n\t#load \"Dependency.fsx\"\n" ]
+              "attribute", "[<System.Obsolete>]\nmodule Attributed =\n    #load \"Dependency.fsx\"\n    printfn \"unique-reference=%d\" Dependency.uniqueValue\n" ]
         let sentinel = Path.Combine(root, "loaded-sentinel.marker")
         let dependency = role "reusable module/helper" "module Dependency\nlet uniqueValue = 91201\nSystem.IO.File.WriteAllText(@\"" + sentinel + "\", \"loaded\")"
         write root "Dependency.fsx" dependency |> ignore
@@ -538,7 +554,7 @@ test "module body classifier agrees with FSI on opener forms via multi-signal ev
                 let! fsiCode, fsiOut, fsiErr = execute "dotnet" [ "fsi"; "--nologo"; parent ] root
                 let! graphCode, graph, graphError = runCli "graph" root root
                 let fsiOutcome = classifyFsiLoad name fsiCode fsiOut fsiErr (File.Exists sentinel)
-                assertModuleClassifier name fsiOutcome graphCode (graph + graphError)
+                assertModuleClassifier name fsiOutcome graphCode graph graphError
                 File.Delete parent
             if File.Exists sentinel then File.Delete sentinel
             let positive = write root "file-scope.fsx" (role "reusable module/helper" "#load \"Dependency.fsx\"\nprintfn \"unique-reference=%d\" Dependency.uniqueValue")
@@ -556,22 +572,213 @@ test "module body classifier agrees with FSI on opener forms via multi-signal ev
 
 test "negative control: assertModuleClassifier throws on fabricated mismatch (unit corruption case)" (fun () ->
     async {
-        let raised (label: string) (outcome: FsiLoad) (graphCode: int) (graphText: string) =
+        let raised (label: string) (outcome: FsiLoad) (graphCode: int) (graphStdout: string) (graphStderr: string) =
             try
-                assertModuleClassifier label outcome graphCode graphText |> ignore
+                assertModuleClassifier label outcome graphCode graphStdout graphStderr |> ignore
                 false
             with _ ->
                 true
         // Fabricated disagreements must raise; if any silently returns, the R2 harness is dead.
-        if not (raised "fabricated-ignored-accepted" (NotLoaded "fabricated") 0 "  -> Dependency.fsx") then
+        if not (raised "fabricated-ignored-accepted" (NotLoaded "fabricated") 0 "  -> Dependency.fsx" "") then
             failwith "fabricated NotLoaded+accepted did not raise; R2 harness is dead"
-        if not (raised "fabricated-loaded-rejected" Loaded 3 "[UNSUPPORTED_LOAD_FORM]") then
+        if not (raised "fabricated-loaded-rejected" Loaded 3 "" "[UNSUPPORTED_LOAD_FORM] SomeCase.fsx: ...") then
             failwith "fabricated Loaded+rejected did not raise; R2 harness is dead"
         // Coherent agreement must NOT raise; if any raises, the helper is unsafe.
-        if raised "agree-loaded" Loaded 0 "  -> Dependency.fsx" then
+        if raised "agree-loaded" Loaded 0 "  -> Dependency.fsx" "" then
             failwith "agree-loaded should not raise; helper is rejecting a coherent case"
-        if raised "agree-not-loaded" (NotLoaded "ok") 3 "[UNSUPPORTED_LOAD_FORM]" then
+        if raised "agree-not-loaded" (NotLoaded "ok") 3 "" "[UNSUPPORTED_LOAD_FORM] SomeCase.fsx: ..." then
             failwith "agree-not-loaded should not raise; helper is rejecting a coherent case"
+        return () })
+
+test "FSI known-syntax FS1161 cannot establish loader agreement (incoherent, not NotLoaded)" (fun () ->
+    withFixture (fun root -> async {
+        let sentinel = Path.Combine(root, "fs1161-sentinel.marker")
+        let dependency = role "reusable module/helper" "module Dependency\nlet uniqueValue = 91201\nSystem.IO.File.WriteAllText(@\"" + sentinel + "\", \"loaded\")"
+        write root "Dependency.fsx" dependency |> ignore
+        let body = "module Tabbed =\n\t#load \"Dependency.fsx\"\n"
+        let script = write root "tab-fs1161.fsx" (role "reusable module/helper" body)
+        try
+            if File.Exists sentinel then File.Delete sentinel
+            let! fsiCode, fsiOut, fsiErr = execute "dotnet" [ "fsi"; "--nologo"; script ] root
+            if not (fsiErr.Contains("FS1161", StringComparison.Ordinal)) then
+                failwithf "tab FS1161: stderr must contain FS1161 (err=%s)" fsiErr
+            if File.Exists sentinel then failwith "tab FS1161: sentinel unexpectedly created"
+            let raised =
+                try
+                    classifyFsiLoad "tab-fs1161" fsiCode fsiOut fsiErr (File.Exists sentinel) |> ignore
+                    false
+                with _ -> true
+            if not raised then failwith "tab FS1161: classifyFsiLoad did not raise on known-syntax case"
+            return ()
+        finally
+            if File.Exists sentinel then File.Delete sentinel
+            for src in [ "tab-fs1161.fsx"; "Dependency.fsx" ] do
+                let p = Path.Combine(root, src)
+                if File.Exists p then File.Delete p
+        return () }))
+
+test "nested module-body dedent inside Outer rejects UNSUPPORTED_LOAD_FORM; file-scope after Outer accepts the edge" (fun () ->
+    withFixture (fun root -> async {
+        let sentinel = Path.Combine(root, "nested-loaded.marker")
+        let dependency = role "reusable module/helper" "module Dependency\nlet uniqueValue = 91201\nSystem.IO.File.WriteAllText(@\"" + sentinel + "\", \"loaded\")"
+        write root "Dependency.fsx" dependency |> ignore
+        let nestedBody = "module Outer =\n    module Inner =\n        let value = 1\n\n    #load \"Dependency.fsx\"\n    let result = Dependency.uniqueValue\n"
+        let fileScopeBody = "module Outer =\n    module Inner =\n        let value = 1\n\nmodule After =\n    let outerValue = Outer.Inner.value + 1\n\n#load \"Dependency.fsx\"\nprintfn \"unique-reference=%d\" Dependency.uniqueValue\nlet combined = Dependency.uniqueValue + After.outerValue\n"
+        let nested = write root "NestedOuter.fsx" (role "reusable module/helper" nestedBody)
+        let fileScope = write root "FileScope.fsx" (role "reusable module/helper" fileScopeBody)
+        try
+            // Phase 1: nested case. FSI must not load; analyzer must reject UNSUPPORTED_LOAD_FORM with no edge.
+            if File.Exists sentinel then File.Delete sentinel
+            let! fsiCode, fsiOut, fsiErr = execute "dotnet" [ "fsi"; "--nologo"; nested ] root
+            let fsiOutcome = classifyFsiLoad "nested" fsiCode fsiOut fsiErr (File.Exists sentinel)
+            let! graphCode, graphStdout, graphStderr = runCli "graph" root root
+            match fsiOutcome with
+            | NotLoaded _ -> ()
+            | _ -> failwithf "nested: FSI concrete fixture expected NotLoaded, got %A (exit=%d out=%s err=%s)" fsiOutcome fsiCode fsiOut fsiErr
+            if not (fsiErr.Contains("FS0039", StringComparison.Ordinal) && fsiErr.Contains("Dependency", StringComparison.Ordinal)) then
+                failwithf "nested: FSI concrete fixture expected FS0039+Dependency (exit=%d err=%s)" fsiCode fsiErr
+            if File.Exists sentinel then failwith "nested: FSI created sentinel despite module-body load"
+            let codes = extractDiagnosticCodes graphStderr
+            if graphCode = 0 && graphStdout.Contains("-> Dependency.fsx", StringComparison.Ordinal) then
+                failwithf "nested: analyzer must not classify module-body-dedent load as file-scope (graphCode=%d stdout=%s)" graphCode graphStdout
+            if codes <> [ "UNSUPPORTED_LOAD_FORM" ] then
+                failwithf "nested: analyzer must surface exactly UNSUPPORTED_LOAD_FORM (graphCode=%d stderr=%s)" graphCode graphStderr
+            // Phase 2: file-scope positive control. FSI loads; analyzer accepts edge.
+            File.Delete nested
+            if File.Exists sentinel then File.Delete sentinel
+            let! posFsiCode, posFsiOut, posFsiErr = execute "dotnet" [ "fsi"; "--nologo"; fileScope ] root
+            let posFsiOutcome = classifyFsiLoad "file-scope" posFsiCode posFsiOut posFsiErr (File.Exists sentinel)
+            match posFsiOutcome with
+            | Loaded -> ()
+            | _ -> failwithf "file-scope positive control: expected Loaded, got %A (exit=%d out=%s err=%s)" posFsiOutcome posFsiCode posFsiOut posFsiErr
+            if not (File.Exists sentinel) then failwith "file-scope positive control: sentinel missing after FSI load"
+            let! posGraphCode, posGraphStdout, posGraphStderr = runCli "graph" root root
+            if posGraphCode <> 0 then
+                failwithf "file-scope positive control: analyzer must accept (graphCode=%d stderr=%s)" posGraphCode posGraphStderr
+            if not (containsLine "-> Dependency.fsx" posGraphStdout) then
+                failwithf "file-scope positive control: edge missing (graph=%s)" posGraphStdout
+            if (extractDiagnosticCodes posGraphStderr).IsEmpty |> not then
+                failwithf "file-scope positive control: analyzer must not surface any diagnostic (stderr=%s)" posGraphStderr
+        finally
+            if File.Exists sentinel then File.Delete sentinel
+            for src in [ "NestedOuter.fsx"; "FileScope.fsx"; "Dependency.fsx" ] do
+                let p = Path.Combine(root, src)
+                if File.Exists p then File.Delete p
+        return () }))
+
+test "R3-F1 scope preservation: blank/comment-only dedents, deeper stack, sibling nested, and string contents do not pop module frame" (fun () ->
+    withFixture (fun root -> async {
+        let sentinel = Path.Combine(root, "scope-sentinel.marker")
+        let dependency = role "reusable module/helper" "module Dependency\nlet uniqueValue = 91201\nSystem.IO.File.WriteAllText(@\"" + sentinel + "\", \"loaded\")"
+        write root "Dependency.fsx" dependency |> ignore
+        let cases =
+            [ "deeper", "module A =\n    module B =\n        module C =\n            let x = 1\n\n        let y = C.x + 1\n    #load \"Dependency.fsx\"\n    let result = Dependency.uniqueValue\n"
+              "siblings", "module Outer =\n    module Inner1 =\n        let a = 1\n    let b = Inner1.a + 1\n    module Inner2 =\n        let c = 2\n    let d = Inner2.c + b\n    #load \"Dependency.fsx\"\n    let result = Dependency.uniqueValue\n"
+              "blank-lines", "module Outer =\n    module Inner =\n        let value = 1\n\n\n\n    #load \"Dependency.fsx\"\n    let result = Dependency.uniqueValue\n"
+              "comment-only", "module Outer =\n    module Inner =\n        let value = 1\n    // line comment\n    (* block comment *)\n    #load \"Dependency.fsx\"\n    let result = Dependency.uniqueValue\n"
+              "string-contents", "module Outer =\n    module Inner =\n        let value = 1\n    let text = \"\n#load \\\"fake.fsx\\\"\n\"\n    #load \"Dependency.fsx\"\n    let result = Dependency.uniqueValue\n" ]
+        try
+            for label, body in cases do
+                if File.Exists sentinel then File.Delete sentinel
+                let script = write root (label + ".fsx") (role "reusable module/helper" body)
+                let! fsiCode, fsiOut, fsiErr = execute "dotnet" [ "fsi"; "--nologo"; script ] root
+                let fsiOutcome = classifyFsiLoad label fsiCode fsiOut fsiErr (File.Exists sentinel)
+                match fsiOutcome with
+                | NotLoaded _ -> ()
+                | _ -> failwithf "%s: expected FSI NotLoaded, got %A (exit=%d err=%s)" label fsiOutcome fsiCode fsiErr
+                let! graphCode, graphStdout, graphStderr = runCli "graph" root root
+                let codes = extractDiagnosticCodes graphStderr
+                if codes <> [ "UNSUPPORTED_LOAD_FORM" ] then
+                    failwithf "%s: expected exactly UNSUPPORTED_LOAD_FORM, got codes=%A stderr=%s" label codes graphStderr
+                if graphStdout.Contains("-> Dependency.fsx", StringComparison.Ordinal) || graphStdout.Contains("-> fake.fsx", StringComparison.Ordinal) then
+                    failwithf "%s: spurious edge (graphStdout=%s)" label graphStdout
+                File.Delete script
+        finally
+            if File.Exists sentinel then File.Delete sentinel
+            for src in [ "deeper.fsx"; "siblings.fsx"; "blank-lines.fsx"; "comment-only.fsx"; "string-contents.fsx"; "Dependency.fsx" ] do
+                let p = Path.Combine(root, src)
+                if File.Exists p then File.Delete p
+        return () }))
+
+test "R3-F2 closed table: classifyFsiLoad exhaustive contract" (fun () ->
+    async {
+        let loadedOut = "unique-reference=91201"
+        let passCases =
+            [ "Loaded", (0, loadedOut, "", true), Loaded
+              "NotLoaded FS0039", (1, "", "error FS0039: Dependency not defined", false), NotLoaded "module-body load ignored (FS0039)" ]
+        for label, args, expected in passCases do
+            let fsiCode, fsiOut, fsiErr, sentinel = args
+            let actual = classifyFsiLoad label fsiCode fsiOut fsiErr sentinel
+            if actual <> expected then
+                failwithf "classifyFsiLoad %s expected %A got %A" label expected actual
+        let failCases =
+            [ "exit0 no sentinel", (0, loadedOut, "", false)
+              "exit0 no readback", (0, "", "", true)
+              "exit0 no markers", (0, "", "", false)
+              "unrelated err", (1, "", "some unrelated error", false)
+              "FS0039 no Dependency", (1, "", "error FS0039: OtherThing", false)
+              "FS1161 known-syntax no loader agreement", (1, "", "warning FS1161", false)
+              "exit0+readback+error contradiction", (0, loadedOut, "error text", false)
+              "Loaded+sentinel+error contradiction", (0, loadedOut, "error text", true)
+              "exit99", (99, "", "", false) ]
+        for label, args in failCases do
+            let fsiCode, fsiOut, fsiErr, sentinel = args
+            let raised =
+                try
+                    classifyFsiLoad label fsiCode fsiOut fsiErr sentinel |> ignore
+                    false
+                with _ -> true
+            if not raised then failwithf "classifyFsiLoad %s expected incoherent (raise)" label
+        return () })
+
+test "R3-F2 closed table: assertModuleClassifier exhaustive contract" (fun () ->
+    async {
+        let cleanEdgeStdout = "reusable module/helper SomeCase.fsx\n  -> Dependency.fsx\n"
+        let emptyStdout = ""
+        let unsupportedOnly = "[UNSUPPORTED_LOAD_FORM] SomeCase.fsx: `#load` inside module body at line 1 is not a real FSI load directive\n"
+        let unrelatedOnly = "[MISSING_ROLE] SomeCase.fsx: ...\n"
+        let missingLoadOnly = "[MISSING_LOAD_TARGET] SomeCase.fsx: ...\n"
+        let typecheckOnly = "[TYPECHECK_ERROR] SomeCase.fsx: ...\n"
+        let mixedUnsupportedPlusUnrelated = "[UNSUPPORTED_LOAD_FORM] SomeCase.fsx: ...\n[MISSING_LOAD_TARGET] Other.fsx: ...\n"
+        let mixedEdgePlusUnrelated = "[MISSING_ROLE] SomeCase.fsx: ...\n"
+        let passCases =
+            [ "Loaded + clean accepted edge", Loaded, 0, cleanEdgeStdout, ""
+              "NotLoaded + UNSUPPORTED_LOAD_FORM only", NotLoaded "module-body load ignored (FS0039)", 3, emptyStdout, unsupportedOnly ]
+        for label, fsi, code, stdout, stderr in passCases do
+            let raised =
+                try
+                    assertModuleClassifier label fsi code stdout stderr
+                    false
+                with _ -> true
+            if raised then failwithf "assertModuleClassifier %s expected PASS, got RAISE" label
+        let failCases =
+            [ "Loaded, code=0, no edge",                                Loaded,    0, emptyStdout, ""
+              "Loaded, code=0, edge + unrelated stderr",                Loaded,    0, cleanEdgeStdout, mixedEdgePlusUnrelated
+              "Loaded, code=0, edge + plain stderr text",               Loaded,    0, cleanEdgeStdout, "some unexpected plain text\n"
+              "Loaded, code=3, UNSUPPORTED_LOAD_FORM only",             Loaded,    3, emptyStdout, unsupportedOnly
+              "Loaded, code=3, unrelated stderr",                       Loaded,    3, emptyStdout, unrelatedOnly
+              "Loaded, code=3, mixed UNSUPPORTED+unrelated",            Loaded,    3, emptyStdout, mixedUnsupportedPlusUnrelated
+              "Loaded, code=2",                                          Loaded,    2, "", ""
+              "Loaded, code=4 (typecheck)",                              Loaded,    4, "", typecheckOnly
+              "Loaded, code=5 (validate)",                               Loaded,    5, "", ""
+              "Loaded, code=99",                                         Loaded,    99, "", ""
+              "NotLoaded, code=0, edge (false positive)",               NotLoaded "module-body load ignored (FS0039)", 0, cleanEdgeStdout, ""
+              "NotLoaded, code=0, no edge (ambiguous success)",         NotLoaded "module-body load ignored (FS0039)", 0, emptyStdout, ""
+              "NotLoaded, code=3, MISSING_LOAD_TARGET only",            NotLoaded "module-body load ignored (FS0039)", 3, emptyStdout, missingLoadOnly
+              "NotLoaded, code=3, mixed UNSUPPORTED+unrelated",         NotLoaded "module-body load ignored (FS0039)", 3, emptyStdout, mixedUnsupportedPlusUnrelated
+              "NotLoaded, code=3, empty stderr",                        NotLoaded "module-body load ignored (FS0039)", 3, emptyStdout, ""
+              "NotLoaded, code=3, plain stderr text (no [CODE])",       NotLoaded "module-body load ignored (FS0039)", 3, emptyStdout, "unexpected plain text\n"
+              "NotLoaded, code=2",                                       NotLoaded "module-body load ignored (FS0039)", 2, "", ""
+              "NotLoaded, code=4 (typecheck)",                           NotLoaded "module-body load ignored (FS0039)", 4, "", typecheckOnly
+              "NotLoaded, code=5 (validate)",                            NotLoaded "module-body load ignored (FS0039)", 5, "", ""
+              "NotLoaded, code=99",                                      NotLoaded "module-body load ignored (FS0039)", 99, "", "" ]
+        for label, fsi, code, stdout, stderr in failCases do
+            let raised =
+                try
+                    assertModuleClassifier label fsi code stdout stderr
+                    false
+                with _ -> true
+            if not raised then failwithf "assertModuleClassifier %s expected RAISE, got PASS" label
         return () })
 
 let createFileLink link target =

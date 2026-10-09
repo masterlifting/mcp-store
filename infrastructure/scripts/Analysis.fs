@@ -314,82 +314,88 @@ let private findDirectives (source: string) : DirectiveScan =
     let unsupported = ResizeArray<string>()
     let mutable lexState = FSharpTokenizerLexState.Initial
     // Per-line FCS tokens drive module-body detection so a trailing `(* ... *)` or `// ...` cannot hide the opener from the analyzer.
-    let mutable activeModuleIndent : int option = None
+    // Nested `module ... =` openers are tracked as an indent stack so exiting an inner frame preserves the outer scope until the line dedents past it; a single mutable slot overwrites and loses that information.
+    let mutable moduleIndents : int list = []
 
     for lineIndex in 0 .. lines.Length - 1 do
         let line = lines.[lineIndex]
-        let trimmed = line.TrimStart()
-        let lineIndent = line.Length - trimmed.Length
 
         let tokens, finalState = checker.TokenizeLine(line, lexState)
         lexState <- finalState
 
-        let mutable i = 0
+        // First code token (excluding string content) defines effective indent; lines without it cannot carry a real HASH (FCS keeps strings and comments in lex state) and must not pop scope, so a multi-line string physically outdented inside `Outer` does not exit the body.
+        let significant =
+            tokens
+            |> Array.filter (fun t ->
+                let n = string t.TokenName
+                not (String.Equals(n, "WHITESPACE", StringComparison.Ordinal)
+                     || String.Equals(n, "COMMENT", StringComparison.Ordinal)
+                     || String.Equals(n, "LINE_COMMENT", StringComparison.Ordinal)
+                     || String.Equals(n, "STRING", StringComparison.Ordinal)
+                     || String.Equals(n, "STRING_TEXT", StringComparison.Ordinal)))
 
-        while i < tokens.Length do
-            let current = tokens.[i]
+        if significant.Length > 0 then
+            let effectiveIndent = significant.[0].LeftColumn
 
-            if String.Equals(current.TokenName, "HASH", StringComparison.Ordinal) then
-                let hashInsideModuleBody =
-                    match activeModuleIndent with
-                    | Some mIndent -> current.LeftColumn > mIndent
-                    | None -> false
+            // Drop completed inner frames whose indent is no longer strictly less than this line before classifying HASH, so dedenting past `Inner` does not also discard the still-open `Outer` frame.
+            let rec prune stack =
+                match stack with
+                | head :: tail when head >= effectiveIndent -> prune tail
+                | _ -> stack
+            moduleIndents <- prune moduleIndents
 
-                match hashInsideModuleBody with
-                | true ->
-                    unsupported.Add("`#load` inside module body at line " + (lineIndex + 1).ToString() + " is not a real FSI load directive")
-                | false ->
-                    match directiveIdent line current with
-                    | Some ident ->
-                        match decodeLoadDirective tokens line (i + 1) with
-                        | LoadDirective.LoadedPaths paths when String.Equals(ident, "load", StringComparison.Ordinal) ->
-                            for path in paths do
-                                loads.Add path
-                        | LoadDirective.LoadedPaths paths when String.Equals(ident, "r", StringComparison.Ordinal) ->
-                            for path in paths do
-                                references.Add path
-                        | LoadDirective.LoadedPaths paths when String.Equals(ident, "I", StringComparison.Ordinal) ->
-                            for path in paths do
-                                includes.Add path
-                        | LoadDirective.Unsupported detail when String.Equals(ident, "load", StringComparison.Ordinal) ->
-                            unsupported.Add detail
-                        | LoadDirective.Unsupported detail ->
-                            unsupported.Add(ident + ": " + detail)
-                        | _ -> ()
-                    | None -> ()
-
-            i <- i + 1
-
-        // Update module-body state after the line is processed.
-        let opensModuleBody =
-            let significant =
-                tokens
-                |> Array.filter (fun t ->
-                    let n = string t.TokenName
-                    not (String.Equals(n, "WHITESPACE", StringComparison.Ordinal)
-                         || String.Equals(n, "COMMENT", StringComparison.Ordinal)
-                         || String.Equals(n, "LINE_COMMENT", StringComparison.Ordinal)))
-            let len = significant.Length
             let mutable i = 0
-            if i < len
-               && String.Equals(string significant.[i].TokenName, "REC", StringComparison.Ordinal) then
-                i <- i + 1
-            if i < len
-               && String.Equals(string significant.[i].TokenName, "MODULE", StringComparison.Ordinal) then
-                i <- i + 1
-            if i < len
-               && String.Equals(string significant.[i].TokenName, "IDENT", StringComparison.Ordinal) then
-                i <- i + 1
-            i < len
-            && (String.Equals(string significant.[i].TokenName, "EQUALS", StringComparison.Ordinal)
-                || String.Equals(string significant.[i].TokenName, "BEGIN", StringComparison.Ordinal))
 
-        if opensModuleBody then
-            activeModuleIndent <- Some lineIndent
-        elif activeModuleIndent.IsSome
-             && not (String.IsNullOrEmpty trimmed)
-             && lineIndent <= activeModuleIndent.Value then
-            activeModuleIndent <- None
+            while i < tokens.Length do
+                let current = tokens.[i]
+
+                if String.Equals(current.TokenName, "HASH", StringComparison.Ordinal) then
+                    let hashInsideModuleBody = not moduleIndents.IsEmpty
+
+                    match hashInsideModuleBody with
+                    | true ->
+                        unsupported.Add("`#load` inside module body at line " + (lineIndex + 1).ToString() + " is not a real FSI load directive")
+                    | false ->
+                        match directiveIdent line current with
+                        | Some ident ->
+                            match decodeLoadDirective tokens line (i + 1) with
+                            | LoadDirective.LoadedPaths paths when String.Equals(ident, "load", StringComparison.Ordinal) ->
+                                for path in paths do
+                                    loads.Add path
+                            | LoadDirective.LoadedPaths paths when String.Equals(ident, "r", StringComparison.Ordinal) ->
+                                for path in paths do
+                                    references.Add path
+                            | LoadDirective.LoadedPaths paths when String.Equals(ident, "I", StringComparison.Ordinal) ->
+                                for path in paths do
+                                    includes.Add path
+                            | LoadDirective.Unsupported detail when String.Equals(ident, "load", StringComparison.Ordinal) ->
+                                unsupported.Add detail
+                            | LoadDirective.Unsupported detail ->
+                                unsupported.Add(ident + ": " + detail)
+                            | _ -> ()
+                        | None -> ()
+
+                i <- i + 1
+
+            // Update module-body state after the line is processed.
+            let opensModuleBody =
+                let len = significant.Length
+                let mutable i = 0
+                if i < len
+                   && String.Equals(string significant.[i].TokenName, "REC", StringComparison.Ordinal) then
+                    i <- i + 1
+                if i < len
+                   && String.Equals(string significant.[i].TokenName, "MODULE", StringComparison.Ordinal) then
+                    i <- i + 1
+                if i < len
+                   && String.Equals(string significant.[i].TokenName, "IDENT", StringComparison.Ordinal) then
+                    i <- i + 1
+                i < len
+                && (String.Equals(string significant.[i].TokenName, "EQUALS", StringComparison.Ordinal)
+                    || String.Equals(string significant.[i].TokenName, "BEGIN", StringComparison.Ordinal))
+
+            if opensModuleBody then
+                moduleIndents <- effectiveIndent :: moduleIndents
 
     { Loads = loads |> Seq.sort |> Seq.toList
       References = references |> Seq.sort |> Seq.toList
