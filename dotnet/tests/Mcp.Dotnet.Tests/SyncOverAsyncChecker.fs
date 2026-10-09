@@ -42,6 +42,8 @@ let private topLevelBridgeSites =
           "dotnet/release/Pins.fsx", "match run () |> Async.RunSynchronously with"
           "dotnet/tests/DistributionTests.fsx", "|> Async.RunSynchronously"
           "dotnet/tests/ProvenanceTests.fsx", "suite () |> Async.RunSynchronously"
+          "infrastructure/scripts/tests/Regression.fsx", "runTests () |> Async.RunSynchronously"
+          "infrastructure/scripts/Validate.fs", "run args |> Async.RunSynchronously"
           "dotnet/protocol/Host.fs", "McpHost.run service |> Async.RunSynchronously"
           "workflow/release/Build.fsx", "match run () |> Async.RunSynchronously with"
           "workflow/release/Pins.fsx", "match run () |> Async.RunSynchronously with"

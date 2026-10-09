@@ -1,3 +1,4 @@
+// role: test entrypoint
 // Recursive schema/parser parity guard.
 //
 // This script parses the inline `tools` JSON literal published by

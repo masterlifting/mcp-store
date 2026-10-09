@@ -1,3 +1,4 @@
+// role: test entrypoint
 // Deterministic coverage for the Workflow fail-closed authority remediation
 // contract. The structured `error.authority` block is published for every
 // authority denial; non-authority errors stay envelope-identical. End-to-end

@@ -1,3 +1,4 @@
+// role: reusable module/helper
 // Repo-shared build provenance and release-process mechanics loaded as the
 // explicit BuildProvenance module. Owns the shared release error vocabulary and
 // async process boundary so expected failures stay typed at that boundary.

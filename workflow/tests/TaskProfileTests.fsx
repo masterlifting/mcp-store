@@ -1,3 +1,4 @@
+// role: test entrypoint
 // Focused deterministic coverage for the generic Profile resolver:
 // no-overlay general default, strict project-profile JSON/duplicate/weakening
 // rejection, deterministic same-ID overlay merge with mandatory Guard

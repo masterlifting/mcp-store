@@ -1,3 +1,4 @@
+// role: test entrypoint
 // Deterministic coverage for the strict schema-v1 Workflow: general + execution,
 // general + research, typed Evidence, evidence-backed Acceptance-Criterion
 // verification, supersession invalidation, and the recursive Work Tree

@@ -1,3 +1,4 @@
+// role: reusable module/helper
 // Producer-local release policy for the dotnet distribution. Version, SDK, and
 // runtime allowlist are owned here so build, pin, and test scripts share one
 // source of truth without pulling in another producer's values. Declares the

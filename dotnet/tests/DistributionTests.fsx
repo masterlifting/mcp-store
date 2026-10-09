@@ -1,3 +1,4 @@
+// role: test entrypoint
 #load "../release/Config.fsx"
 #load "../../infrastructure/Testing.fsx"
 

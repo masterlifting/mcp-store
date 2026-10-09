@@ -1,3 +1,4 @@
+// role: entrypoint/command
 #load "../domain/ComputationExpressions.fs"
 #load "../domain/Workflow.fs"
 #load "../protocol/Adapter.fs"

@@ -1,3 +1,4 @@
+// role: test entrypoint
 // Focused contract coverage for the repo-shared build provenance guard. Unlike the
 // distribution tests this runs from a dirty tree because it exercises only manifest
 // revision validation, not packaging or the clean-tree precondition.

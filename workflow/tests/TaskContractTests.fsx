@@ -1,3 +1,4 @@
+// role: test entrypoint
 // Focused deterministic coverage for the strict schema-v1 persistence boundary.
 // No alternative readers, aliases, co-located layouts, or persisted locks are
 // part of the Workflow contract.

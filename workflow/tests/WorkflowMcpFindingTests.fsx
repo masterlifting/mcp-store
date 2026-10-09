@@ -1,3 +1,4 @@
+// role: test entrypoint
 // Targeted regression coverage for the frozen accepted findings:
 // INFRA-005-D1 (validate JSON-RPC 2.0 and request IDs),
 // INFRA-005-D2 (reject cross-variant tagged DTO fields),

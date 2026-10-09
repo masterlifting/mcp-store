@@ -1,3 +1,4 @@
+// role: test helper
 // Repo-shared distribution-contract assertions loaded as the explicit
 // DistributionTestHelper module. Assertion failure stays a test-framework
 // exception while only effectful acquisition is asynchronous and Result-valued.

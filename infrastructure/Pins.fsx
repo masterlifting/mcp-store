@@ -1,3 +1,4 @@
+// role: reusable module/helper
 // Repo-shared consumer-pin mechanism loaded as the explicit ReleasePins module.
 // Single-sources clean-HEAD revision validation and the exact five-field pin
 // shape so producer pins cannot drift.

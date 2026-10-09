@@ -1,3 +1,4 @@
+// role: release/build entrypoint
 #load "Config.fsx"
 #load "../../infrastructure/Distribution.fsx"
 
