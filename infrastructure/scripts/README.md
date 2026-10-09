@@ -60,7 +60,8 @@ component is a reparse point.
 
 ## Role header authority
 
-Every owned `.fsx` script declares its role on the first line:
+Every owned `.fsx` script declares its role on the first physical line of
+the file:
 
 ```fsharp
 // role: <one of the five exact values>
@@ -74,8 +75,14 @@ The five exact values recognized by the analyzer:
 - `test entrypoint`
 - `release/build entrypoint`
 
-A script with no `// role:` header, with more than one, or with an
-unrecognized value fails the role contract.
+The analyzer walks every line through the FCS tokenizer so `// role:` text
+inside an F# string is not promoted to a declaration. A UTF-8 BOM at the
+very start of the file is ignored when locating it, and line 0 (the first
+physical line, after the BOM strip) is the canonical header — blank
+lines are not skipped. Any additional `// role:` declaration anywhere in
+the file — same value (duplicate) or a different value (conflict) —
+fails the role contract, as does a missing first-line header or an
+unrecognized value.
 
 ## Discovery
 
@@ -87,14 +94,25 @@ Discovery walks four roots by default:
 - `workflow/`.
 
 Within each root, `*.fsx` files are enumerated. The directories `bin`,
-`obj`, `dist`, and `.git` are excluded at every depth. Files are
-deduplicated by absolute path so a file reachable through more than one
-root is inventoried exactly once. `#load` targets that resolve outside the
-repository root fail the `DIRECTORY_ESCAPE` check; targets that do not
-exist on disk fail the `MISSING_LOAD_TARGET` check. Reparse-point discovery
-roots, entries, and load-target components fail with `SYMLINK_REPARSE` and are
-not followed. Indented file-scope `#load` directives are supported; module-body
-`#load` forms fail with `UNSUPPORTED_LOAD_FORM` because FSI does not load them.
+`obj`, `dist`, `.git`, and `.tasks` are excluded at every depth. `.tasks`
+is platform-owned Task Runtime state (see `.gitignore` and `AGENTS.md`);
+it is not an owned producer surface and the analyzer keeps no central
+script inventory, so a non-owned platform surface is excluded by
+directory name rather than whitelisted. Files are deduplicated by
+absolute path so a file reachable through more than one root is
+inventoried exactly once.
+
+`#load` targets must be script-relative. Rooted or fully-qualified paths
+(drive-root `C:\foo`, drive-relative `\foo`, UNC `\\server\share`,
+absolute `/foo`) fail with `ROOTED_LOAD_PATH` before any resolution or
+typechecking, even when the resolved path happens to land inside the
+repository; `../foo` cross-directory paths are allowed as long as they
+stay contained. Targets that resolve outside the repository root fail the
+`DIRECTORY_ESCAPE` check; targets that do not exist on disk fail the
+`MISSING_LOAD_TARGET` check. Reparse-point discovery roots, entries, and
+load-target components fail with `SYMLINK_REPARSE` and are not followed.
+Indented file-scope `#load` directives are supported; module-body `#load`
+forms fail with `UNSUPPORTED_LOAD_FORM` because FSI does not load them.
 
 ## Validation lanes
 

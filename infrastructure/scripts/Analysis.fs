@@ -80,8 +80,8 @@ let isInside (parent: string) (child: string) =
     let parts = relative.Split(Path.DirectorySeparatorChar, Path.PathSeparator)
     parts |> Array.forall (fun segment -> segment <> ".." && segment <> "")
 
-// Generated directories excluded from every discovery root at any depth.
-let excludedDirectoryNames = Set.ofList [ "bin"; "obj"; "dist"; ".git" ]
+// Generated directories excluded from every discovery root at any depth. `.tasks` is platform-owned Task Runtime state (see .gitignore and AGENTS.md "durable task records and historical evidence"); it is non-owned for this analyzer, not a generated build output.
+let excludedDirectoryNames = Set.ofList [ "bin"; "obj"; "dist"; ".git"; ".tasks" ]
 
 let private isExcludedDirectory (path: string) =
     excludedDirectoryNames.Contains(Path.GetFileName path)
@@ -89,6 +89,13 @@ let private isExcludedDirectory (path: string) =
 // True when the filesystem entry is a symbolic link or reparse point; the analyzer must not follow such entries because they may escape the repository or trigger external resolution at FCS-follow time. Fail-closed: any IO attribute failure raises so the caller can decide, not a silent `false`.
 let private isReparsePoint (path: string) =
     File.GetAttributes(path).HasFlag(FileAttributes.ReparsePoint)
+
+// Reject rooted or fully-qualified `#load` paths explicitly before resolution/typechecking: `Path.IsPathRooted` covers drive-root (`C:\foo`), drive-relative (`\foo`), UNC (`\\server\share`), and absolute (`/foo`) on the current platform; relative `../foo` cross-directory traversal stays inside the repository and is allowed.
+let private isRootedLoadPath (value: string) : bool =
+    if String.IsNullOrEmpty value then
+        false
+    else
+        Path.IsPathRooted value
 
 // True when any path component between the canonical root and the file (inclusive) is a reparse point. Physical containment is required because lexical `Path.GetFullPath` does not resolve symbolic links and a directory-level link would let a load target reach outside the repository.
 let private hasReparseComponent (canonicalRoot: string) (filePath: string) : bool =
@@ -388,64 +395,98 @@ let private parseSource (path: string) : Async<FSharpDiagnostic list * Directive
         return diagnostics, scan
     }
 
+// Drop a leading UTF-8 BOM so line 0 of the strip is the authoritative first-line role header; a BOM in front of `// role:` would otherwise mis-anchor the canonical header search.
+let private stripBom (source: string) =
+    if source.Length > 0 && source.[0] = '﻿' then
+        source.Substring 1
+    else
+        source
+
+// Walk every line via the FCS tokenizer so `// role:` text inside F# strings is not promoted to a declaration; the first non-BOM line is the canonical header and any further declaration in the file is a duplicate or conflict. FCS splits a single line comment into multiple `LINE_COMMENT` tokens (one per character group), so the per-line scan concatenates them by `LeftColumn` order before applying the `// role:` check.
 let private parseRoleHeader (path: string) : Result<Role> =
-    let firstLines =
-        File.ReadAllLines path
-        |> Array.truncate 8
+    let source = File.ReadAllText path
+    let stripped = stripBom source
+    let lines = stripped.Split('\n')
 
-    let parseLine (line: string) =
-        let trimmed = line.Trim()
+    let checker = FSharpChecker.Create()
+    let mutable lexState = FSharpTokenizerLexState.Initial
+    let declarations = ResizeArray<int * string>()
 
-        if trimmed.StartsWith("//", StringComparison.Ordinal) then
-            let body = trimmed.TrimStart('/').Trim()
-            let marker = "role:"
+    for lineIndex in 0 .. lines.Length - 1 do
+        let line = lines.[lineIndex]
+        let tokens, finalState = checker.TokenizeLine(line, lexState)
+        lexState <- finalState
 
-            if body.IndexOf(marker, StringComparison.OrdinalIgnoreCase) >= 0 then
-                let colonIndex = body.IndexOf(marker, StringComparison.Ordinal)
+        let commentParts = ResizeArray<FSharpTokenInfo>()
 
-                if colonIndex >= 0 then
-                    let prefix = body.Substring(0, colonIndex).Trim()
+        for token in tokens do
+            if String.Equals(string token.TokenName, "LINE_COMMENT", StringComparison.Ordinal) then
+                commentParts.Add token
 
-                    if prefix = "" then
-                        Some(body.Substring(colonIndex + marker.Length).Trim())
-                    else
-                        None
-                else
-                    None
+        if commentParts.Count > 0 then
+            let ordered =
+                commentParts
+                |> Seq.sortBy (fun t -> t.LeftColumn)
+                |> Seq.toList
+
+            let builder = StringBuilder()
+
+            for token in ordered do
+                let startCol = max 0 token.LeftColumn
+                let endCol = min token.RightColumn (line.Length - 1)
+
+                if startCol <= endCol && startCol < line.Length then
+                    builder.Append(line.Substring(startCol, endCol - startCol + 1)) |> ignore
+
+            let commentText = builder.ToString()
+            let marker = "// role:"
+
+            if commentText.StartsWith(marker, StringComparison.Ordinal) then
+                let value = commentText.Substring(marker.Length).Trim()
+                declarations.Add(lineIndex, value)
+
+    let firstLineDecl =
+        declarations |> Seq.tryFind (fun (lineIndex, _) -> lineIndex = 0)
+
+    match firstLineDecl with
+    | None ->
+        let detail =
+            if Seq.isEmpty declarations then
+                "the script does not declare a role header (`// role: ...`)"
             else
-                None
-        else
-            None
+                "the script does not declare a role header on the first line"
 
-    let roleLines =
-        firstLines
-        |> Array.choose parseLine
-        |> Array.toList
-
-    match roleLines with
-    | [ single ] ->
-        match Role.fromString single with
-        | Some role -> Ok role
+        Errors
+            [ { Code = "MISSING_ROLE"
+                Script = path
+                Detail = detail } ]
+    | Some (_, firstValue) ->
+        match Role.fromString firstValue with
         | None ->
-            let detail = "the role header '" + single + "' is not one of the five issue roles"
+            let detail =
+                "the role header '" + firstValue + "' is not one of the five issue roles"
 
             Errors
                 [ { Code = "AMBIGUOUS_ROLE"
                     Script = path
                     Detail = detail } ]
-    | [] ->
-        Errors
-            [ { Code = "MISSING_ROLE"
-                Script = path
-                Detail = "the script does not declare a role header (`// role: ...`)" } ]
-    | first :: rest ->
-        let summary =
-            ([ first ] @ rest) |> List.map (sprintf "'%s'") |> String.concat "; "
+        | Some role ->
+            let others =
+                declarations
+                |> Seq.filter (fun (lineIndex, _) -> lineIndex <> 0)
+                |> Seq.map snd
+                |> Seq.toList
 
-        Errors
-            [ { Code = "AMBIGUOUS_ROLE"
-                Script = path
-                Detail = "the script declares more than one role header: " + summary } ]
+            if others.IsEmpty then
+                Ok role
+            else
+                let allValues = firstValue :: others
+                let summary = allValues |> List.map (sprintf "'%s'") |> String.concat "; "
+
+                Errors
+                    [ { Code = "AMBIGUOUS_ROLE"
+                        Script = path
+                        Detail = "the script declares more than one role header: " + summary } ]
 
 // .fs project source loaded from a test entrypoint is out of script-inventory scope; the cycle and missing-dependency checks ignore it but its existence is still asserted.
 let private isProjectSourceLoad (path: string) =
@@ -478,12 +519,22 @@ let rec private scanTransitiveExternalDirectives (canonicalRepoRoot: string) (fi
 
         let transitive =
             [ for load in scan.Loads do
-                  let resolved = canonicalPath(Path.Combine(scriptDirectory, load))
+                  // Apply the same script-relative policy to ordinary `.fs` source edges so a transitive load cannot escape the invariant through a project source chain.
+                  if isRootedLoadPath load then
+                      let detail =
+                          "#load path must be script-relative; rooted or fully-qualified paths are rejected: " + load
 
-                  if isProjectSourceLoad (Path.GetFileName load) && isInside canonicalRepoRoot resolved then
-                      yield! scanTransitiveExternalDirectives canonicalRepoRoot resolved visited'
+                      yield
+                          { Code = "ROOTED_LOAD_PATH"
+                            Script = relative
+                            Detail = detail }
                   else
-                      () ]
+                      let resolved = canonicalPath(Path.Combine(scriptDirectory, load))
+
+                      if isProjectSourceLoad (Path.GetFileName load) && isInside canonicalRepoRoot resolved then
+                          yield! scanTransitiveExternalDirectives canonicalRepoRoot resolved visited'
+                      else
+                          () ]
 
         externalIssues @ transitive
 
@@ -537,58 +588,68 @@ let parseScripts (repoRoot: string) (inventory: Inventory) : Async<Result<Invent
                 let mutable transitiveVisited = Set.empty
 
                 for value in scan.Loads do
-                    let combined = Path.Combine(scriptDirectory, value)
-                    let resolvedPath = canonicalPath combined
-
-                    // #load must stay inside the repository root, not the declaring script's directory, so cross-subtree `../domain/*.fs` loads are allowed.
-                    if isInside canonicalRepoRoot resolvedPath |> not then
-                        let detail = "#load resolves outside the repository root: " + resolvedPath
+                    // Reject rooted or fully-qualified paths before any resolution or typechecking step; cross-directory `../foo` traversal stays script-relative and is allowed.
+                    if isRootedLoadPath value then
+                        let detail = "#load path must be script-relative; rooted or fully-qualified paths are rejected: " + value
 
                         issues.Add(
-                            { Code = "DIRECTORY_ESCAPE"
+                            { Code = "ROOTED_LOAD_PATH"
                               Script = script.RepositoryPath
                               Detail = detail }
                         )
                     else
-                        let relative = repositoryRelative canonicalRepoRoot resolvedPath
+                        let combined = Path.Combine(scriptDirectory, value)
+                        let resolvedPath = canonicalPath combined
 
-                        // The declared load target's existence is verified even when the target is out of role scope.
-                        if not (File.Exists resolvedPath) then
-                            let detail =
-                                "#load target file is missing on disk: " + relative
+                        // #load must stay inside the repository root, not the declaring script's directory, so cross-subtree `../domain/*.fs` loads are allowed.
+                        if isInside canonicalRepoRoot resolvedPath |> not then
+                            let detail = "#load resolves outside the repository root: " + resolvedPath
 
                             issues.Add(
-                                { Code = "MISSING_LOAD_TARGET"
+                                { Code = "DIRECTORY_ESCAPE"
                                   Script = script.RepositoryPath
                                   Detail = detail }
                             )
+                        else
+                            let relative = repositoryRelative canonicalRepoRoot resolvedPath
 
-                        // Reparse-point / symlink load targets and parent-component links are rejected before any FCS read so the analyzer never follows an external-resolution link. The dependency also surfaces as `MISSING_DEPENDENCY` because the inventory walk does not follow reparse points, so a downstream `detectCycles` / validation sees a coherent inventory state.
-                        if File.Exists resolvedPath && (isReparsePoint resolvedPath || hasReparseComponent canonicalRepoRoot resolvedPath) then
-                            issues.Add(
-                                { Code = "SYMLINK_REPARSE"
-                                  Script = script.RepositoryPath
-                                  Detail = "#load target or a path component is a symbolic link or reparse point and is not followed: " + relative }
-                            )
+                            // The declared load target's existence is verified even when the target is out of role scope.
+                            if not (File.Exists resolvedPath) then
+                                let detail =
+                                    "#load target file is missing on disk: " + relative
 
-                            issues.Add(
-                                { Code = "MISSING_DEPENDENCY"
-                                  Script = relative
-                                  Detail = "declared #load target is not in the inventory because a path component is a symbolic link or reparse point: " + relative }
-                            )
+                                issues.Add(
+                                    { Code = "MISSING_LOAD_TARGET"
+                                      Script = script.RepositoryPath
+                                      Detail = detail }
+                                )
 
-                        // Transitive `.fs` load chain: pre-flight scan for `#r` / `#I` so FCS does not silently follow external-resolution directives in project source.
-                        if isProjectSourceLoad relative && Set.contains resolvedPath transitiveVisited |> not then
-                            for transitiveIssue in
-                                scanTransitiveExternalDirectives canonicalRepoRoot resolvedPath transitiveVisited do
-                                issues.Add transitiveIssue
-                            transitiveVisited <- transitiveVisited.Add resolvedPath
+                            // Reparse-point / symlink load targets and parent-component links are rejected before any FCS read so the analyzer never follows an external-resolution link. The dependency also surfaces as `MISSING_DEPENDENCY` because the inventory walk does not follow reparse points, so a downstream `detectCycles` / validation sees a coherent inventory state.
+                            if File.Exists resolvedPath && (isReparsePoint resolvedPath || hasReparseComponent canonicalRepoRoot resolvedPath) then
+                                issues.Add(
+                                    { Code = "SYMLINK_REPARSE"
+                                      Script = script.RepositoryPath
+                                      Detail = "#load target or a path component is a symbolic link or reparse point and is not followed: " + relative }
+                                )
 
-                        if Set.contains relative seenRelative |> not then
-                            seenRelative <- seenRelative.Add relative
+                                issues.Add(
+                                    { Code = "MISSING_DEPENDENCY"
+                                      Script = relative
+                                      Detail = "declared #load target is not in the inventory because a path component is a symbolic link or reparse point: " + relative }
+                                )
 
-                            if not (isProjectSourceLoad relative) then
-                                loads.Add relative
+                            // Transitive `.fs` load chain: pre-flight scan for `#r` / `#I` so FCS does not silently follow external-resolution directives in project source.
+                            if isProjectSourceLoad relative && Set.contains resolvedPath transitiveVisited |> not then
+                                for transitiveIssue in
+                                    scanTransitiveExternalDirectives canonicalRepoRoot resolvedPath transitiveVisited do
+                                    issues.Add transitiveIssue
+                                transitiveVisited <- transitiveVisited.Add resolvedPath
+
+                            if Set.contains relative seenRelative |> not then
+                                seenRelative <- seenRelative.Add relative
+
+                                if not (isProjectSourceLoad relative) then
+                                    loads.Add relative
 
                 scripts.Add(
                     { script with

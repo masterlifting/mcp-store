@@ -103,6 +103,19 @@ test "dynamic discovery covers root and owned roots while excluding generated tr
             failwith "generated directory or .fs metadata file entered the script inventory"
         return () }))
 
+test "task runtime scripts are excluded while ordinary owned roots remain discovered" (fun () ->
+    withFixture (fun root -> async {
+        write root ".tasks/GHI-26/scripts/dummy.fsx" (role "reusable module/helper" "let hidden = 1") |> ignore
+        write root "new-root.fsx" (role "reusable module/helper" "let rootValue = 1") |> ignore
+        write root "infrastructure/scripts/new-owned.fsx" (role "test helper" "let ownedValue = 2") |> ignore
+        write root "infrastructure/scripts/nested/new-nested.fsx" (role "test helper" "let nestedValue = 3") |> ignore
+        let! code, output, error = runCli "inventory" root root
+        requireExit 0 (code, output, error)
+        for included in [ "new-root.fsx"; "infrastructure/scripts/new-owned.fsx"; "infrastructure/scripts/nested/new-nested.fsx" ] do
+            if not (containsLine included output) then failwithf "owned script omitted: %s" included
+        if output.Contains(".tasks", StringComparison.Ordinal) || output.Contains("dummy.fsx", StringComparison.Ordinal) then failwith "Task Runtime file entered inventory"
+        return () }))
+
 test "only exact canonical roles are accepted; missing, unknown, duplicate and ambiguous headers fail" (fun () ->
     withFixture (fun root -> async {
         write root "none.fsx" "let value = 0" |> ignore
@@ -113,6 +126,45 @@ test "only exact canonical roles are accepted; missing, unknown, duplicate and a
         let! code, output, error = runCli "inventory" root root
         requireExit 3 (code, output, error)
         for diagnostic in [ "MISSING_ROLE"; "AMBIGUOUS_ROLE" ] do requireCode diagnostic (code, output, error)
+        return () }))
+
+test "role headers require the first line, accept BOM, and reject late duplicate or conflicting declarations" (fun () ->
+    withFixture (fun root -> async {
+        write root "bom.fsx" ("\uFEFF" + role "reusable module/helper" "let value = 0") |> ignore
+        write root "late-only.fsx" "let value = 0\n// role: test helper" |> ignore
+        let spacer = [ 1 .. 10 ] |> List.map string |> String.concat "\n"
+        let lateDuplicate = "let value = 0\n" + spacer + "\n// role: reusable module/helper"
+        let lateConflict = "let value = 0\n" + spacer + "\n// role: test helper"
+        write root "late-duplicate.fsx" (role "reusable module/helper" lateDuplicate) |> ignore
+        write root "late-conflict.fsx" (role "reusable module/helper" lateConflict) |> ignore
+        let! code, output, error = runCli "inventory" root root
+        requireExit 3 (code, output, error)
+        requireCode "MISSING_ROLE" (code, output, error)
+        requireCode "AMBIGUOUS_ROLE" (code, output, error)
+        for source in [ "late-only.fsx"; "late-duplicate.fsx"; "late-conflict.fsx" ] do
+            if not ((output + error).Contains(source, StringComparison.Ordinal)) then failwithf "role error missing for %s" source
+        for source in [ "late-only.fsx"; "late-duplicate.fsx"; "late-conflict.fsx" ] do File.Delete(Path.Combine(root, source))
+        let! validCode, validOutput, validError = runCli "inventory" root root
+        requireExit 0 (validCode, validOutput, validError)
+        if not (containsLine "bom.fsx" validOutput) then failwith "BOM-prefixed canonical role was rejected"
+        return () }))
+
+test "role lookalikes in string and block comments are ignored and all five roles are recognized" (fun () ->
+    withFixture (fun root -> async {
+        let roles = [ "reusable module/helper"; "entrypoint/command"; "test helper"; "test entrypoint"; "release/build entrypoint" ]
+        roles |> List.iteri (fun index roleName -> write root (sprintf "role-%d.fsx" index) (role roleName "let value = 0") |> ignore)
+        write root "lookalikes.fsx" (role "test helper" "let text = \"// role: unknown\"\n(* // role: fake *)\nlet value = 1") |> ignore
+        write root "late-unknown.fsx" (role "test helper" (String.concat "\n" ([ 1 .. 10 ] |> List.map string) + "\n// role: wizard")) |> ignore
+        let! code, output, error = runCli "inventory" root root
+        requireExit 3 (code, output, error)
+        requireCode "AMBIGUOUS_ROLE" (code, output, error)
+        if not ((output + error).Contains("late-unknown.fsx", StringComparison.Ordinal)) then failwith "unknown late role declaration was not rejected"
+        File.Delete(Path.Combine(root, "late-unknown.fsx"))
+        let! validCode, validOutput, validError = runCli "inventory" root root
+        requireExit 0 (validCode, validOutput, validError)
+        if not (containsLine "lookalikes.fsx" validOutput) then failwith "comment/string lookalikes changed role parsing"
+        for index in 0 .. 4 do
+            if not (containsLine (sprintf "role-%d.fsx" index) validOutput) then failwithf "canonical role %d not recognized" index
         return () }))
 
 test "direct, transitive and diamond loads typecheck with repeated graph edges deduplicated and no evaluation" (fun () ->
@@ -146,6 +198,45 @@ test "missing .fsx and .fs targets and escaped targets fail statically" (fun () 
         for source in [ "escape.fsx"; "escape-indented.fsx" ] do
             if not ((output + error).Contains(source, StringComparison.Ordinal)) then
                 failwithf "escape from %s was not reported" source
+        return () }))
+
+test "rooted load paths fail while repository-relative parent traversal remains valid" (fun () ->
+    withFixture (fun root -> async {
+        let target = write root "shared.fsx" (role "reusable module/helper" "let value = 1")
+        let insideRooted = role "entrypoint/command" (sprintf "#load @\"%s\"" target)
+        write root "rooted.fsx" insideRooted |> ignore
+        write root "nested/relative.fsx" (role "entrypoint/command" "#load \"../shared.fsx\"") |> ignore
+        let! code, output, error = runCli "inventory" root root
+        requireExit 3 (code, output, error)
+        requireCode "ROOTED_LOAD_PATH" (code, output, error)
+        if not ((output + error).Contains("rooted.fsx", StringComparison.Ordinal)) then failwith "absolute in-repository load was not attributed"
+        File.Delete(Path.Combine(root, "rooted.fsx"))
+        let! relativeCode, graph, relativeError = runCli "graph" root root
+        requireExit 0 (relativeCode, graph, relativeError)
+        if not (containsLine "-> shared.fsx" graph) then failwith "valid relative parent traversal was not resolved"
+        if (graph + relativeError).Contains("DIRECTORY_ESCAPE", StringComparison.Ordinal) then failwith "valid in-repository parent traversal was rejected"
+        return () }))
+
+test "rooted transitive project-source load is rejected" (fun () ->
+    withFixture (fun root -> async {
+        let target = write root "outside-target.fsx" (role "reusable module/helper" "let value = 1")
+        write root "root.fsx" (role "test entrypoint" "#load \"nested/Project.fs\"") |> ignore
+        write root "nested/Project.fs" (sprintf "#load @\"%s\"\nmodule Project" target) |> ignore
+        let! code, output, error = runCli "inventory" root root
+        requireExit 3 (code, output, error)
+        requireCode "ROOTED_LOAD_PATH" (code, output, error)
+        if not ((output + error).Contains("nested/Project.fs", StringComparison.Ordinal)) then failwith "transitive rooted load was not attributed to project source"
+        return () }))
+
+test "drive and UNC rooted load syntax is rejected without resolving external paths" (fun () ->
+    withFixture (fun root -> async {
+        write root "drive.fsx" (role "entrypoint/command" "#load @\"C:\\outside.fsx\"") |> ignore
+        write root "unc.fsx" (role "entrypoint/command" "#load @\"\\\\server\\share\\outside.fsx\"") |> ignore
+        let! code, output, error = runCli "inventory" root root
+        requireExit 3 (code, output, error)
+        requireCode "ROOTED_LOAD_PATH" (code, output, error)
+        for source in [ "drive.fsx"; "unc.fsx" ] do
+            if not ((output + error).Contains(source, StringComparison.Ordinal)) then failwithf "rooted syntax missing diagnostic for %s" source
         return () }))
 
 test "dependency cycles are rejected by validate" (fun () ->
@@ -323,6 +414,28 @@ test "module-contained hash text is not treated as an FSI load directive" (fun (
         requireExit 3 (graphCode, graph, graphError)
         requireCode "UNSUPPORTED_LOAD_FORM" (graphCode, graph, graphError)
         if containsLine "-> Dependency.fsx" graph then failwith "analyzer classified a module-body directive as a real FSI load"
+        return () }))
+
+test "module body classifier comment boundaries match FSI for plausible opener forms" (fun () ->
+    withFixture (fun root -> async {
+        let cases =
+            [ "multiline-comment", "(*\nmodule Commented =\n*)\n#load \"Dependency.fsx\"\n"
+              "trailing-comment", "module Trailing = (* opener note *)\n    #load \"Dependency.fsx\"\n"
+              "attribute", "[<System.Obsolete>]\nmodule Attributed =\n    #load \"Dependency.fsx\"\n"
+              "tab-indentation", "module Tabbed =\n\t#load \"Dependency.fsx\"\n" ]
+        write root "Dependency.fsx" (role "reusable module/helper" "module Dependency\nlet value = 31") |> ignore
+        for name, source in cases do
+            let parent = write root (name + ".fsx") (role "reusable module/helper" source)
+            let! fsiCode, fsiOutput, fsiError = execute "dotnet" [ "fsi"; "--nologo"; parent ] root
+            let! graphCode, graph, graphError = runCli "graph" root root
+            if fsiCode = 0 then
+                if graphCode <> 0 || not (containsLine "-> Dependency.fsx" graph) then
+                    printfn "CLASSIFIER MISMATCH %s: FSI accepts load; analyzer output=%s error=%s" name graph graphError
+                else printfn "CLASSIFIER MATCH %s: FSI accepts load" name
+            elif graphCode = 0 || not ((graph + graphError).Contains("UNSUPPORTED_LOAD_FORM", StringComparison.Ordinal)) then
+                printfn "CLASSIFIER MISMATCH %s: FSI rejects load; FSI=%s %s analyzer=%s %s" name fsiOutput fsiError graph graphError
+            else printfn "CLASSIFIER MATCH %s: FSI rejects load" name
+            File.Delete parent
         return () }))
 
 let createFileLink link target =
