@@ -2,8 +2,8 @@
 
 Research-only slice (W1). No implementation solution frozen. No builds/tests run
 as evidence in this slice. Original issue body preserved verbatim in
-`original-issue.md`; requirement-to-evidence matrix in
- [`docs/release-requirements.md`](../release-requirements.md).
+`original.md`; requirement-to-evidence matrix in
+ [`docs/release/Requirements.md`](../release/Requirements.md).
 
 ## 1. Verified baseline
 

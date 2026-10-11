@@ -8,7 +8,7 @@
               the VERIFIED published projection and labels candidate evidence
               distinctly. See §5.
 
-Authority: `docs/GHI-24/original-issue.md` (verbatim) and the frozen
+Authority: `docs/GHI-24/original.md` (verbatim) and the frozen
 `docs/GHI-24/solution.md`. Core F# transaction/comparison/publish/metadata
 surfaces are authored by the core owner (`docs/GHI-24/metadata.md`); this
 DevOps slice owns the root workflow, the minimal SDK bootstrap, the canonical
@@ -61,7 +61,9 @@ canonical `runtimeVersion` and `platform` alongside `sdkVersion`, so SDK,
 runtime, platform, and architecture are sourced only from canonical config.
 `Bootstrap.fsx` reads those fields through its isolated child `dotnet fsi`
 evaluation, requires the exact runtime version (no prefix fallback), and
-cross-checks projection vs evaluated config vs executing toolchain.
+cross-checks projection vs evaluated config vs executing toolchain. Command
+usage and exit codes live in `infrastructure/release/README.md`, not in the
+script comments.
 
 ## 3. Local validation evidence (factual)
 
@@ -78,6 +80,7 @@ cross-checks projection vs evaluated config vs executing toolchain.
 | Embedded PowerShell parses | `[Parser]::ParseFile` over every `run:` block (9 blocks) | all parse |
 | Action pinning | every `uses:` is a 40-hex commit SHA with a version comment | no floating ref |
 | Summary/artifact logic | summary step exercised against a synthetic `status=published` log and a synthetic `exit=2` log | published path emits `published-metadata-<c>.json`; failure path emits `status-evidence-only` and does **not** copy candidate metadata |
+| Comment cleanliness | YAML `safe_load` + `[Parser]::ParseFile` after comment-only edits to `release.yml` and `Update.ps1` | parses; no logic/behavior change; file headers ≤3 one-line points |
 
 The runner and analyzer build evidence is the core owner's
 (`docs/GHI-24/metadata.md` §8) re-confirmed here; the YAML/script/summary

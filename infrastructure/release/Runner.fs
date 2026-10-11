@@ -1,153 +1,422 @@
-// Compiled entrypoint for the per-component release transaction. This
-// file is intentionally named `.fs` (not `.fsx`) so the script
-// analyzer does not discover it; the analyzer flags `#r` as an
-// external reference even for local file references, so any script
-// that uses `#r` to load the compiled release DLL would fail the
-// `validate` subcommand. The compiled executable is invoked by the
-// per-component `Release.fsx` scripts via `Process.Start`, which
-// avoids the analyzer's `#r` rule entirely.
-//
-// Command-line usage:
-//   ReleaseRunner <manifest-path> <archive-path> <contract-json>
-//      manifest-path  path to the candidate distribution.json
-//      archive-path   path to the candidate archive
-//      contract-json  JSON-encoded ComponentContract
-//
-// Output: a single JSON object on stdout with the transaction outcome.
-// The Release.fsx scripts parse this output and render the
-// per-component summary.
-//
-// The runner enforces the W3 contract:
-//
-//   * Clean-tree guard at startup; fail closed when the working tree
-//     is dirty.
-//   * Clean-HEAD == manifest revision assertion; fail closed when the
-//     manifest was built against a different HEAD.
-//   * Local mirror transport by default; production transport when
-//     `MCP_RELEASE_GITHUB_OWNER` / `MCP_RELEASE_GITHUB_REPOSITORY` /
-//     `GITHUB_TOKEN` are present.
-//   * Upload-pending flag is reported separately from a confirmed
-//     published status; a `publish-pending` outcome exits with a
-//     non-zero status so a workflow that did not run the upload step
-//     does not silently claim a successful publication.
-//   * The consumer-neutral release-metadata projection is written
-//     alongside the archive and uploaded as a release asset in
-//     production. The runner never reports `status=published` until
-//     the archive's remote digest is verified AND the metadata asset
-//     is observed at the expected digest; an upload-time failure
-//     leaves a recoverable next-evaluation observation path rather
-//     than a claimed-published state.
-
+// role: release/build entrypoint
+// Thin CLI shell around `ReleaseEvaluate`; emits one JSON object on stdout before every exit.
 module ReleaseRunner
 
 open System
 open System.IO
+open System.Text
 open System.Text.Json
 open System.Text.Json.Nodes
 
-let private stateToOutcome (state: ReleasePublish.RemoteState) : Result<ReleaseCompare.ArchiveObservation option, BuildProvenance.ReleaseError> =
-    match state with
-    | ReleasePublish.Observed observation -> Ok(Some observation)
-    | ReleasePublish.Absent
-    | ReleasePublish.Missing -> Ok None
-    | ReleasePublish.Immutable ->
-        Error(
-            BuildProvenance.FileFailure(
-                "immutable",
-                "release",
-                "the release is configured as immutable; refusing to publish"))
+let private writeResolution (resolution: ReleaseEvaluate.Resolution) : string =
+    let node = JsonObject()
+    node["status"] <- JsonValue.Create resolution.Status
+    node["reason"] <- JsonValue.Create resolution.Reason
+    node["uploadCompleted"] <- JsonValue.Create resolution.UploadCompleted
+    node["recoveryNeeded"] <- JsonValue.Create resolution.MetadataRecoveryNeeded
+    let render = resolution.Render
+    node["componentId"] <- JsonValue.Create render.ComponentId
+    node["version"] <- JsonValue.Create render.Version
+    node["archiveName"] <- JsonValue.Create render.ArchiveName
+    node["assetUri"] <- JsonValue.Create render.AssetUri
+    node["metadataAssetName"] <- JsonValue.Create render.MetadataAssetName
+    node["metadataLocalPath"] <- JsonValue.Create render.MetadataLocalPath
+    node["candidateArchiveSha256"] <- JsonValue.Create render.CandidateArchiveSha256
+    node["candidateManifestSha256"] <- JsonValue.Create render.CandidateManifestSha256
+    node["currentEvaluatedHead"] <- JsonValue.Create render.EvaluatedHead
+    node["candidateRevision"] <- JsonValue.Create render.CandidateRevision
+    match render.BumpedVersion with
+    | Some value -> node["bumpedVersion"] <- JsonValue.Create value
+    | None -> ()
+    match render.ProducerSdk with
+    | Some value -> node["producerSdk"] <- JsonValue.Create value
+    | None -> ()
+    match render.ProducerRuntime with
+    | Some value -> node["producerRuntime"] <- JsonValue.Create value
+    | None -> ()
+    match render.ProducerPlatform with
+    | Some value -> node["producerPlatform"] <- JsonValue.Create value
+    | None -> ()
+    node["publishedArchiveSha256"] <- JsonValue.Create(resolution.PublishedArchiveSha256 |> Option.toObj)
+    node["publishedManifestSha256"] <- JsonValue.Create(resolution.PublishedManifestSha256 |> Option.toObj)
+    node["publishedRevision"] <- JsonValue.Create(resolution.PublishedRevision |> Option.toObj)
+    node["publishedMetadataSha256"] <- JsonValue.Create(resolution.PublishedMetadataAssetSha256 |> Option.toObj)
+    node.ToJsonString(JsonSerializerOptions(WriteIndented = true))
 
-// Compute the candidate archive SHA-256 from bytes on disk. The
-// published candidate hash is the only digest that the runner treats
-// as authoritative for the per-component summary.
-let private sha256OfFile (path: string) : string =
-    let bytes = File.ReadAllBytes path
-    System.Security.Cryptography.SHA256.HashData(bytes)
-    |> Convert.ToHexString
-    |> fun v -> v.ToLowerInvariant()
+let private emitAndExit (resolution: ReleaseEvaluate.Resolution) (exitCode: int) =
+    // Structured JSON before every exit so the wrapper recovers status/reason/version/URI/name/revision/hashes on every branch.
+    let payload = writeResolution resolution
+    let buffer = Encoding.UTF8.GetBytes payload
+    try
+        use stdout = Console.OpenStandardOutput()
+        stdout.Write(buffer, 0, buffer.Length)
+        stdout.Write([| byte '\n' |], 0, 1)
+        stdout.Flush()
+    with
+    | _ -> ()
+    exit exitCode
 
-// Read the candidate manifest body and surface its `revision` field
-// (already asserted equal to HEAD by the caller).
-let private readManifestRevision (path: string) : string =
-    let text = File.ReadAllText path
-    let node = JsonNode.Parse text
-    (node.AsObject()["revision"]).GetValue<string>()
+let private canonicalRepository () : string * string = "masterlifting", "mcp-store"
 
-// Build the consumer-neutral projection from the candidate-side facts
-// the runner has observed. The projection is rendered immediately
-// after the archive observation so any future field addition lands
-// here without touching the upload transport.
-let private buildProjection
-    (contract: ReleaseCompare.ComponentContract)
+// Render with every known field already filled; missing fields stay empty so partial failures preserve the context that was determined.
+let private renderFrom
+    (componentId: string)
+    (version: string)
+    (archiveName: string)
     (assetUri: string)
-    (archiveSha256: string)
-    (manifestSha256: string)
+    (metadataAssetName: string)
+    (metadataLocalPath: string)
+    (candidateArchiveSha: string)
+    (candidateManifestSha: string)
+    (evaluatedHead: string)
     (candidateRevision: string)
     (producerSdk: string option)
     (producerRuntime: string option)
     (producerPlatform: string option)
-    : ReleaseMetadata.ProducerMetadataProjection =
-    ReleaseMetadata.makeProjection
-        contract.ComponentId
-        contract.Version
-        assetUri
-        contract.ArchiveName
-        archiveSha256
-        manifestSha256
-        candidateRevision
-        producerSdk
-        producerRuntime
-        producerPlatform
+    : ReleaseEvaluate.Render =
+    { ComponentId = componentId
+      Version = version
+      ArchiveName = archiveName
+      AssetUri = assetUri
+      MetadataAssetName = metadataAssetName
+      MetadataLocalPath = metadataLocalPath
+      CandidateArchiveSha256 = candidateArchiveSha
+      CandidateManifestSha256 = candidateManifestSha
+      EvaluatedHead = evaluatedHead
+      CandidateRevision = candidateRevision
+      ProducerSdk = producerSdk
+      ProducerRuntime = producerRuntime
+      ProducerPlatform = producerPlatform
+      BumpedVersion = None }
 
-// Surface the failure-reason text for the per-component summary. The
-// field is the value used by the workflow step summary and by the
-// Actions artifact so an operator can act without re-running the
-// transaction.
-let private failureReason (error: BuildProvenance.ReleaseError) : string =
-    BuildProvenance.ReleaseError.message error
+let private parseContractJson (contractJson: string) : Result<ReleaseCompare.ComponentContract * string, BuildProvenance.ReleaseError> =
+    try
+        let doc = System.Text.Json.Nodes.JsonNode.Parse(contractJson)
+        let obj = doc.AsObject()
+        let assetUriNode = obj.["assetUri"]
+        let assetUri =
+            if isNull assetUriNode then ""
+            else
+                try assetUriNode.GetValue<string>()
+                with _ -> ""
+        let allowlist =
+            obj.["entryAllowlist"].AsArray()
+            |> Seq.choose (fun v ->
+                if isNull v then None
+                else
+                    try Some (v.GetValue<string>())
+                    with _ -> None)
+            |> Seq.toList
+        Ok
+            ({ ComponentId = obj["componentId"].GetValue<string>()
+               Version = obj["version"].GetValue<string>()
+               ArchiveName = obj["archiveName"].GetValue<string>()
+               EntryAllowlist = allowlist }, assetUri)
+    with
+    | :? System.Text.Json.JsonException as error ->
+        Error(BuildProvenance.MalformedArtifact("contract", $"the contract JSON is not valid: {error.Message}"))
+    | :? FormatException as error ->
+        Error(BuildProvenance.MalformedArtifact("contract", $"the contract JSON is not valid: {error.Message}"))
+    | :? InvalidOperationException as error ->
+        Error(BuildProvenance.MalformedArtifact("contract", $"the contract JSON is not valid: {error.Message}"))
 
-// Set the canonical JSON shape every status shares so the workflow's
-// summary rendering and the per-component script can rely on a
-// stable schema. Fields are explicit (no `null` aliases for the
-// published values) so the consumer cannot mistake a candidate value
-// for a published value.
-let private writeShared
-    (node: JsonObject)
-    (contract: ReleaseCompare.ComponentContract)
+// Writes the verified/observed immutable metadata projection; candidate values are never persisted on the success path.
+let private persistVerifiedProjection
+    (metadataLocalPath: string)
+    (componentId: string)
+    (version: string)
     (assetUri: string)
-    (archiveSha256: string)
-    (manifestSha256: string option)
-    (evaluatedHead: string)
-    (candidateRevision: string option)
+    (archiveName: string)
+    (verifiedArchiveSha: string)
+    (verifiedManifestSha: string)
+    (verifiedRevision: string)
     (producerSdk: string option)
     (producerRuntime: string option)
     (producerPlatform: string option)
-    (metadataAssetName: string)
-    (metadataLocalPath: string)
+    : Async<Result<unit, BuildProvenance.ReleaseError>> =
+    async {
+        let projection =
+            ReleaseMetadata.makeProjection
+                componentId
+                version
+                assetUri
+                archiveName
+                verifiedArchiveSha
+                verifiedManifestSha
+                verifiedRevision
+                producerSdk
+                producerRuntime
+                producerPlatform
+
+        match! ReleaseMetadata.writeToFileAsync metadataLocalPath projection with
+        | Ok _ -> return Ok()
+        | Error error -> return Error error
+    }
+
+let private uploadArchiveAndMetadata
+    (auth: ReleasePublish.AuthToken)
+    (locator: ReleasePublish.ReleaseLocator)
+    (candidateProjection: ReleaseMetadata.ProducerMetadataProjection)
+    (archivePath: string option)
+    (candidateArchiveSha: string option)
+    (transport: ReleasePublish.HttpTransport)
+    : Async<Result<string * string, BuildProvenance.ReleaseError>> =
+    async {
+        match archivePath, candidateArchiveSha with
+        | Some path, Some archiveSha ->
+            let! archiveDigest =
+                ReleasePublish.uploadCandidate auth locator candidateProjection.ArchiveName path archiveSha transport
+
+            match archiveDigest with
+            | Error error -> return Error error
+            | Ok verifiedArchiveSha ->
+                let! metadataDigest = ReleasePublish.uploadMetadata auth locator candidateProjection transport
+
+                match metadataDigest with
+                | Error error -> return Error error
+                | Ok verifiedMetadataSha ->
+                    return Ok(verifiedArchiveSha, verifiedMetadataSha)
+        | _ ->
+            let! metadataDigest = ReleasePublish.uploadMetadata auth locator candidateProjection transport
+
+            match metadataDigest with
+            | Error error -> return Error error
+            | Ok verifiedMetadataSha ->
+                return Ok("", verifiedMetadataSha)
+    }
+
+let private runnerObserver
+    (locator: ReleasePublish.ReleaseLocator)
+    (useGitHub: bool)
+    (auth: ReleasePublish.AuthToken option)
+    (downloadDir: string)
+    : ReleaseEvaluate.RemoteObserver =
+    { ObserveArchive =
+        fun (tag, assetName) ->
+            async {
+                if useGitHub then
+                    match auth with
+                    | Some authValue ->
+                        let transport = ReleasePublish.defaultHttpTransport ()
+                        let ghObserver = ReleasePublish.gitHubObserver authValue downloadDir transport
+                        let! result = ghObserver.Observe locator assetName
+                        return
+                            match result with
+                            | Ok (ReleasePublish.Observed observation) ->
+                                Ok(ReleaseEvaluate.ArchiveObserved observation)
+                            | Ok ReleasePublish.Absent -> Ok ReleaseEvaluate.ArchiveAbsent
+                            | Ok ReleasePublish.Missing -> Ok ReleaseEvaluate.ArchiveMissing
+                            | Ok ReleasePublish.Immutable ->
+                                Ok(ReleaseEvaluate.ArchiveImmutable "the existing release is configured as immutable")
+                            | Error error -> Error error
+                    | None ->
+                        return
+                            Error(
+                                BuildProvenance.FileFailure(
+                                    "transport",
+                                    tag,
+                                    "GITHUB_TOKEN is not set; the production transport cannot run"))
+                else
+                    return
+                        Error(
+                            BuildProvenance.FileFailure(
+                                "transport",
+                                tag,
+                                "the production transport is not selected; set MCP_RELEASE_GITHUB_OWNER + MCP_RELEASE_GITHUB_REPOSITORY + GITHUB_TOKEN to enable remote observation"))
+            }
+      ObserveMetadata =
+        fun (tag, assetName) ->
+            async {
+                if useGitHub then
+                    match auth with
+                    | Some authValue ->
+                        let transport = ReleasePublish.defaultHttpTransport ()
+                        let metadataObserver = ReleasePublish.gitHubMetadataObserver authValue downloadDir transport
+                        let! result = metadataObserver.ObserveMetadata locator assetName
+                        return
+                            match result with
+                            | Ok (ReleasePublish.MetadataObserved (_, sha256, parsed)) ->
+                                Ok(ReleaseEvaluate.MetadataObserved (sha256, parsed))
+                            | Ok ReleasePublish.MetadataAbsent -> Ok ReleaseEvaluate.MetadataAbsent
+                            | Ok ReleasePublish.MetadataMissing -> Ok ReleaseEvaluate.MetadataMissing
+                            | Ok ReleasePublish.MetadataImmutable -> Ok ReleaseEvaluate.MetadataImmutable
+                            | Error error ->
+                                Ok(ReleaseEvaluate.MetadataCorrupt error)
+                    | None ->
+                        return
+                            Error(
+                                BuildProvenance.FileFailure(
+                                    "metadata",
+                                    assetName,
+                                    "GITHUB_TOKEN is not set; the metadata observation cannot run"))
+                else
+                    // Local-mirror metadata failures must fail closed; the GitHub transport is required for recovery.
+                    return
+                        Ok(
+                            ReleaseEvaluate.MetadataCorrupt(
+                                BuildProvenance.FileFailure(
+                                    "metadata",
+                                    assetName,
+                                    "the local mirror cannot satisfy the metadata probe; the GitHub transport is required for recovery")))
+            } }
+
+let private executeResolution
+    (resolution: ReleaseEvaluate.Resolution)
+    (auth: ReleasePublish.AuthToken option)
+    (locator: ReleasePublish.ReleaseLocator)
+    (candidateProjection: ReleaseMetadata.ProducerMetadataProjection)
+    (archivePath: string)
+    (useGitHub: bool)
     =
-    node["componentId"] <- JsonValue.Create contract.ComponentId
-    node["version"] <- JsonValue.Create contract.Version
-    node["archiveName"] <- JsonValue.Create contract.ArchiveName
-    node["assetUri"] <- JsonValue.Create assetUri
-    node["candidateArchiveSha256"] <- JsonValue.Create archiveSha256
-    match manifestSha256 with
-    | Some value -> node["candidateManifestSha256"] <- JsonValue.Create value
-    | None -> ()
-    node["currentEvaluatedHead"] <- JsonValue.Create evaluatedHead
-    match candidateRevision with
-    | Some value -> node["candidateRevision"] <- JsonValue.Create value
-    | None -> ()
-    match producerSdk with
-    | Some value -> node["producerSdk"] <- JsonValue.Create value
-    | None -> ()
-    match producerRuntime with
-    | Some value -> node["producerRuntime"] <- JsonValue.Create value
-    | None -> ()
-    match producerPlatform with
-    | Some value -> node["producerPlatform"] <- JsonValue.Create value
-    | None -> ()
-    node["metadataAssetName"] <- JsonValue.Create metadataAssetName
-    node["metadataLocalPath"] <- JsonValue.Create metadataLocalPath
+    match resolution.Status with
+    | "published" ->
+        match auth with
+        | Some authValue ->
+            let transport = ReleasePublish.defaultHttpTransport ()
+            let uploadResult =
+                uploadArchiveAndMetadata authValue locator candidateProjection (Some archivePath) (Some resolution.Render.CandidateArchiveSha256) transport
+                |> Async.RunSynchronously
+
+            match uploadResult with
+            | Error error ->
+                emitAndExit (ReleaseEvaluate.finalizeFailure resolution.Render (BuildProvenance.ReleaseError.message error)) 1
+            | Ok (verifiedArchiveSha, verifiedMetadataSha) ->
+                let verifiedManifestSha =
+                    match resolution.PublishedManifestSha256 with
+                    | Some v -> v
+                    | None -> resolution.Render.CandidateManifestSha256
+
+                let verifiedRevision =
+                    match resolution.PublishedRevision with
+                    | Some v -> v
+                    | None -> resolution.Render.CandidateRevision
+
+                let persistResult =
+                    persistVerifiedProjection
+                        resolution.Render.MetadataLocalPath
+                        resolution.Render.ComponentId
+                        resolution.Render.Version
+                        resolution.Render.AssetUri
+                        resolution.Render.ArchiveName
+                        verifiedArchiveSha
+                        verifiedManifestSha
+                        verifiedRevision
+                        resolution.Render.ProducerSdk
+                        resolution.Render.ProducerRuntime
+                        resolution.Render.ProducerPlatform
+                    |> Async.RunSynchronously
+
+                match persistResult with
+                | Error error -> emitAndExit (ReleaseEvaluate.finalizeFailure resolution.Render (BuildProvenance.ReleaseError.message error)) 1
+                | Ok () ->
+                    // Pure completion: read verified digests from transport, set manifest sha + revision from the same verified snapshot.
+                    let published =
+                        ReleaseEvaluate.finalizeVerifiedPublication
+                            resolution
+                            verifiedArchiveSha
+                            verifiedMetadataSha
+                    emitAndExit published 0
+        | None ->
+            if useGitHub then
+                emitAndExit (ReleaseEvaluate.finalizeFailure resolution.Render "publish-required but GITHUB_TOKEN is missing") 1
+            else
+                emitAndExit (ReleaseEvaluate.finalizeFailure resolution.Render "publish-required but no production transport is configured") 1
+    | "unchanged" ->
+        if resolution.MetadataRecoveryNeeded then
+            match auth with
+            | Some authValue ->
+                let verifiedArchiveSha =
+                    match resolution.PublishedArchiveSha256 with
+                    | Some v -> v
+                    | None ->
+                        emitAndExit (ReleaseEvaluate.finalizeFailure resolution.Render "metadata recovery requires the observed published archive sha256, which was not captured") 1
+
+                let verifiedManifestSha =
+                    match resolution.PublishedManifestSha256 with
+                    | Some v -> v
+                    | None ->
+                        emitAndExit (ReleaseEvaluate.finalizeFailure resolution.Render "metadata recovery requires the observed published manifest sha256, which was not captured") 1
+
+                let verifiedRevision =
+                    match resolution.PublishedRevision with
+                    | Some v -> v
+                    | None ->
+                        emitAndExit (ReleaseEvaluate.finalizeFailure resolution.Render "metadata recovery requires the observed published revision, which was not captured") 1
+
+                let recoveryProjection =
+                    ReleaseMetadata.makeProjection
+                        resolution.Render.ComponentId
+                        resolution.Render.Version
+                        resolution.Render.AssetUri
+                        resolution.Render.ArchiveName
+                        verifiedArchiveSha
+                        verifiedManifestSha
+                        verifiedRevision
+                        resolution.Render.ProducerSdk
+                        resolution.Render.ProducerRuntime
+                        resolution.Render.ProducerPlatform
+
+                let transport = ReleasePublish.defaultHttpTransport ()
+                let uploadResult =
+                    ReleasePublish.uploadMetadata authValue locator recoveryProjection transport
+                    |> Async.RunSynchronously
+
+                match uploadResult with
+                | Error error -> emitAndExit (ReleaseEvaluate.finalizeFailure resolution.Render (BuildProvenance.ReleaseError.message error)) 1
+                | Ok verifiedMetadataSha ->
+                    let persistResult =
+                        ReleaseMetadata.writeToFileAsync resolution.Render.MetadataLocalPath recoveryProjection
+                        |> Async.RunSynchronously
+
+                    match persistResult with
+                    | Error error -> emitAndExit (ReleaseEvaluate.finalizeFailure resolution.Render (BuildProvenance.ReleaseError.message error)) 1
+                    | Ok _digest ->
+                        emitAndExit (ReleaseEvaluate.finalizeRecovery resolution verifiedMetadataSha) 0
+            | None ->
+                if useGitHub then
+                    emitAndExit (ReleaseEvaluate.finalizeFailure resolution.Render "metadata-recovery-required but GITHUB_TOKEN is missing") 1
+                else
+                    emitAndExit (ReleaseEvaluate.finalizeFailure resolution.Render "metadata-recovery-required but no production transport is configured") 1
+        else
+            let verifiedArchiveSha =
+                match resolution.PublishedArchiveSha256 with
+                | Some v -> v
+                | None -> resolution.Render.CandidateArchiveSha256
+
+            let verifiedManifestSha =
+                match resolution.PublishedManifestSha256 with
+                | Some v -> v
+                | None -> resolution.Render.CandidateManifestSha256
+
+            let verifiedRevision =
+                match resolution.PublishedRevision with
+                | Some v -> v
+                | None -> resolution.Render.CandidateRevision
+
+            let persistResult =
+                persistVerifiedProjection
+                    resolution.Render.MetadataLocalPath
+                    resolution.Render.ComponentId
+                    resolution.Render.Version
+                    resolution.Render.AssetUri
+                    resolution.Render.ArchiveName
+                    verifiedArchiveSha
+                    verifiedManifestSha
+                    verifiedRevision
+                    resolution.Render.ProducerSdk
+                    resolution.Render.ProducerRuntime
+                    resolution.Render.ProducerPlatform
+                |> Async.RunSynchronously
+
+            match persistResult with
+            | Error error -> emitAndExit (ReleaseEvaluate.finalizeFailure resolution.Render (BuildProvenance.ReleaseError.message error)) 1
+            | Ok () -> emitAndExit { resolution with UploadCompleted = false } 0
+    | _ ->
+        let exitCode =
+            match resolution.Render.BumpedVersion with
+            | Some _ -> 2
+            | None -> 1
+        emitAndExit { resolution with UploadCompleted = false } exitCode
 
 [<EntryPoint>]
 let main argv =
@@ -160,304 +429,174 @@ let main argv =
         let archivePath = argv.[1]
         let contractJson = argv.[2]
 
-        if not (File.Exists manifestPath) then
-            eprintfn "manifest not found: %s" manifestPath
-            exit 3
-        if not (File.Exists archivePath) then
-            eprintfn "archive not found: %s" archivePath
-            exit 3
+        // Parse the contract up front so structured failures carry the config context.
+        let contract, canonicalAssetUri =
+            match parseContractJson contractJson with
+            | Ok value -> value
+            | Error error ->
+                emitAndExit
+                    (ReleaseEvaluate.finalizeFailure
+                        (renderFrom "" "" "" "" "" "" "" "" "" "" None None None)
+                        (BuildProvenance.ReleaseError.message error))
+                    4
+
+        let owner, repository = canonicalRepository ()
+
+        let preMetadataRender =
+            renderFrom
+                contract.ComponentId
+                contract.Version
+                contract.ArchiveName
+                canonicalAssetUri
+                ""
+                ""
+                ""
+                ""
+                ""
+                ""
+                None
+                None
+                None
+
+        let failedWithConfig reason =
+            ReleaseEvaluate.finalizeFailure preMetadataRender reason
+
+        let typedFailedWithConfig (error: BuildProvenance.ReleaseError) =
+            failedWithConfig (BuildProvenance.ReleaseError.message error)
 
         let root = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", ".."))
 
         match BuildProvenance.assertCleanTree root |> Async.RunSynchronously with
-        | Error error ->
-            eprintfn "clean-tree guard: %s" (BuildProvenance.ReleaseError.message error)
-            exit 4
+        | Error error -> emitAndExit (typedFailedWithConfig error) 4
         | Ok () -> ()
 
         let head =
             match BuildProvenance.committedHead root |> Async.RunSynchronously with
             | Ok value -> value
-            | Error error ->
-                eprintfn "committed HEAD: %s" (BuildProvenance.ReleaseError.message error)
-                exit 4
+            | Error error -> emitAndExit (typedFailedWithConfig error) 4
 
-        let contractNode = JsonNode.Parse(contractJson)
-        let contractObj = contractNode.AsObject()
-        let contract : ReleaseCompare.ComponentContract =
-            { ComponentId = contractObj["componentId"].GetValue<string>()
-              Version = contractObj["version"].GetValue<string>()
-              ArchiveName = contractObj["archiveName"].GetValue<string>()
-              EntryAllowlist =
-                contractObj["entryAllowlist"].AsArray()
-                |> Seq.map (fun v -> v.GetValue<string>())
-                |> Seq.toList }
+        if String.IsNullOrEmpty canonicalAssetUri then
+            emitAndExit
+                (failedWithConfig "assetUri is missing from the contract DTO; refusing to silently reconstruct it from environment")
+                1
+
+        if not (File.Exists manifestPath) then
+            emitAndExit (typedFailedWithConfig (BuildProvenance.MissingArtifact manifestPath)) 3
+
+        if not (File.Exists archivePath) then
+            emitAndExit (typedFailedWithConfig (BuildProvenance.MissingArtifact archivePath)) 3
 
         match BuildProvenance.assertManifestRevision manifestPath head |> Async.RunSynchronously with
-        | Error error ->
-            eprintfn "manifest revision: %s" (BuildProvenance.ReleaseError.message error)
-            exit 4
+        | Error error -> emitAndExit (typedFailedWithConfig error) 4
         | Ok _revisionFromManifest -> ()
 
-        let candidateRevision = readManifestRevision manifestPath
-        let candidateArchiveSha256 = sha256OfFile archivePath
-        let candidateManifestSha256 = sha256OfFile manifestPath
-
-        let resolvedOwner =
-            match Environment.GetEnvironmentVariable "MCP_RELEASE_GITHUB_OWNER" with
-            | null | "" -> "masterlifting"
-            | value -> value
-
-        let resolvedRepo =
-            match Environment.GetEnvironmentVariable "MCP_RELEASE_GITHUB_REPOSITORY" with
-            | null | "" -> "mcp-store"
-            | value -> value
-
-        let assetUri =
-            $"https://github.com/{resolvedOwner}/{resolvedRepo}/releases/download/{contract.ComponentId}/{contract.ArchiveName}"
+        let locator : ReleasePublish.ReleaseLocator =
+            { Owner = owner
+              Repository = repository
+              Tag = contract.ComponentId }
 
         let metadataAssetName =
             ReleaseMetadata.metadataAssetName contract.ComponentId contract.Version
 
         let metadataLocalPath =
             match Environment.GetEnvironmentVariable "MCP_RELEASE_METADATA_LOCAL_PATH" with
-            | null | "" ->
-                Path.Combine(Path.GetDirectoryName manifestPath, metadataAssetName)
+            | null | "" -> Path.Combine(Path.GetDirectoryName manifestPath, metadataAssetName)
             | value -> value
 
-        let producerSdk =
-            match Environment.GetEnvironmentVariable "RELEASE_EXPECTED_SDK" with
-            | null | "" -> None
-            | v -> Some v
+        let producerSdk = Environment.GetEnvironmentVariable "RELEASE_EXPECTED_SDK"
+        let producerRuntime = Environment.GetEnvironmentVariable "RELEASE_EXPECTED_RUNTIME"
+        let producerPlatform = Environment.GetEnvironmentVariable "RELEASE_EXPECTED_PLATFORM"
 
-        let producerRuntime =
-            match Environment.GetEnvironmentVariable "RELEASE_EXPECTED_RUNTIME" with
-            | null | "" -> None
-            | v -> Some v
+        let producerSdkOpt = if isNull producerSdk then None else Some producerSdk
+        let producerRuntimeOpt = if isNull producerRuntime then None else Some producerRuntime
+        let producerPlatformOpt = if isNull producerPlatform then None else Some producerPlatform
 
-        let producerPlatform =
-            match Environment.GetEnvironmentVariable "RELEASE_EXPECTED_PLATFORM" with
-            | null | "" -> None
-            | v -> Some v
+        let candidateArchiveSha256 =
+            try
+                System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes archivePath)
+                |> Convert.ToHexString
+                |> fun v -> v.ToLowerInvariant()
+            with
+            | :? IOException as error -> emitAndExit (typedFailedWithConfig (BuildProvenance.FileFailure("hash", archivePath, error.Message))) 1
+            | :? UnauthorizedAccessException as error -> emitAndExit (typedFailedWithConfig (BuildProvenance.FileFailure("hash", archivePath, error.Message))) 1
 
-        let projection =
-            buildProjection
-                contract
-                assetUri
+        let candidateManifestSha256 =
+            try
+                System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes manifestPath)
+                |> Convert.ToHexString
+                |> fun v -> v.ToLowerInvariant()
+            with
+            | :? IOException as error -> emitAndExit (typedFailedWithConfig (BuildProvenance.FileFailure("hash", manifestPath, error.Message))) 1
+            | :? UnauthorizedAccessException as error -> emitAndExit (typedFailedWithConfig (BuildProvenance.FileFailure("hash", manifestPath, error.Message))) 1
+
+        let candidateRevision =
+            try
+                let text = File.ReadAllText manifestPath
+                let node = JsonNode.Parse text
+                (node.AsObject()["revision"]).GetValue<string>()
+            with
+            | _ ->
+                emitAndExit
+                    (typedFailedWithConfig
+                        (BuildProvenance.MalformedArtifact(manifestPath, "the embedded 'revision' field is missing or unreadable")))
+                    1
+
+        let candidateProjection =
+            ReleaseMetadata.makeProjection
+                contract.ComponentId
+                contract.Version
+                canonicalAssetUri
+                contract.ArchiveName
                 candidateArchiveSha256
                 candidateManifestSha256
                 candidateRevision
-                producerSdk
-                producerRuntime
-                producerPlatform
+                producerSdkOpt
+                producerRuntimeOpt
+                producerPlatformOpt
 
-        // Always write the metadata projection to disk so the
-        // workflow's Actions artifact path (a separate concern owned
-        // by DevOps) has a stable input. The file is also the
-        // source of truth for the safe-immutable transport's "what
-        // we expect to publish" comparison.
-        match ReleaseMetadata.writeToFileAsync metadataLocalPath projection |> Async.RunSynchronously with
-        | Error error ->
-            eprintfn "metadata write failed: %s" (BuildProvenance.ReleaseError.message error)
-            exit 1
-        | Ok metadataLocalDigest -> ()
-
-        let mirrorRoot = Environment.GetEnvironmentVariable "MCP_RELEASE_MIRROR_ROOT"
-        let auth =
+        let authValue =
             match ReleasePublish.environmentToken () with
             | Ok token -> Some token
             | Error _ -> None
 
-        let owner = Environment.GetEnvironmentVariable "MCP_RELEASE_GITHUB_OWNER"
-        let repo = Environment.GetEnvironmentVariable "MCP_RELEASE_GITHUB_REPOSITORY"
-
         let useGitHub =
-            not (isNull owner)
-            && not (isNull repo)
-            && auth.IsSome
+            not (String.IsNullOrEmpty (Environment.GetEnvironmentVariable "MCP_RELEASE_GITHUB_OWNER"))
+            && not (String.IsNullOrEmpty (Environment.GetEnvironmentVariable "MCP_RELEASE_GITHUB_REPOSITORY"))
+            && Option.isSome authValue
 
-        let locator : ReleasePublish.ReleaseLocator =
-            { Owner = (if isNull owner then "masterlifting" else owner)
-              Repository = (if isNull repo then "mcp-store" else repo)
-              Tag = contract.ComponentId }
+        let downloadDir =
+            match Environment.GetEnvironmentVariable "MCP_RELEASE_DOWNLOAD_DIR" with
+            | null | "" -> Path.Combine(Path.GetTempPath(), $"mcp-release-download-{Guid.NewGuid():N}")
+            | value -> value
 
-        let observer : ReleaseTransaction.RemoteObserver =
-            if useGitHub then
-                let downloadDir =
-                    let candidate =
-                        match Environment.GetEnvironmentVariable "MCP_RELEASE_DOWNLOAD_DIR" with
-                        | null | "" -> Path.Combine(Path.GetTempPath(), $"mcp-release-download-{Guid.NewGuid():N}")
-                        | value -> value
-                    candidate
-                let ghObserver = ReleasePublish.gitHubObserver auth.Value downloadDir
-                { ObserveRemote =
-                    fun (_tag, assetName) ->
-                        async {
-                            let! stateResult = ghObserver.Observe locator assetName
-                            match stateResult with
-                            | Ok state -> return stateToOutcome state
-                            | Error error -> return Error error
-                        } }
-            else if not (isNull mirrorRoot) && not (String.IsNullOrEmpty mirrorRoot) then
-                let mirrorObserver = ReleasePublish.localMirrorObserver mirrorRoot
-                { ObserveRemote =
-                    fun (_tag, assetName) ->
-                        async {
-                            let! stateResult = mirrorObserver.Observe locator assetName
-                            match stateResult with
-                            | Ok state -> return stateToOutcome state
-                            | Error error -> return Error error
-                        } }
-            else
-                { ObserveRemote =
-                    fun (tag, _assetName) ->
-                        async {
-                            return
-                                Error(
-                                    BuildProvenance.FileFailure(
-                                        "transport",
-                                        tag,
-                                        "neither MCP_RELEASE_MIRROR_ROOT nor the production transport (MCP_RELEASE_GITHUB_OWNER + MCP_RELEASE_GITHUB_REPOSITORY + GITHUB_TOKEN) is set"))
-                        } }
+        let observer = runnerObserver locator useGitHub authValue downloadDir
 
-        let request : ReleaseTransaction.TransactionRequest =
+        let dto : ReleaseEvaluate.CandidateDto =
             { Contract = contract
-              Tag = contract.ComponentId
-              CandidateArchivePath = archivePath
-              CandidateManifestPath = manifestPath }
+              ManifestPath = manifestPath
+              ArchivePath = archivePath
+              EvaluatedHead = head
+              AssetUri = canonicalAssetUri
+              MetadataAssetName = metadataAssetName
+              MetadataLocalPath = metadataLocalPath
+              ProducerSdk = producerSdkOpt
+              ProducerRuntime = producerRuntimeOpt
+              ProducerPlatform = producerPlatformOpt
+              RepositoryOwner = owner
+              RepositoryName = repository }
 
+        // Local metadata write deferred so the file reflects verified/published bytes, not candidate values.
         let outcome =
-            ReleaseTransaction.run observer request
+            ReleaseEvaluate.evaluate observer dto
             |> Async.RunSynchronously
 
-        let resultNode = JsonObject()
-        writeShared
-            resultNode
-            contract
-            assetUri
-            candidateArchiveSha256
-            (Some candidateManifestSha256)
-            head
-            (Some candidateRevision)
-            producerSdk
-            producerRuntime
-            producerPlatform
-            metadataAssetName
-            metadataLocalPath
-
-        let doUploadFlag =
-            match Environment.GetEnvironmentVariable "MCP_RELEASE_DO_UPLOAD" with
-            | null | "" -> false
-            | "false" | "0" -> false
-            | _ -> true
-
         match outcome with
-        | ReleaseTransaction.PublishPending _ ->
-            resultNode["status"] <- JsonValue.Create "publish-pending"
-            resultNode["uploadCompleted"] <- JsonValue.Create false
-            resultNode["reason"] <- JsonValue.Create "asset absent on the remote release; an upload step is required"
-
-            if useGitHub && doUploadFlag then
-                match auth with
-                | Some authValue ->
-                    let archiveResult =
-                        ReleasePublish.uploadCandidate
-                            authValue
-                            locator
-                            contract.ArchiveName
-                            archivePath
-                            candidateArchiveSha256
-                        |> Async.RunSynchronously
-
-                    match archiveResult with
-                    | Error error ->
-                        resultNode["status"] <- JsonValue.Create "failed"
-                        resultNode["uploadCompleted"] <- JsonValue.Create false
-                        resultNode["reason"] <- JsonValue.Create(failureReason error)
-                        eprintfn "archive upload failed: %s" (failureReason error)
-                        exit 1
-                    | Ok publishedArchiveDigest ->
-                        let metadataResult =
-                            ReleasePublish.uploadMetadata authValue locator projection
-                            |> Async.RunSynchronously
-
-                        match metadataResult with
-                        | Error error ->
-                            resultNode["status"] <- JsonValue.Create "failed"
-                            resultNode["uploadCompleted"] <- JsonValue.Create false
-                            resultNode["reason"] <- JsonValue.Create(failureReason error)
-                            eprintfn "metadata upload failed after archive success: %s" (failureReason error)
-                            exit 1
-                        | Ok publishedMetadataDigest ->
-                            // Both the archive and the metadata are
-                            // observed at the expected digest; the
-                            // runner can advance to "published".
-                            resultNode["status"] <- JsonValue.Create "published"
-                            resultNode["uploadCompleted"] <- JsonValue.Create true
-                            resultNode["reason"] <- JsonValue.Create "asset and metadata uploaded; remote digests verified"
-                            resultNode["publishedArchiveSha256"] <- JsonValue.Create publishedArchiveDigest
-                            resultNode["publishedManifestSha256"] <- JsonValue.Create candidateManifestSha256
-                            resultNode["publishedRevision"] <- JsonValue.Create candidateRevision
-                            resultNode["publishedMetadataAssetName"] <- JsonValue.Create metadataAssetName
-                            resultNode["publishedMetadataSha256"] <- JsonValue.Create publishedMetadataDigest
-                | None ->
-                    eprintfn "publish-pending: production transport selected but GITHUB_TOKEN is missing"
-                    exit 4
-            else
-                if useGitHub then
-                    eprintfn "publish-pending: MCP_RELEASE_DO_UPLOAD is not set; refusing to write to the remote"
-                    exit 2
-                else
-                    eprintfn "publish-pending: only the local-mirror transport is configured"
-                    exit 2
-        | ReleaseTransaction.Unchanged published ->
-            resultNode["status"] <- JsonValue.Create "unchanged"
-            resultNode["uploadCompleted"] <- JsonValue.Create false
-            resultNode["reason"] <- JsonValue.Create "candidate matches the published archive under the strict comparison"
-            resultNode["publishedArchiveSha256"] <- JsonValue.Create published.ArchiveSha256
-            match published.ManifestSha256 with
-            | Some value -> resultNode["publishedManifestSha256"] <- JsonValue.Create value
-            | None -> ()
-            // The published revision must come from the observed
-            // remote manifest, never from the candidate. The
-            // `Unchanged` outcome covers both byte-identical matches
-            // (where candidate == published) and strictly
-            // revision-only-equivalent matches (where they may
-            // differ); we always read the parsed published manifest
-            // so the report never labels a candidate value as the
-            // published value.
-            match published.ManifestBody with
-            | Some body ->
-                match ReleaseMetadata.parse body with
-                | Ok parsed ->
-                    resultNode["publishedRevision"] <- JsonValue.Create parsed.PublishedRevision
-                | Error _ ->
-                    // The strict comparison already validated the
-                    // manifest body; a parse failure here means the
-                    // projection schema drifted. Surface the typed
-                    // failure rather than labeling a candidate value.
-                    resultNode["status"] <- JsonValue.Create "failed"
-                    resultNode["reason"] <- JsonValue.Create "the observed published manifest did not parse as the current projection schema"
-                    exit 1
-            | None ->
-                resultNode["reason"] <- JsonValue.Create "the strict comparison passed but the observed published manifest body was missing"
-                resultNode["status"] <- JsonValue.Create "failed"
-                exit 1
-        | ReleaseTransaction.BumpRequired (version, reason) ->
-            resultNode["status"] <- JsonValue.Create "bump-required"
-            resultNode["uploadCompleted"] <- JsonValue.Create false
-            resultNode["currentVersion"] <- JsonValue.Create version
-            resultNode["reason"] <- JsonValue.Create reason
-            exit 2
-        | ReleaseTransaction.Failed error ->
-            resultNode["status"] <- JsonValue.Create "failed"
-            resultNode["uploadCompleted"] <- JsonValue.Create false
-            resultNode["reason"] <- JsonValue.Create(failureReason error)
-            exit 1
-
-        printfn "%s" (resultNode.ToJsonString(JsonSerializerOptions(WriteIndented = true)))
-        exit 0
+        | Ok resolution -> executeResolution resolution authValue locator candidateProjection archivePath useGitHub
+        | Error error -> emitAndExit (typedFailedWithConfig error) 1
     with
     | error ->
-        eprintfn "ReleaseRunner failed: %s" error.Message
-        exit 1
+        emitAndExit
+            (ReleaseEvaluate.finalizeFailure
+                (renderFrom "" "" "" "" "" "" "" "" "" "" None None None)
+                error.Message)
+            1

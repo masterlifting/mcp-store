@@ -10,14 +10,14 @@
     <DebugType>None</DebugType>
     <DebugSymbols>false</DebugSymbols>
   </PropertyGroup>
+  <!-- Bootstrap.fsx is excluded: compiling its top-level `Async.RunSynchronously` into the runner's `<Module>` cctor hangs Main on net11.0 RC. -->
   <ItemGroup>
     <Compile Include="../../infrastructure/Provenance.fsx" />
-    <Compile Include="Bootstrap.fsx" />
+    <Compile Include="Archive.fsx" />
     <Compile Include="Compare.fsx" />
-    <Compile Include="Decide.fsx" />
     <Compile Include="Metadata.fsx" />
     <Compile Include="Publish.fsx" />
-    <Compile Include="Transaction.fsx" />
+    <Compile Include="Evaluate.fsx" />
     <Compile Include="Runner.fs" />
   </ItemGroup>
 </Project>

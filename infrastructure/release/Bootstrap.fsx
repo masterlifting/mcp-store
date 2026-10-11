@@ -1,18 +1,7 @@
 // role: release/build entrypoint
-// Repo-shared release bootstrap. The workflow installs an SDK via
-// `actions/setup-dotnet`; this script verifies the install against each
-// producer's canonical Config.fsx and emits a stable line-oriented summary
-// the workflow appends to GITHUB_ENV. The bootstrap is the gate every
-// release transaction runs through before any build, test, or publish step.
-//
-// Each producer's Config.fsx declares `module ReleaseConfig` (script-level),
-// so the two producer configs cannot share an FSI session. This script
-// evaluates each Config.fsx in its own child `dotnet fsi` process and parses
-// the key=value output; that keeps the two producer modules isolated and
-// avoids re-implementing producer policy in a duplicate projection.
-//
-// Run with:
-//   dotnet fsi infrastructure/release/Bootstrap.fsx
+// Verifies the installed SDK/runtime/platform against each producer's canonical Config.fsx and emits the workflow summary.
+// Each producer Config.fsx declares `module ReleaseConfig`, so the two are evaluated in isolated child `dotnet fsi` processes.
+// Requires the exact canonical runtime patch so a different toolchain cannot quietly reach the build path.
 
 #load "../Provenance.fsx"
 
@@ -22,10 +11,7 @@ open System.Runtime.InteropServices
 open System.Threading
 open BuildProvenance
 
-// The summary the bootstrap emits; one record per loaded producer. SDK
-// policy lives in the producer's Config.fsx and is read through a child
-// `dotnet fsi` invocation so this script does not duplicate the source of
-// truth.
+// SDK policy lives in the producer's Config.fsx and is read through a child `dotnet fsi` so this script does not duplicate it.
 type ProducerSummary =
     { ComponentId: string
       Version: string
@@ -36,9 +22,6 @@ type ProducerSummary =
       ArchiveName: string
       AssetUri: string }
 
-// The executing identity the workflow's `actions/setup-dotnet` is checked
-// against. A mismatch anywhere in this record is reported as a single
-// actionable diagnostic.
 type ExecutingIdentity =
     { SdkVersion: string
       RuntimeMoniker: string
@@ -46,16 +29,10 @@ type ExecutingIdentity =
       Platform: string
       Architecture: string }
 
-// The shared-framework moniker every producer distribution runs on. The exact
-// runtime version is not duplicated here; it is read from each producer's
-// canonical Config.fsx and compared against `dotnet --list-runtimes` so a
-// different runtime patch cannot quietly reach the build path.
+// The exact runtime is read from each producer's Config.fsx; the moniker is the only shared constant.
 let private expectedRuntimeMoniker = "Microsoft.NETCore.App"
 
-// The list of producers this bootstrap verifies. Adding a producer requires
-// adding a row here; the canonical Config.fsx path is the single source of
-// truth and the script's role header forbids the analyzer from following
-// any other source.
+// Adding a producer requires a row here; the canonical Config.fsx path is the single source of truth.
 let private producerConfigPaths : (string * string) list =
     [ "dotnet", "dotnet/release/Config.fsx"
       "workflow", "workflow/release/Config.fsx" ]
@@ -84,9 +61,7 @@ let private readExecutingIdentity (root: string) (canonicalRuntimeVersion: strin
                     else
                         None)
 
-            // Exact canonical runtime version is mandatory. A prefix-only
-            // fallback would accept a different runtime patch and silently
-            // break reproducibility, so the exact match is required.
+            // A prefix-only match would accept a different runtime patch and break reproducibility.
             let matched =
                 runtimeVersions
                 |> Array.tryFind (fun version -> String.Equals(version, canonicalRuntimeVersion, StringComparison.Ordinal))
@@ -134,18 +109,13 @@ let private readExecutingIdentity (root: string) (canonicalRuntimeVersion: strin
                     )
     }
 
-// Generate a one-shot wrapper script that loads a single producer's
-// Config.fsx and prints its key=value summary. The wrapper lives in a
-// fresh temp directory for the duration of the child process so concurrent
-// runs cannot race on the same file.
+// The wrapper lives in a fresh temp directory so concurrent runs cannot race on the same file.
 let private writeConfigWrapper (root: string) (configPath: string) : string =
     let tempDir = Path.Combine(Path.GetTempPath(), $"mcp-bootstrap-{Guid.NewGuid():N}")
     Directory.CreateDirectory tempDir |> ignore
     let wrapperPath = Path.Combine(tempDir, "Wrapper.fsx")
     let absoluteConfig = Path.GetFullPath(Path.Combine(root, configPath))
-    // Script-level `module ReleaseConfig` definitions in Config.fsx are
-    // pulled into the wrapper's FSI session by `#load`; the wrapper then
-    // prints the canonical fields. The wrapper never redefines the module.
+    // The wrapper `#load`s the config; it never redefines the module.
     let content =
         sprintf "#load @\"%s\"\n" absoluteConfig
         + "printfn \"COMPONENT_ID=%s\" ReleaseConfig.componentId\n"
@@ -224,10 +194,7 @@ let private loadProducerConfig (root: string) (componentId: string) (configPath:
             if cleanupNeeded then cleanupWrapper wrapperPath
     }
 
-// Optional expected values the workflow projects from the canonical Config.fsx
-// through the non-F# `Update.ps1 -Project` projection before any SDK install.
-// When present they must equal both the evaluated Config.fsx and the executing
-// toolchain, completing the projection -> evaluation -> execution cross-check.
+// The workflow projects these from Config.fsx before SDK install; when present they must equal both the evaluated config and the executing toolchain.
 let private expectedFromEnvironment (name: string) : string option =
     match Environment.GetEnvironmentVariable name with
     | null
@@ -239,12 +206,7 @@ let private checkExpected (name: string) (expected: string option) (actual: stri
     | Some value when value <> actual -> Some(IdentityMismatch(name, value, actual))
     | _ -> None
 
-// Cross-validate executing identity against every loaded producer. SDK,
-// runtime, and platform policy lives in each producer's Config.fsx; the script
-// reads it through a child `dotnet fsi` invocation so this module never
-// duplicates the source of truth. The canonical runtime is resolved from the
-// loaded producers before the executing runtime is read so the exact runtime
-// patch can be required.
+// Resolves the canonical runtime from the loaded producers so the exact patch can be required.
 let private verify (root: string) : Async<Result<ExecutingIdentity * ProducerSummary list, ReleaseError>> =
     async {
         let mutable failures : ReleaseError list = []
@@ -305,9 +267,7 @@ let private verify (root: string) : Async<Result<ExecutingIdentity * ProducerSum
                             String.concat ", " canonicalRuntime))
     }
 
-// Stable line-oriented KEY=VALUE summary the workflow appends to
-// GITHUB_ENV. The format is additive: existing keys are stable, new keys
-// are appended at the end so older workflow versions keep parsing.
+// The format is additive so older workflow versions keep parsing.
 let private renderSummary (executing: ExecutingIdentity) (producers: ProducerSummary list) : string =
     let builder = System.Text.StringBuilder()
     builder.AppendLine("# release bootstrap summary") |> ignore

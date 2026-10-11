@@ -1,46 +1,22 @@
 name: release
 
-# Root release workflow for the dotnet and workflow producers only. Telegram
-# source and Telegram-owned workflows are explicitly out of scope and are never
-# invoked here.
-#
-# Trigger: every push to `main` (merged PR or direct accepted push) runs the
-# deterministic release evaluation. There is no `workflow_dispatch` and no path
-# filter, so no producer can be skipped by a fragile path predicate and a manual
-# step is never required for the normal path.
-#
-# Source of truth: each producer's `*/release/Config.fsx` is the only source of
-# the component id, version, SDK, runtime, platform, archive name, asset URI,
-# and allowlist. No version/SDK/runtime/platform value is restated in this YAML
-# or in a root global.json; the workflow projects the canonical literals before
-# installing an SDK and cross-checks the executing toolchain against them.
-#
-# Concurrency: `queue: max` keeps up to 100 pending runs in the shared
-# `release-main` group instead of the default `single` queue silently replacing
-# an earlier pending run, and `cancel-in-progress: false` never cancels an
-# in-progress publication. `queue: max` cannot be combined with
-# `cancel-in-progress: true`; the workflow relies on the documented queue
-# semantics and a bounded GitHub Actions API reconciliation step to make any
-# overflow/cancellation observable rather than merely asserting YAML intent.
-#
-# Fail-closed release transaction: build, focused tests, distribution, and pin
-# preparation run per producer before the strict comparison/upload. A producer
-# failure never publishes an unvalidated artifact for that producer, and the
-# matrix (`fail-fast: false`) keeps the two producers independently reportable.
+# Telegram source and Telegram workflows are out of scope and are never invoked here.
+# Each producer's `*/release/Config.fsx` is the only source of SDK/version/runtime/platform; do not restate those values in YAML or global.json.
+# The non-publishing regression suite and per-producer validation gate every upload, and a producer failure never publishes its artifact.
 
 run-name: release ${{ github.sha }}
 
+# No path filter or dispatch: an unrelated push can still change packaged bytes.
 on:
   push:
     branches:
       - main
 
-# Minimum default authority for the workflow. The release job that performs the
-# publication boundary grants the write scope it needs; the read-only jobs
-# never hold release write authority.
+# Least privilege: read default; only the publication job elevates to write.
 permissions:
   contents: read
 
+# queue: max retains pending runs the default single queue would replace; it cannot combine with cancel-in-progress: true.
 concurrency:
   group: release-main
   cancel-in-progress: false
@@ -82,9 +58,7 @@ jobs:
           if ($head -ne $eventSha) {
             throw "checked out HEAD '$head' does not equal the event SHA '$eventSha'"
           }
-          # Ancestry is resolved through the bounded compare API rather than a
-          # persisted git credential, so the checkout can keep
-          # persist-credentials: false.
+          # API ancestry keeps persist-credentials: false valid on the checkout above.
           $mainSha = (gh api "repos/$repo/commits/main" --jq ".sha").Trim()
           if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($mainSha)) {
             throw "could not resolve the origin/main tip through the GitHub API"
@@ -93,8 +67,7 @@ jobs:
             Write-Host "event SHA '$eventSha' is the current origin/main tip"
             exit 0
           }
-          # status describes mainSha relative to eventSha: "ahead"/"identical"
-          # means eventSha is an ancestor of main; anything else is unsafe.
+          # compare status is mainSha relative to eventSha: "ahead"/"identical" means eventSha is an ancestor.
           $status = (gh api "repos/$repo/compare/$eventSha...$mainSha" --jq ".status").Trim()
           if ($LASTEXITCODE -ne 0) {
             throw "could not compare event SHA ancestry against origin/main"
@@ -127,14 +100,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = "Stop"
-          # Observation must never fail the release: if a future runner enables
-          # native-command error action preference, keep the warn path reachable.
+          # Keep the warn path reachable if a runner enables native-command error preference.
           if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
             $PSNativeCommandUseErrorActionPreference = $false
           }
           $repo = "${{ github.repository }}"
-          # Bounded retrieval: one page for this workflow on main, at most 100
-          # runs. No unbounded --paginate loop, and no fabricated echo output.
+          # One bounded page only; no unbounded pagination.
           $raw = gh api "repos/$repo/actions/workflows/release.yml/runs?branch=main&event=push&per_page=100" 2>&1
           if ($LASTEXITCODE -ne 0) {
             Write-Host "::warning::queue reconciliation could not read workflow runs: $raw"
@@ -163,12 +134,41 @@ jobs:
             Write-Host "no cancelled push runs observed in the bounded window; release publication remains serialized by queue: max."
           }
 
-  release:
-    name: release ${{ matrix.component }}
+  tests:
+    name: release regression suite (non-publishing)
     needs: bootstrap
     runs-on: windows-latest
-    # The publication boundary. Write authority is scoped to this job only; the
-    # bootstrap/read-only job above never holds release write authority.
+    # Read-only and credential-free: the suite never publishes and never needs a token.
+    permissions:
+      contents: read
+    steps:
+      - name: checkout exact event SHA
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: setup .NET SDK from canonical config
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: ${{ needs.bootstrap.outputs.sdk }}
+
+      - name: build release runner
+        run: dotnet build infrastructure/release/Release.fsproj -c Release
+
+      - name: run focused deterministic release regression suite
+        shell: pwsh
+        run: pwsh infrastructure/release/Suite.ps1
+
+  release:
+    name: release ${{ matrix.component }}
+    # Publication is gated on the non-publishing regression suite; a failed suite blocks every upload.
+    needs:
+      - bootstrap
+      - tests
+    runs-on: windows-latest
+    # Publication boundary: this job alone holds write authority.
     permissions:
       contents: write
     strategy:
@@ -197,12 +197,41 @@ jobs:
         shell: pwsh
         run: pwsh infrastructure/release/Update.ps1 -Verify -Component ${{ matrix.component }}
 
+      - name: recheck exact event SHA and safe main ancestry before publication
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          # Re-prove the release boundary here: the bootstrap job result is not cached across the test gate.
+          $eventSha = "${{ github.sha }}"
+          $repo = "${{ github.repository }}"
+          $head = (git rev-parse HEAD).Trim()
+          if ($head -ne $eventSha) {
+            throw "checked out HEAD '$head' does not equal the event SHA '$eventSha'"
+          }
+          $mainSha = (gh api "repos/$repo/commits/main" --jq ".sha").Trim()
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($mainSha)) {
+            throw "could not resolve the origin/main tip through the GitHub API"
+          }
+          if ($eventSha -eq $mainSha) {
+            Write-Host "event SHA '$eventSha' is the current origin/main tip immediately before publication"
+            exit 0
+          }
+          # compare status is mainSha relative to eventSha: "ahead"/"identical" means eventSha is an ancestor.
+          $status = (gh api "repos/$repo/compare/$eventSha...$mainSha" --jq ".status").Trim()
+          if ($LASTEXITCODE -ne 0) {
+            throw "could not compare event SHA ancestry against origin/main"
+          }
+          if ($status -ne "ahead" -and $status -ne "identical") {
+            throw "event SHA '$eventSha' is not a safe ancestor of origin/main '$mainSha' (compare status '$status'); refusing to publish an orphaned or force-pushed revision"
+          }
+          Write-Host "::warning::event SHA '$eventSha' is a proven ancestor of origin/main '$mainSha' (stale but safe); publishing the exact event SHA and never the newer tip"
+
       - name: run ${{ matrix.component }} release transaction
         id: transaction
         shell: pwsh
-        # The production transport and the upload gate are enabled only here.
-        # `GITHUB_TOKEN` is exposed only at this publication boundary; the
-        # build/test/pins work inside Release.fsx runs before the upload seam.
+        # Upload gate and GITHUB_TOKEN are exposed only at this publication boundary.
         env:
           MCP_RELEASE_GITHUB_OWNER: ${{ github.repository_owner }}
           MCP_RELEASE_GITHUB_REPOSITORY: ${{ github.event.repository.name }}
@@ -213,17 +242,13 @@ jobs:
           $exitFile = Join-Path $env:RUNNER_TEMP "${{ matrix.component }}-exit-code.txt"
           $script = "${{ matrix.component }}/release/Release.fsx"
           & dotnet fsi $script *>&1 | Tee-Object -FilePath $log
-          # Preserve the native process exit code. Tee-Object does not reset
-          # $LASTEXITCODE, and the explicit `exit` prevents a successful summary
-          # write from masking a non-zero producer/test/transaction result. The
-          # exit code is also persisted so the always() evidence step can label
-          # the run even when GitHub does not surface a failed step's outputs.
+          # Tee-Object does not reset $LASTEXITCODE; exit explicitly so a summary write cannot mask a non-zero result.
           $code = $LASTEXITCODE
           "$code" | Out-File -FilePath $exitFile -Encoding ascii
           "exit_code=$code" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           exit $code
 
-      - name: append ${{ matrix.component }} verified release summary
+      - name: append ${{ matrix.component }} structured release result
         if: always()
         shell: pwsh
         env:
@@ -232,84 +257,141 @@ jobs:
           $log = Join-Path $env:RUNNER_TEMP "$env:COMPONENT-release.log"
           $exitFile = Join-Path $env:RUNNER_TEMP "$env:COMPONENT-exit-code.txt"
           $code = if (Test-Path -LiteralPath $exitFile) { [int]((Get-Content -LiteralPath $exitFile) -join "").Trim() } else { -1 }
-          $lines = if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log } else { @() }
+          $lines = @()
+          if (Test-Path -LiteralPath $log) { $lines = @(Get-Content -LiteralPath $log) }
 
+          # The entrypoint emits a JSON failure object for its own build/pins/tests phases, else the runner's `key=value` summary; parse either on any exit code.
           $fields = @{}
           $diagnostics = New-Object System.Collections.Generic.List[string]
-          foreach ($line in $lines) {
-            if ($line -match '^([A-Za-z][A-Za-z0-9]*)=(.*)$') {
-              $fields[$Matches[1]] = $Matches[2]
-            } elseif (-not [string]::IsNullOrWhiteSpace($line) -and -not $line.StartsWith("#")) {
-              [void]$diagnostics.Add($line)
+          $jsonStart = -1
+          for ($n = 0; $n -lt $lines.Count; $n++) {
+            if ("$($lines[$n])".Trim() -eq "{") { $jsonStart = $n; break }
+          }
+          if ($jsonStart -ge 0) {
+            try {
+              $obj = ($lines[$jsonStart..($lines.Count - 1)] -join "`n") | ConvertFrom-Json
+              foreach ($prop in $obj.PSObject.Properties) {
+                if ($null -ne $prop.Value -and "$($prop.Value)" -ne "") { $fields[$prop.Name] = "$($prop.Value)" }
+              }
+            } catch {
+              $jsonStart = -1
+            }
+          }
+          if ($jsonStart -lt 0) {
+            foreach ($line in $lines) {
+              if ($line -match '^([A-Za-z][A-Za-z0-9]*)=(.*)$') {
+                $fields[$Matches[1]] = $Matches[2]
+              } elseif (-not [string]::IsNullOrWhiteSpace($line) -and -not $line.StartsWith("#")) {
+                [void]$diagnostics.Add($line)
+              }
             }
           }
 
-          $status = if ($fields.ContainsKey("status")) { $fields["status"] } else {
-            switch ($code) {
-              0  { "unknown-exit-0" }
-              1  { "failed" }
-              2  { "not-published-exit-2" }
-              4  { "failed-toolchain" }
-              5  { "failed-parse" }
-              default { "failed" }
-            }
-          }
+          function Get-Field([string]$key) { if ($fields.ContainsKey($key)) { $fields[$key] } else { $null } }
 
-          # Only the runner's status=published path has verified both remote
-          # digests; status=unchanged has verified observed published values.
-          # Everything else is status-labelled evidence, never a published projection.
-          $verified = ($status -eq "published") -or ($status -eq "unchanged")
-          $publishedFields = [ordered]@{}
-          foreach ($k in @("publishedArchiveSha256","publishedManifestSha256","publishedRevision","publishedMetadataAssetName","publishedMetadataSha256")) {
-            if ($fields.ContainsKey($k)) { $publishedFields[$k] = $fields[$k] }
+          # A bare exit code is never a status: without the structured `status` line the result is evidence-only.
+          $structured = $fields.ContainsKey("status")
+          $status = if ($structured) { $fields["status"] } else { "failed" }
+          $reason = if ($fields.ContainsKey("reason")) { $fields["reason"] } elseif ($structured) { "the release entrypoint emitted no reason" } else { "the release entrypoint emitted no structured status; the exit code alone is not publication evidence" }
+
+          # Verified publication requires observed remote values; unchanged reports observed published values, never candidate pins.
+          $publishedArchive = Get-Field "publishedArchiveSha256"
+          $publishedManifest = Get-Field "publishedManifestSha256"
+          $publishedRevision = Get-Field "publishedRevision"
+          $publishedMetadataSha = Get-Field "publishedMetadataSha256"
+          $verifiedPublished = ($status -eq "published") -and $publishedArchive -and $publishedMetadataSha
+          $verifiedUnchanged = ($status -eq "unchanged") -and $publishedArchive -and $publishedManifest -and $publishedRevision
+          $verified = [bool]($verifiedPublished -or $verifiedUnchanged)
+          $kind = if ($verifiedPublished) { "verified-published" } elseif ($verifiedUnchanged) { "verified-observed-published" } else { "status-evidence-only" }
+
+          # A verified projection is copied only when it carries archive sha, manifest sha, and published revision matching the observed archive.
+          $projection = @{}
+          $projectionValid = $false
+          $projectionPath = Get-Field "metadataLocalPath"
+          if ($verified -and $projectionPath -and (Test-Path -LiteralPath $projectionPath)) {
+            try {
+              $proj = Get-Content -LiteralPath $projectionPath -Raw | ConvertFrom-Json
+              foreach ($p in $proj.PSObject.Properties) { $projection[$p.Name] = "$($p.Value)" }
+            } catch { }
+            $projectionValid = $projection.ContainsKey("archiveSha256") -and $projection["archiveSha256"] `
+              -and $projection.ContainsKey("manifestSha256") -and $projection["manifestSha256"] `
+              -and $projection.ContainsKey("publishedRevision") -and $projection["publishedRevision"] `
+              -and $projection["archiveSha256"] -eq $publishedArchive
+            if ($projectionValid) {
+              if (-not $publishedManifest) { $publishedManifest = $projection["manifestSha256"] }
+              if (-not $publishedRevision) { $publishedRevision = $projection["publishedRevision"] }
+            }
           }
 
           $record = [ordered]@{
             component = $env:COMPONENT
             status = $status
             verified = $verified
-            projectionKind = if ($status -eq "published") { "verified-published" } elseif ($status -eq "unchanged") { "verified-observed-published" } else { "status-evidence-only" }
+            projectionKind = $kind
+            structuredResult = $structured
             exitCode = $code
-            published = $publishedFields
+            reason = $reason
+            version = Get-Field "version"
+            archiveName = Get-Field "archiveName"
+            assetUri = Get-Field "assetUri"
+            phase = Get-Field "phase"
+            childExitCode = Get-Field "childExitCode"
+            metadataAssetName = Get-Field "metadataAssetName"
+            currentEvaluatedHead = Get-Field "currentEvaluatedHead"
+            candidateRevision = Get-Field "candidateRevision"
+            candidateArchiveSha256 = Get-Field "candidateArchiveSha256"
+            candidateManifestSha256 = Get-Field "candidateManifestSha256"
+            producerSdk = Get-Field "producerSdk"
+            producerRuntime = Get-Field "producerRuntime"
+            producerPlatform = Get-Field "producerPlatform"
+            bumpedVersion = Get-Field "bumpedVersion"
+            published = if ($verified) { [ordered]@{
+              archiveSha256 = $publishedArchive
+              manifestSha256 = $publishedManifest
+              revision = $publishedRevision
+              metadataSha256 = $publishedMetadataSha
+            } } else { $null }
             diagnostics = @($diagnostics | Select-Object -First 20)
           }
           $record | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP "release-status-$env:COMPONENT.json") -Encoding utf8
 
           $human = New-Object System.Collections.Generic.List[string]
           [void]$human.Add("## $env:COMPONENT release")
-          [void]$human.Add("status=$status verified=$verified exitCode=$code projectionKind=$($record.projectionKind)")
-          if ($verified -and $publishedFields.Count -gt 0) {
-            [void]$human.Add("")
-            [void]$human.Add("### verified published values")
-            foreach ($k in $publishedFields.Keys) { [void]$human.Add("$k=$($publishedFields[$k])") }
+          [void]$human.Add("status=$status verified=$verified structured=$structured exitCode=$code projectionKind=$kind")
+          [void]$human.Add("reason=$reason")
+          [void]$human.Add("")
+          [void]$human.Add("### structured result (candidate/typed values are not published values)")
+          foreach ($key in @("version","archiveName","assetUri","phase","childExitCode","metadataAssetName","currentEvaluatedHead","candidateRevision","candidateArchiveSha256","candidateManifestSha256","producerSdk","producerRuntime","producerPlatform","bumpedVersion")) {
+            $value = Get-Field $key
+            if ($null -ne $value -and "$value" -ne "") { [void]$human.Add("$key=$value") }
           }
-          if (-not $verified) {
+          if ($verified) {
             [void]$human.Add("")
-            [void]$human.Add("### status-labelled evidence (no verified publication)")
+            [void]$human.Add("### verified published values (observed remote)")
+            [void]$human.Add("publishedArchiveSha256=$publishedArchive")
+            if ($publishedManifest) { [void]$human.Add("publishedManifestSha256=$publishedManifest") }
+            if ($publishedRevision) { [void]$human.Add("publishedRevision=$publishedRevision") }
+            if ($publishedMetadataSha) { [void]$human.Add("publishedMetadataSha256=$publishedMetadataSha") }
+          } else {
+            [void]$human.Add("")
+            [void]$human.Add("### failure evidence (no verified publication)")
+            if (Get-Field "childStderr") { [void]$human.Add("childStderr=$(Get-Field 'childStderr')") }
             if ($diagnostics.Count -gt 0) {
               foreach ($d in ($diagnostics | Select-Object -First 20)) { [void]$human.Add($d) }
-            } else {
-              [void]$human.Add("<no diagnostic lines captured>")
+            } elseif (-not (Get-Field "childStderr")) {
+              [void]$human.Add("<no additional diagnostic lines captured>")
             }
           }
-          # Copy the local metadata projection into the verified artifact only on
-          # status=published. The runner writes the file before the upload, so on
-          # any other status it must not be presented as published.
-          if ($status -eq "published" -and $fields.ContainsKey("metadataLocalPath")) {
-            $meta = $fields["metadataLocalPath"]
-            if (Test-Path -LiteralPath $meta) {
-              Copy-Item -LiteralPath $meta -Destination (Join-Path $env:RUNNER_TEMP "published-metadata-$env:COMPONENT.json") -Force
-              [void]$human.Add("")
-              [void]$human.Add("### verified published metadata projection")
-              [void]$human.Add('```json')
-              foreach ($l in (Get-Content -LiteralPath $meta)) { [void]$human.Add($l) }
-              [void]$human.Add('```')
-            } else {
-              [void]$human.Add("::warning::status=published but the local metadata projection was not found at $meta")
-            }
+          if ($projectionValid) {
+            Copy-Item -LiteralPath $projectionPath -Destination (Join-Path $env:RUNNER_TEMP "published-metadata-$env:COMPONENT.json") -Force
+            [void]$human.Add("")
+            [void]$human.Add("### verified published metadata projection (archive sha, manifest sha, published revision)")
+            [void]$human.Add('```json')
+            foreach ($l in (Get-Content -LiteralPath $projectionPath)) { [void]$human.Add($l) }
+            [void]$human.Add('```')
+          } elseif ($verified) {
+            [void]$human.Add("::warning::verified status but the local metadata projection was not found or did not match the observed archive sha")
           }
-          # Candidate pin preparation is distinctly labelled; it is never the
-          # release metadata artifact.
           $pins = Join-Path (Get-Location) "$env:COMPONENT/dist/consumer-pins.json"
           if (Test-Path -LiteralPath $pins) {
             [void]$human.Add("")
@@ -324,9 +406,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          # Contains only the status-labelled record and, on status=published,
-          # the verified metadata projection. Unverified candidate values are
-          # never emitted here.
+          # Verified output only; unverified candidate values are never emitted here.
           name: release-metadata-${{ matrix.component }}
           path: |
             ${{ runner.temp }}/release-status-${{ matrix.component }}.json
@@ -337,8 +417,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          # Candidate pin preparation evidence, labelled distinctly from the
-          # verified release-metadata artifact.
           name: candidate-consumer-pins-${{ matrix.component }}
           path: ${{ matrix.component }}/dist/consumer-pins.json
           if-no-files-found: warn

@@ -2,9 +2,9 @@
 
 ## Authority and baseline
 
-`original-issue.md` preserves the original issue verbatim. The user request adds
+`original.md` preserves the original issue verbatim. The user request adds
 verification and delivery obligations; runtime AC1–AC9 and
-`docs/release-requirements.md` map them without weakening the issue.
+`docs/release/Requirements.md` map them without weakening the issue.
 Baseline: `30d82304e05899e2b1c83d9255fbe2f17abc0b7f`, branch `ghi-24`.
 Review profile: combined, with additive DevOps and security review.
 

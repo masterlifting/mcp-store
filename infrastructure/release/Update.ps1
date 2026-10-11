@@ -1,26 +1,7 @@
 # role: entrypoint/command
-# Minimal toolchain bootstrap for the root release workflow.
-#
-# The script has two modes:
-#
-#   -Project  Reads the canonical SDK/runtime/platform literals directly from
-#             each producer's `release/Config.fsx` with a strict, deterministic
-#             text projection (no F# evaluation, no installed SDK required) and
-#             publishes them through `$GITHUB_OUTPUT`. The workflow uses the
-#             projected SDK to install the exact toolchain before any F# code
-#             runs; the canonical Config.fsx remains the only source of truth,
-#             so no SDK/version table is duplicated in workflow YAML or a root
-#             global.json.
-#
-#   -Verify   Runs the F# `Bootstrap.fsx`, which re-reads the same canonical
-#             Config.fsx through an isolated `dotnet fsi` child and checks the
-#             executing SDK/runtime/platform against the canonical values and
-#             against the projection recomputed here. The verified summary is
-#             written to `$GITHUB_ENV`.
-#
-# The script never implements the release transaction, comparison, or upload;
-# those live in the F# modules under infrastructure/release/ and are exercised
-# by the per-component Release.fsx entrypoints.
+# Projects canonical SDK/runtime/platform before any SDK install and verifies the executing toolchain after install.
+# Canonical `*/release/Config.fsx` stays the only value source; no table is restated in YAML or global.json.
+# The release transaction, comparison, and upload live in the F# modules, not here.
 
 [CmdletBinding(DefaultParameterSetName = "Project")]
 param(
@@ -44,9 +25,7 @@ $producers = @(
     @{ Key = "workflow"; Config = Join-Path $repoRoot "workflow\release\Config.fsx" }
 )
 
-# Strict text projection: exactly one `let <name> = "<literal>"` per file.
-# The projection never evaluates F# and never maintains a second value table;
-# Bootstrap.fsx cross-checks this projection against the evaluated config.
+# Exact-one-literal match; Bootstrap.fsx cross-checks this projection against the evaluated config.
 function Read-CanonicalLiteral {
     param(
         [Parameter(Mandatory = $true)][string]$ConfigPath,
@@ -78,9 +57,7 @@ function Get-Projection {
 
     foreach ($producer in $producers) {
         $fields = @{}
-        # Only plain string literals are projected here. archiveName/assetUri are
-        # F# interpolations derived from version/componentId; they are emitted by
-        # Bootstrap.fsx after install rather than re-derived as a second source.
+        # archiveName/assetUri are F# interpolations; Bootstrap.fsx emits them after install.
         foreach ($name in @("componentId", "version", "entryDll") + $columns) {
             $fields[$name] = Read-CanonicalLiteral -ConfigPath $producer.Config -Name $name
         }
@@ -147,8 +124,7 @@ if ($Project) {
     exit 0
 }
 
-# -Verify: invoke the F# bootstrap with the projection exported so Bootstrap.fsx
-# can assert projection == evaluated config == executing toolchain.
+# Export the projection so Bootstrap.fsx can assert projection == evaluated config == executing toolchain.
 if (-not (Test-Path -LiteralPath $bootstrapScript)) {
     throw "bootstrap script not found: $bootstrapScript"
 }

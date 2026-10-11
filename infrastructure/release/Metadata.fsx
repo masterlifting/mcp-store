@@ -1,24 +1,7 @@
 // role: reusable module/helper
-// Repo-shared consumer-neutral release-metadata projection loaded as the
-// explicit ReleaseMetadata module. Owns the per-component release-metadata
-// artifact the workflow publishes alongside the versioned archive: the
-// projection identifies the immutable artifact any MCP client needs in
-// order to pin the producer release without depending on a
-// consumer-specific descriptor.
-//
-// The shape is the seven-field projection required by the original issue
-// (componentId, version, assetUri, archiveSha256, manifestSha256,
-// publishedRevision) plus the producer-distribution schema version. The
-// transport protocol is byte-exact: the JSON serialization is identical
-// across local-write and remote-upload paths so existing-asset checks
-// compare against the exact previously-published bytes.
-//
-// The module is intentionally pure: it never performs remote I/O and
-// never consults the producer runtime. It is the test seam for metadata
-// consistency (round-trip identity, strict-field equality, hash
-// equality, immutable-versioning by archive-name suffix). Test code can
-// exercise every public function without a remote, an SDK, or a
-// GitHub token.
+// Consumer-neutral release-metadata projection: the immutable artifact identity an MCP client pins.
+// Byte-exact JSON so existing-asset checks compare the previously published bytes.
+// Pure: no remote I/O, no producer runtime; the test seam for metadata consistency.
 module ReleaseMetadata
 
 #load "../Provenance.fsx"
@@ -31,15 +14,10 @@ open System.Text.Json
 open System.Text.Json.Nodes
 open BuildProvenance
 
-// The current schema version of the projection. Older writes stay
-// readable; newer writes are rejected when the schema version does not
-// match, so a future schema change cannot silently produce a projection
-// that bypasses the strict field check.
+// A mismatched schema version is rejected so a schema change cannot bypass the strict field check.
 let metadataSchemaVersion = 1
 
-// The current schema's required field set. A future schema change must
-// either update this list (together with the parser and renderer) or
-// add a parallel projection branch.
+// A future schema change must update this list together with the parser and renderer.
 let private requiredFields =
     [ "schemaVersion"
       "componentId"
@@ -50,12 +28,7 @@ let private requiredFields =
       "manifestSha256"
       "publishedRevision" ]
 
-// The seven-field consumer-neutral projection the original issue
-// requires plus the schema/protocol version, the archive name, and the
-// optional producer toolchain context (the SDK/runtime/platform the
-// archive was built against). The toolchain context is informational
-// only; consumer pinning uses the immutable archive + manifest hashes
-// and the published revision.
+// Producer toolchain context is informational; consumer pinning uses the immutable archive/manifest hashes and the published revision.
 type ProducerMetadataProjection =
     { SchemaVersion: int
       ComponentId: string
@@ -69,17 +42,11 @@ type ProducerMetadataProjection =
       ProducerRuntime: string option
       ProducerPlatform: string option }
 
-// The asset name is derivable from `componentId` and `version` so the
-// canonical Config.fsx does not need a parallel literal. Versioning the
-// filename is what makes the asset immutable: a re-publish at the same
-// version reuses the same filename and the safe-immutable transport
-// refuses the overwrite; a new version produces a new filename.
+// The filename encodes the version, so a re-publish reuses the slot and the transport refuses the overwrite.
 let metadataAssetName (componentId: string) (version: string) : string =
     $"{componentId}-{version}-metadata.json"
 
-// Render the projection as a stable JSON document. The keys are
-// emitted in a fixed order; the hashes are already lowercase hex so
-// the byte-exact transport never observes a normalization drift.
+// Fixed key order and lowercase-hex hashes keep the bytes stable for the existing-asset check.
 let render (projection: ProducerMetadataProjection) : string =
     let node = JsonObject()
     node["schemaVersion"] <- JsonValue.Create projection.SchemaVersion
@@ -105,11 +72,7 @@ let render (projection: ProducerMetadataProjection) : string =
 
     node.ToJsonString(JsonSerializerOptions(WriteIndented = true))
 
-// Parse an existing projection body. The function is the round-trip
-// companion of `render`; mismatched schema versions, missing required
-// fields, and malformed JSON fail closed so the safe-immutable
-// transport cannot accept a remote asset that does not match the
-// expected projection byte-for-byte.
+// Mismatched schema versions, missing fields, and malformed JSON fail closed.
 let parse (text: string) : Result<ProducerMetadataProjection, ReleaseError> =
     let mutable failure : ReleaseError option = None
 
@@ -209,10 +172,7 @@ let parse (text: string) : Result<ProducerMetadataProjection, ReleaseError> =
     | None, None ->
         Error(MalformedArtifact("metadata", "the metadata projection did not produce a parseable result"))
 
-// Strict field-by-field comparison between two projections. Used as
-// the test seam for "metadata consistency" and as the unit the
-// safe-immutable transport applies to an existing remote asset before
-// allowing an idempotent re-upload.
+// Applied to an existing remote asset before an idempotent re-upload is allowed.
 let compare (existing: ProducerMetadataProjection) (expected: ProducerMetadataProjection) : Result<unit, ReleaseError> =
     let failures = ResizeArray<string>()
     if existing.SchemaVersion <> expected.SchemaVersion then
@@ -243,11 +203,7 @@ let compare (existing: ProducerMetadataProjection) (expected: ProducerMetadataPr
     else
         Ok()
 
-// Compute the SHA-256 of the bytes on disk so a remote-upload transport
-// can compare a remote asset's digest against the locally rendered
-// projection without depending on the JSON parse path. The function
-// is async-friendly and Result-valued so transport failures stay typed
-// at the release boundary.
+// Compares a remote asset digest against the locally rendered bytes without depending on the JSON parse path.
 let sha256OfFileAsync (path: string) : Async<Result<string, ReleaseError>> =
     async {
         try
@@ -260,9 +216,7 @@ let sha256OfFileAsync (path: string) : Async<Result<string, ReleaseError>> =
         | :? UnauthorizedAccessException as error -> return Error(FileFailure("hash", path, error.Message))
     }
 
-// Load and parse an existing metadata file from disk. Used by
-// observability (the no-op report observes the published metadata) and
-// by the safe-immutable transport (existing remote asset observed).
+// The no-op report and the existing-asset check both read the published metadata through this.
 let readFromFile (path: string) : Async<Result<ProducerMetadataProjection, ReleaseError>> =
     async {
         try
@@ -273,9 +227,7 @@ let readFromFile (path: string) : Async<Result<ProducerMetadataProjection, Relea
         | :? UnauthorizedAccessException as error -> return Error(FileFailure("read", path, error.Message))
     }
 
-// Write the rendered projection to disk and return the SHA-256 of the
-// resulting bytes. The hash is reported so the runner can cross-check
-// the file just written against a remote-asset observation.
+// Returns the SHA-256 of the bytes written so the runner can cross-check against a remote observation.
 let writeToFileAsync (path: string) (projection: ProducerMetadataProjection) : Async<Result<string, ReleaseError>> =
     async {
         let rendered = render projection
@@ -291,8 +243,6 @@ let writeToFileAsync (path: string) (projection: ProducerMetadataProjection) : A
         | :? UnauthorizedAccessException as error -> return Error(FileFailure("write", path, error.Message))
     }
 
-// Convenience constructor used by the runner for the most common case:
-// a fully verified upload.
 let makeProjection
     (componentId: string)
     (version: string)

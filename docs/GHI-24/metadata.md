@@ -9,7 +9,7 @@
 This slice adds the consumer-neutral release-metadata projection the
 DevOps slice reported as missing (`docs/GHI-24/devops.md` §5) and the
 upload transport that publishes the projection alongside the versioned
-archive. Authority: `docs/GHI-24/original-issue.md` (verbatim) and
+archive. Authority: `docs/GHI-24/original.md` (verbatim) and
 `docs/GHI-24/solution.md` §7 ("Publish versioned harness-neutral
 metadata, immutable and verified, reporting published hashes/revision
 and evaluated HEAD separately. Existing no-ops use published values,
