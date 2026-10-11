@@ -312,3 +312,87 @@ the earlier null-count `dotnet_test` result remains non-evidence and was not
 used as a fallback. The 272-script suite and optional 10-case Historical run
 were already executed against the unchanged test sources recorded above; no
 source changed between those runs and this compiled Expecto execution.
+
+## 12. Final verification at source HEAD `f13594db7787e2a0300e1151c8e8697cbf98e91d`
+
+This pass used the actual B source checkout at `f13594db7787e2a0300e1151c8e8697cbf98e91d` (the docs-only child of A `d556c20d576d6eba2e66ec4456641267af8c8595`). At entry, `git status --short` showed only the pre-existing `docs/GHI-24/proof.md` append; no source or test file was dirty. No source, test, PowerShell, YAML, repository build output, or Git metadata was edited by this tester pass. This file is the only evidence document updated by the pass; the existing original acceptance text was left unchanged.
+
+### SDK/runtime and compiled helper context
+
+- `dotnet --version` = `11.0.100-rc.1.26425.128`; installed `Microsoft.NETCore.App` = `11.0.0-rc.1.26425.128`.
+- Both checked-in producer `Config.fsx` files specify SDK `11.0.100-rc.1.26425.128`, runtime `11.0.0-rc.1.26425.128`, and platform `win-x64`.
+- The already compiled Release helper evidence is `dotnet_build` run `p8_L2DLeS27_C1n4dk1pgzUjoUG2cBToVO8zbDFkn8g`, exit 0, 0 errors / 0 warnings (`docs/GHI-24/proof.md` §B helper builds). This pass did not rebuild.
+
+### Actual final deterministic suite
+
+Command (from repository root):
+
+```text
+pwsh -NoProfile -File infrastructure/release/Suite.ps1
+```
+
+Exit 0: **272 passed, 0 failed, 0 skipped** across 9 deterministic scripts. The script summaries report pass/fail; the two suites that expose a skip counter reported 0 skipped. The separate read-only PE integration reported 2 passed, 0 failed, 0 not-run and is not included in the 272.
+
+| Script | Passed | Failed | Skipped |
+| --- | ---: | ---: | ---: |
+| `Bootstrap.fsx` | 9 | 0 | 0 |
+| `Compare.fsx` | 26 | 0 | 0 |
+| `Evaluate.fsx` | 70 | 0 | 0 |
+| `Invocation.fsx` | 10 | 0 | 0 |
+| `Metadata.fsx` | 52 | 0 | 0 |
+| `Publish.fsx` | 50 | 0 | 0 |
+| `Revision.fsx` | 22 | 0 | 0 |
+| `Runner.fsx` | 18 | 0 | 0 |
+| `Telegram.fsx` | 15 | 0 | 0 |
+| **Total** | **272** | **0** | **0** |
+
+The suite's GITHUB_ENV / GITHUB_OUTPUT state-preservation guard passed. FSI emitted only non-failing `FS3886` informational tuple-list diagnostics.
+
+### Optional historical run against preserved published v1.0.3 files
+
+The optional run used the already preserved archive files at `C:\Users\andre\AppData\Local\Temp\opencode\ghi-24-bootstrap` (no download or authentication in this pass). The test recomputed and matched the documented raw-file identities: Dotnet `1,289,835` bytes / `da3acb20007f8015e541ee7d68b48adf49d232c4eea41190a62073073d1a1614`; Workflow `1,482,675` bytes / `8677413d830bd7fbc559e1847222ae4d3ee8582de4d9ba15a224a939dcc39db1`.
+
+```text
+$env:MCP_RELEASE_HISTORICAL_ROOT = 'C:\Users\andre\AppData\Local\Temp\opencode\ghi-24-bootstrap'; dotnet fsi --nologo infrastructure/release/tests/Historical.fsx
+```
+
+Exit 0: **10 passed, 0 failed**.
+
+The historical same-archive case leaves its two uniquely named copied ZIPs in the OS temp directory; its other candidate/fixture paths clean up their own artifacts. No manual cleanup was performed.
+
+### Actual compiled Expecto executable
+
+The compiled Expecto executable was invoked directly, not through `dotnet_test` and not through a substitute count:
+
+```text
+& ".\dotnet\tests\Mcp.Dotnet.Tests\bin\Release\net11.0\Mcp.Dotnet.Tests.exe"
+```
+
+Exit 0: **150 run, 150 passed, 0 ignored, 0 failed, 0 errored**. No failure locations. No build was run in this tester pass.
+
+### Independent production comparison of the preserved raw A/B ZIPs
+
+The preserved `compare-a-b.fsx` was run read-only against the actual raw A and B ZIP files, loading production `infrastructure/release/Compare.fsx` and invoking production `ReleaseCompare.observe` / `ReleaseCompare.compare`; no fixture, reconstruction, or repacking was involved. The exact inputs were `C:\Users\andre\AppData\Local\Temp\opencode\ghi-24-a-packages\{dotnet,workflow}\v1.0.4.zip` and `C:\Users\andre\AppData\Local\Temp\opencode\ghi-24-b-packages\{dotnet,workflow}\v1.0.4.zip`, compared with B evaluated HEAD `f13594db7787e2a0300e1151c8e8697cbf98e91d`. Commands:
+
+```text
+dotnet fsi --nologo C:\Users\andre\AppData\Local\Temp\opencode\ghi-24-b-packages\compare-a-b.fsx dotnet f13594db7787e2a0300e1151c8e8697cbf98e91d
+dotnet fsi --nologo C:\Users\andre\AppData\Local\Temp\opencode\ghi-24-b-packages\compare-a-b.fsx workflow f13594db7787e2a0300e1151c8e8697cbf98e91d
+```
+
+Both commands exited 0 with `RevisionOnlyEquivalent`. A archive and manifest hashes / revision match the known A identities in `docs/GHI-24/proof.md`; the values below are observed from the preserved raw archives, not candidate values relabelled as published:
+
+| Component | A raw archive SHA-256 (published value) | A manifest SHA-256 | A published revision | B raw candidate SHA-256 | B manifest SHA-256 | B revision / evaluated HEAD | Production result |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `dotnet` | `8e5265b07785516575db639b8274f11338d770e585742767657397ca3630df1c` | `0202f7193f50b2bb46793323723d5cfac5c5f08e07a195218d4941fac96e0992` | `d556c20d576d6eba2e66ec4456641267af8c8595` | `8f64d0203791655ee4a1027f137a39ee69c919664132fc4703b2409b19c91ea6` | `7a4b8259424cf9b730abf25dca314bb73ca03f0ca52d972d6f8591fb382e621c` | `f13594db7787e2a0300e1151c8e8697cbf98e91d` | `RevisionOnlyEquivalent` |
+| `workflow` | `1ddabf172c3abe5bc5776303908edd536718b2ccf2e18ede889e4873ef3b5c21` | `7f5e207f6c4b1b475eea97dec0ad09f98c56849c17f660f6ccecd74b2c5fae91` | `d556c20d576d6eba2e66ec4456641267af8c8595` | `f18573dd34bf572c616f2af8be819b1c2e1a795ec9872cae36c68ba2ca072d64` | `b96bcb4661bdc0bbd0a335002575731c081614b7fdfca501064af95ac71ab9b5` | `f13594db7787e2a0300e1151c8e8697cbf98e91d` | `RevisionOnlyEquivalent` |
+
+For both pairs, production observation showed identical non-manifest payload SHA-256, compressed and uncompressed sizes, Deflate method, flags, and CRC32. The only entry difference was `distribution.json`; its only text change was the 40-character revision (`d556c20…` → `f13594d…`). This independently confirms the A/B package-matrix fact recorded in `proof.md` §B from the actual retained files. It does not claim a fresh remote read.
+
+### Current matrix addendum and residual limits
+
+| Criterion / boundary | Current evidence | Status |
+| --- | --- | --- |
+| Same-version Dotnet and Workflow candidate differing only by embedded revision | Actual raw A/B archives passed production comparison for both components; published A hashes / revision remain distinct from B candidate hashes / evaluated HEAD | verified for these retained A/B files |
+| Hosted GitHub API/authentication, real upload, and hosted release queue behavior | No credentials read, auth used, remote request/write, or hosted CI run in this pass | unverified; outside this local evidence |
+
+`Publish.fsx` exercised the scripted `HttpMessageHandler`; the optional Historical run read only the preserved v1.0.3 files. No `dotnet_test` call was used (its earlier null-count result remains non-evidence); no `dotnet build`, production runtime action, commit, or remote write was performed.
