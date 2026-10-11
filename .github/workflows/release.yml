@@ -2,7 +2,7 @@ name: release
 
 # Telegram source and Telegram workflows are out of scope and are never invoked here.
 # Each producer's `*/release/Config.fsx` is the only source of SDK/version/runtime/platform; do not restate those values in YAML or global.json.
-# The non-publishing regression suite and per-producer validation gate every upload, and a producer failure never publishes its artifact.
+# The read-only tests job runs the compiled Expecto gate, a strict FCS typecheck of both producer release entrypoints, and the non-publishing regression suite before any upload; a producer failure never publishes its artifact.
 
 run-name: release ${{ github.sha }}
 
@@ -156,6 +156,30 @@ jobs:
 
       - name: build release runner
         run: dotnet build infrastructure/release/Release.fsproj -c Release
+
+      - name: strict FCS typecheck of both producer release entrypoints
+        shell: pwsh
+        run: pwsh infrastructure/release/Typecheck.ps1 -SdkVersion "${{ needs.bootstrap.outputs.sdk }}"
+
+      - name: build producers and the compiled Expecto test project
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # Build the exact projects the Expecto gate executes; --no-build below then runs that same output.
+          dotnet build dotnet/Mcp.Dotnet.fsproj -c Release
+          if ($LASTEXITCODE -ne 0) { throw "dotnet producer build failed (exit $LASTEXITCODE)" }
+          dotnet build workflow/Mcp.Workflow.fsproj -c Release
+          if ($LASTEXITCODE -ne 0) { throw "workflow producer build failed (exit $LASTEXITCODE)" }
+          dotnet build dotnet/tests/Mcp.Dotnet.Tests/Mcp.Dotnet.Tests.fsproj -c Release
+          if ($LASTEXITCODE -ne 0) { throw "Expecto test project build failed (exit $LASTEXITCODE)" }
+
+      - name: run the compiled Expecto gate (native exit preserved)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # Actual compiled Expecto entrypoint: no --ignore, no filter, no result rewriting; the native failure exit blocks the release job.
+          dotnet run --project dotnet/tests/Mcp.Dotnet.Tests/Mcp.Dotnet.Tests.fsproj -c Release --no-build
+          exit $LASTEXITCODE
 
       - name: run focused deterministic release regression suite
         shell: pwsh

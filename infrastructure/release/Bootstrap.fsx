@@ -286,6 +286,9 @@ let private renderSummary (executing: ExecutingIdentity) (producers: ProducerSum
 
 let root = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", ".."))
 
+// Standalone entry bridge: fsi can only drive a top-level async pipeline
+// through one synchronous wait at the host boundary; without it the
+// workflow summary print races the spawned `dotnet fsi` child.
 let result =
     match verify root |> Async.RunSynchronously with
     | Ok(executing, producers) -> renderSummary executing producers

@@ -12,6 +12,8 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <WarningsAsErrors>3390;3391;3392;3393</WarningsAsErrors>
     <LangVersion>9.0</LangVersion>
+    <!-- SDK default re-injects the current commit SHA into AssemblyInformationalVersion and therefore the DLL payload; keep it off so packaging does not embed HEAD. -->
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="domain/Domain.fs" />

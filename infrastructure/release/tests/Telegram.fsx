@@ -223,17 +223,22 @@ let telegramProducerExistsButUntouched () =
         |> Array.toList
     assertTrue "release.yml executable lines do not reference telegram/ paths" (List.isEmpty hits)
 
-releaseWorkflowExcludesTelegram ()
-releaseWorkflowMatrixNamesOnly ()
-noUvPytestInReleaseWorkflows ()
-noTelegramWorkflowFiles ()
-releaseScriptsExcludeTelegram ()
-runnerSourceExcludesTelegram ()
-productionModulesExcludeTelegram ()
-telegramProducerExistsButUntouched ()
+let runSuite () = async {
+    releaseWorkflowExcludesTelegram ()
+    releaseWorkflowMatrixNamesOnly ()
+    noUvPytestInReleaseWorkflows ()
+    noTelegramWorkflowFiles ()
+    releaseScriptsExcludeTelegram ()
+    runnerSourceExcludesTelegram ()
+    productionModulesExcludeTelegram ()
+    telegramProducerExistsButUntouched ()
 
-printfn "telegram-isolation-tests summary: passed=%d failed=%d" passed failed
-if failed > 0 then
-    for line in failures do
-        eprintfn "FAIL: %s" line
-    exit 1
+    printfn "telegram-isolation-tests summary: passed=%d failed=%d" passed failed
+    if failed > 0 then
+        for line in failures do
+            eprintfn "FAIL: %s" line
+        exit 1
+}
+
+// Standalone entry bridge: the FSI process owns the asynchronous regression suite.
+runSuite () |> Async.RunSynchronously

@@ -1,13 +1,15 @@
 // role: release/build entrypoint
 // Thin per-component orchestrator driving Build.fsx + Pins.fsx + DistributionTests.fsx + ReleaseRunner.exe as child processes.
 #load "Config.fsx"
+#load "../../infrastructure/release/Capture.fsx"
 
 open System
-open System.Diagnostics
 open System.IO
 open System.Text
 open System.Text.Json
 open System.Text.Json.Nodes
+open BuildProvenance
+open ReleaseCapture
 
 let root = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", ".."))
 let dist = Path.Combine(root, "dotnet", "dist")
@@ -17,31 +19,19 @@ let manifestPath = Path.Combine(distributionDirectory, "distribution.json")
 let pinsPath = Path.Combine(dist, "consumer-pins.json")
 let runnerPath = Path.Combine(root, "infrastructure", "release", "bin", "Release", "net11.0", "ReleaseRunner.exe")
 
-// Child `dotnet fsi` keeps the producer script's own Provenance.fsx instance isolated from the compiled runner.
-let private runProducerScript (scriptPath: string) : int * string * string =
-    let info = ProcessStartInfo("dotnet")
-    info.WorkingDirectory <- root
-    info.UseShellExecute <- false
-    info.RedirectStandardOutput <- true
-    info.RedirectStandardError <- true
-    info.ArgumentList.Add "fsi"
-    info.ArgumentList.Add "--nologo"
-    info.ArgumentList.Add scriptPath
-    use child = Process.Start info
-    let stdout = StringBuilder()
-    let stderr = StringBuilder()
-    child.OutputDataReceived.Add(fun data ->
-        if not (isNull data.Data) then stdout.AppendLine data.Data |> ignore)
-    child.ErrorDataReceived.Add(fun data ->
-        if not (isNull data.Data) then stderr.AppendLine data.Data |> ignore)
-    child.BeginOutputReadLine()
-    child.BeginErrorReadLine()
-    let exited = child.WaitForExit()
-    if not exited then
-        try child.Kill true with _ -> ()
-        child.WaitForExit()
-    child.Dispose()
-    child.ExitCode, stdout.ToString(), stderr.ToString()
+// Producer child `dotnet fsi` keeps the producer script's own Provenance.fsx instance isolated from the compiled runner.
+let private runProducerAsync (scriptPath: string) : Async<int * string> =
+    async {
+        let! cancellationToken = Async.CancellationToken
+        let! result =
+            runProcessCapture root "dotnet" [ "fsi"; "--nologo"; scriptPath ] cancellationToken
+
+        return
+            match result with
+            | Ok(_exit, _stdout, _stderr) -> 0, ""
+            | Error(ProcessFailed(_op, code, detail)) -> code, detail
+            | Error _ -> 1, ""
+    }
 
 let private buildContractJson () : string =
     let node = JsonObject()
@@ -56,8 +46,8 @@ let private buildContractJson () : string =
     node["entryAllowlist"] <- allowlist
     node.ToJsonString(JsonSerializerOptions())
 
-// F7 wrapper: emits structured JSON on stdout before exiting so the workflow reads status/reason/config context even when the runner never runs.
-let private structuredWrapperFailure
+// F7 wrapper: emits structured JSON on stdout so the workflow reads status/reason/config context when the runner never runs.
+let private emitStructuredFailure
     (phase: string)
     (childExitCode: int)
     (phaseStderr: string)
@@ -85,134 +75,142 @@ let private structuredWrapperFailure
         stdout.Flush()
     with
     | _ -> ()
-    exit childExitCode
 
-// F7: drains stdout/stderr concurrently via .NET events BEFORE waiting so a half-closed pipe cannot deadlock the child.
-let private runRunnerProcess (args: string list) : int * string * string =
-    let info = ProcessStartInfo(runnerPath)
-    info.WorkingDirectory <- root
-    info.UseShellExecute <- false
-    info.RedirectStandardOutput <- true
-    info.RedirectStandardError <- true
-    info.CreateNoWindow <- true
-    for a in args do info.ArgumentList.Add a
-    let child = Process.Start info
-    let stdout = StringBuilder()
-    let stderr = StringBuilder()
-    child.OutputDataReceived.Add(fun data ->
-        if not (isNull data.Data) then stdout.AppendLine data.Data |> ignore)
-    child.ErrorDataReceived.Add(fun data ->
-        if not (isNull data.Data) then stderr.AppendLine data.Data |> ignore)
-    child.BeginOutputReadLine()
-    child.BeginErrorReadLine()
-    let exited = child.WaitForExit()
-    if not exited then
-        try child.Kill true with _ -> ()
-        child.WaitForExit()
-    child.Dispose()
-    child.ExitCode, stdout.ToString(), stderr.ToString()
+// F7: drains stdout/stderr concurrently via async reads; the runner's JSON payload returns on stdout even when the runner fails.
+let private runRunnerAsync (args: string list) : Async<int * string * string> =
+    async {
+        let! cancellationToken = Async.CancellationToken
+        let! result = runProcessCapture root runnerPath args cancellationToken
 
-let buildExit, buildStderr, _ = runProducerScript (Path.Combine(root, "dotnet", "release", "Build.fsx"))
-if buildExit <> 0 then
-    eprintfn "dotnet build phase failed with exit %d" buildExit
-    structuredWrapperFailure
-        "build"
-        buildExit
-        buildStderr
-        ReleaseConfig.componentId
-        ReleaseConfig.version
-        ReleaseConfig.archiveName
-        ReleaseConfig.assetUri
+        match result with
+        | Ok(exit, stdout, stderr) -> return exit, stdout, stderr
+        | Error _ -> return 1, "", ""
+    }
 
-let pinsExit, pinsStderr, _ = runProducerScript (Path.Combine(root, "dotnet", "release", "Pins.fsx"))
-if pinsExit <> 0 then
-    eprintfn "dotnet pins phase failed with exit %d" pinsExit
-    structuredWrapperFailure
-        "pins"
-        pinsExit
-        pinsStderr
-        ReleaseConfig.componentId
-        ReleaseConfig.version
-        ReleaseConfig.archiveName
-        ReleaseConfig.assetUri
+let private buildSummary (status: string) (reason: string) (resultNode: JsonNode) : unit =
+    let builder = StringBuilder()
+    builder.AppendLine("## dotnet release") |> ignore
+    builder.AppendLine($"status={status}") |> ignore
+    builder.AppendLine($"reason={reason}") |> ignore
 
-let testsExit, testsStderr, _ = runProducerScript (Path.Combine(root, "dotnet", "tests", "DistributionTests.fsx"))
-if testsExit <> 0 then
-    eprintfn "dotnet distribution tests phase failed with exit %d" testsExit
-    structuredWrapperFailure
-        "tests"
-        testsExit
-        testsStderr
-        ReleaseConfig.componentId
-        ReleaseConfig.version
-        ReleaseConfig.archiveName
-        ReleaseConfig.assetUri
+    let renderOptional (label: string) (key: string) =
+        match resultNode[key] with
+        | null -> ()
+        | node -> builder.AppendLine($"{label}={node.GetValue<string>()}") |> ignore
 
-if not (File.Exists runnerPath) then
-    eprintfn "compiled runner not found: %s" runnerPath
-    eprintfn "build it with: dotnet build infrastructure/release/Release.fsproj -c Release"
-    exit 4
+    renderOptional "version" "version"
+    renderOptional "archiveName" "archiveName"
+    renderOptional "assetUri" "assetUri"
+    renderOptional "candidateArchiveSha256" "candidateArchiveSha256"
+    renderOptional "candidateManifestSha256" "candidateManifestSha256"
+    renderOptional "candidateRevision" "candidateRevision"
+    renderOptional "currentEvaluatedHead" "currentEvaluatedHead"
+    renderOptional "metadataAssetName" "metadataAssetName"
+    renderOptional "metadataLocalPath" "metadataLocalPath"
+    renderOptional "publishedArchiveSha256" "publishedArchiveSha256"
+    renderOptional "publishedManifestSha256" "publishedManifestSha256"
+    renderOptional "publishedRevision" "publishedRevision"
+    renderOptional "publishedMetadataSha256" "publishedMetadataSha256"
+    renderOptional "producerSdk" "producerSdk"
+    renderOptional "producerRuntime" "producerRuntime"
+    renderOptional "producerPlatform" "producerPlatform"
 
-let contractJson = buildContractJson ()
-let exitCode, stdout, stderr = runRunnerProcess [ manifestPath; archivePath; contractJson ]
+    printfn "%s" (builder.ToString())
 
-// F7: parse stdout JSON EVEN on nonzero exit so failure surfaces reason/version/URI/name/revision/hashes.
-let resultNode =
-    try
-        JsonNode.Parse(stdout).AsObject()
-    with
-    | error ->
-        eprintfn "release runner stderr: %s" stderr
-        eprintfn "failed to parse runner output: %s" error.Message
-        exit 5
+let private runWrapper () : Async<int> =
+    async {
+        let! buildExit, buildStderr = runProducerAsync (Path.Combine(root, "dotnet", "release", "Build.fsx"))
 
-let status =
-    match resultNode["status"] with
-    | null -> "failed"
-    | node ->
-        try node.GetValue<string>()
-        with _ -> "failed"
+        if buildExit <> 0 then
+            eprintfn "dotnet build phase failed with exit %d" buildExit
+            emitStructuredFailure
+                "build"
+                buildExit
+                buildStderr
+                ReleaseConfig.componentId
+                ReleaseConfig.version
+                ReleaseConfig.archiveName
+                ReleaseConfig.assetUri
+            return buildExit
+        else
+            let! pinsExit, pinsStderr = runProducerAsync (Path.Combine(root, "dotnet", "release", "Pins.fsx"))
 
-let reason =
-    match resultNode["reason"] with
-    | null -> "the runner did not surface a reason"
-    | node ->
-        try node.GetValue<string>()
-        with _ -> "the runner surfaced a non-string reason"
+            if pinsExit <> 0 then
+                eprintfn "dotnet pins phase failed with exit %d" pinsExit
+                emitStructuredFailure
+                    "pins"
+                    pinsExit
+                    pinsStderr
+                    ReleaseConfig.componentId
+                    ReleaseConfig.version
+                    ReleaseConfig.archiveName
+                    ReleaseConfig.assetUri
+                return pinsExit
+            else
+                let! testsExit, testsStderr =
+                    runProducerAsync (Path.Combine(root, "dotnet", "tests", "DistributionTests.fsx"))
 
-let builder = StringBuilder()
-builder.AppendLine("## dotnet release") |> ignore
-builder.AppendLine($"status={status}") |> ignore
-builder.AppendLine($"reason={reason}") |> ignore
+                if testsExit <> 0 then
+                    eprintfn "dotnet distribution tests phase failed with exit %d" testsExit
+                    emitStructuredFailure
+                        "tests"
+                        testsExit
+                        testsStderr
+                        ReleaseConfig.componentId
+                        ReleaseConfig.version
+                        ReleaseConfig.archiveName
+                        ReleaseConfig.assetUri
+                    return testsExit
+                else
+                    if not (File.Exists runnerPath) then
+                        eprintfn "compiled runner not found: %s" runnerPath
+                        eprintfn "build it with: dotnet build infrastructure/release/Release.fsproj -c Release"
+                        return 4
+                    else
+                        let contractJson = buildContractJson ()
+                        let! exitCode, stdout, stderr = runRunnerAsync [ manifestPath; archivePath; contractJson ]
 
-let renderOptional label key =
-    match resultNode[key] with
-    | null -> ()
-    | node -> builder.AppendLine($"{label}={node.GetValue<string>()}") |> ignore
+                        // F7: parse stdout JSON EVEN on nonzero exit so failure surfaces reason/version/URI/name/revision/hashes.
+                        let! parsedResultNode =
+                            async {
+                                try
+                                    return Ok(JsonNode.Parse(stdout).AsObject())
+                                with error ->
+                                    eprintfn "release runner stderr: %s" stderr
+                                    eprintfn "failed to parse runner output: %s" error.Message
+                                    return Error 5
+                            }
 
-renderOptional "version" "version"
-renderOptional "archiveName" "archiveName"
-renderOptional "assetUri" "assetUri"
-renderOptional "candidateArchiveSha256" "candidateArchiveSha256"
-renderOptional "candidateManifestSha256" "candidateManifestSha256"
-renderOptional "candidateRevision" "candidateRevision"
-renderOptional "currentEvaluatedHead" "currentEvaluatedHead"
-renderOptional "metadataAssetName" "metadataAssetName"
-renderOptional "metadataLocalPath" "metadataLocalPath"
-renderOptional "publishedArchiveSha256" "publishedArchiveSha256"
-renderOptional "publishedManifestSha256" "publishedManifestSha256"
-renderOptional "publishedRevision" "publishedRevision"
-renderOptional "publishedMetadataSha256" "publishedMetadataSha256"
-renderOptional "producerSdk" "producerSdk"
-renderOptional "producerRuntime" "producerRuntime"
-renderOptional "producerPlatform" "producerPlatform"
+                        match parsedResultNode with
+                        | Error code -> return code
+                        | Ok resultNode ->
+                            let status =
+                                match resultNode["status"] with
+                                | null -> "failed"
+                                | node ->
+                                    try node.GetValue<string>()
+                                    with _ -> "failed"
 
-printfn "%s" (builder.ToString())
+                            let reason =
+                                match resultNode["reason"] with
+                                | null -> "the runner did not surface a reason"
+                                | node ->
+                                    try node.GetValue<string>()
+                                    with _ -> "the runner surfaced a non-string reason"
 
-// Public-only status mapping: published|unchanged|failed; the reason field carries the internal detail.
-exit
-    (match status with
-     | "published" -> 0
-     | "unchanged" -> 0
-     | "failed" when resultNode.ContainsKey "bumpedVersion" -> 2
-     | _ -> 1)
+                            buildSummary status reason resultNode
+
+                            return
+                                (match status with
+                                 // Public-only status mapping: published|unchanged|failed; the reason field carries the internal detail.
+                                 | "published" -> 0
+                                 | "unchanged" -> 0
+                                 | "failed" when resultNode.ContainsKey "bumpedVersion" -> 2
+                                 | _ -> exitCode)
+    }
+
+// Standalone entry bridge: fsi can only drive a top-level async pipeline
+// through one synchronous wait at the host boundary; deeper awaiters
+// would leave stdout un-flushed before the host observes process exit.
+let exitCode = runWrapper () |> Async.RunSynchronously
+exit exitCode

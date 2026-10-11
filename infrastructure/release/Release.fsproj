@@ -18,6 +18,7 @@
     <Compile Include="Metadata.fsx" />
     <Compile Include="Publish.fsx" />
     <Compile Include="Evaluate.fsx" />
+    <Compile Include="Capture.fsx" />
     <Compile Include="Runner.fs" />
   </ItemGroup>
 </Project>

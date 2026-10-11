@@ -2,12 +2,14 @@
 // Toolchain-bootstrap regression: the real `Update.ps1` projection emits canonical SDK/runtime/platform; a duplicate literal fails the projection.
 // `Bootstrap.fsx` source-key contract is asserted by reading its source rather than re-running it as a child.
 #load "../../Provenance.fsx"
+#load "Process.fsx"
 
 open System
 open System.Diagnostics
 open System.IO
 open System.Text.RegularExpressions
 open BuildProvenance
+open ReleaseTestProcess
 
 let mutable passed = 0
 let mutable failed = 0
@@ -34,7 +36,7 @@ let private updatePs1Path =
 let private bootstrapPath =
     Path.Combine(repoRoot, "infrastructure", "release", "Bootstrap.fsx")
 
-let private pwshExecutable () =
+let private pwshExecutable () = async {
     // The PowerShell host may be either Windows PowerShell or PowerShell 7.
     let candidates =
         [
@@ -46,10 +48,10 @@ let private pwshExecutable () =
     let mutable found : string option = None
     for path in candidates do
         if found.IsNone then
-            let ok =
+            let! ok =
                 try
                     if Path.IsPathRooted path then
-                        File.Exists path
+                        async.Return(File.Exists path)
                     else
                         let probe = ProcessStartInfo(path)
                         probe.FileName <- path
@@ -57,15 +59,18 @@ let private pwshExecutable () =
                         probe.RedirectStandardOutput <- true
                         probe.RedirectStandardError <- true
                         probe.Arguments <- "-NoProfile -Command \"exit 0\""
-                        use child = Process.Start probe
-                        child.WaitForExit(2000)
-                        child.ExitCode = 0
+                        async {
+                            match! capture 2000 probe with
+                            | Ok(exitCode, _, _) -> return exitCode = 0
+                            | Error _ -> return false
+                        }
                 with
-                | _ -> false
+                | _ -> async.Return false
             if ok then found <- Some path
     match found with
-    | Some path -> Some path
-    | None -> None
+    | Some path -> return Some path
+    | None -> return None
+}
 
 // The bootstrap summary keys are stable: the workflow appends the
 // canonical RELEASE_* keys to GITHUB_ENV; verify the keys Bootstrap.fsx
@@ -88,14 +93,14 @@ let bootstrapKeysAreStable () =
 // Update.ps1 -Project emits sdk/runtime/platform lines from the canonical
 // Config.fsx files. The script reads both Config.fsx files and never invents
 // values; we exercise the actual script and parse the canonical lines.
-let updatePs1ProjectEmitsCanonicalValues () =
+let updatePs1ProjectEmitsCanonicalValues () = async {
+    let! pwshPath = pwshExecutable ()
     let pwsh =
-        match pwshExecutable () with
+        match pwshPath with
         | Some path -> path
         | None ->
             failed <- failed + 1
             failures.Add("pwsh not available; Update.ps1 -Project cannot be exercised")
-            passed <- passed + 1 // (placeholder, keeps the count clean when pwsh is unavailable)
             ""
     if not (String.IsNullOrEmpty pwsh) then
         let info = ProcessStartInfo(pwsh)
@@ -113,9 +118,11 @@ let updatePs1ProjectEmitsCanonicalValues () =
         info.EnvironmentVariables.Remove "GITHUB_ENV" |> ignore
         let mutable stdout = ""
         try
-            use child = Process.Start info
-            child.WaitForExit()
-            stdout <- child.StandardOutput.ReadToEnd()
+            match! capture 60000 info with
+            | Ok(_, output, _) -> stdout <- output
+            | Error error ->
+                failed <- failed + 1
+                failures.Add(sprintf "pwsh -Project: %s" error)
         with
         | error ->
             failed <- failed + 1
@@ -154,6 +161,7 @@ let updatePs1ProjectEmitsCanonicalValues () =
         | None ->
             failed <- failed + 1
             failures.Add("RELEASE_PLATFORM line missing from Update.ps1 -Project output")
+}
 
 // Update.ps1 -Project refuses to project when a producer's Config.fsx is
 // missing or has duplicate literals. The script uses `$PSScriptRoot` to
@@ -162,9 +170,10 @@ let updatePs1ProjectEmitsCanonicalValues () =
 // plus modified Config.fsx files alongside it. The script then loads Config.fsx
 // from the mock tree; a duplicate sdkVersion literal triggers the strict
 // text-projection gate and the script exits non-zero.
-let updatePs1ProjectRejectsDuplicateLiteral () =
+let updatePs1ProjectRejectsDuplicateLiteral () = async {
+    let! pwshPath = pwshExecutable ()
     let pwsh =
-        match pwshExecutable () with
+        match pwshPath with
         | Some path -> path
         | None ->
             failed <- failed + 1
@@ -204,17 +213,18 @@ let updatePs1ProjectRejectsDuplicateLiteral () =
         // to it, but the test asserts stdout projection only.
         info.EnvironmentVariables.Remove "GITHUB_OUTPUT" |> ignore
         info.EnvironmentVariables.Remove "GITHUB_ENV" |> ignore
-        let exitCode, stderr =
+        let! exitCode, stderr =
             try
-                use child = Process.Start info
-                child.WaitForExit()
-                let err = child.StandardError.ReadToEnd()
-                child.ExitCode, err
+                async {
+                    match! capture 60000 info with
+                    | Ok(code, _, error) -> return code, error
+                    | Error error -> return -1, error
+                }
             with
             | error ->
                 failed <- failed + 1
                 failures.Add(sprintf "pwsh duplicate: %s" error.Message)
-                -1, ""
+                async.Return(-1, "")
 
         try Directory.Delete(mockRoot, true) with _ -> ()
         // The duplicate-literal gate must fail closed: either the exit code is
@@ -223,6 +233,7 @@ let updatePs1ProjectRejectsDuplicateLiteral () =
         assertTrue
             (sprintf "Update.ps1 -Project refuses duplicate literal (exit=%d)" exitCode)
             (exitCode <> 0 || stderr.Contains("exactly one", StringComparison.Ordinal))
+}
 
 // Bootstrap.fsx is executed in a child `dotnet fsi` from Update.ps1 -
 // Verify. It emits the same canonical lines as -Project when the SDK matches.
@@ -238,13 +249,18 @@ let bootstrapEntryEmitsCanonicalSummary () =
     assertTrue "bootstrap source references ProducerSummary" (source.Contains("ProducerSummary", StringComparison.Ordinal))
     assertTrue "bootstrap source references ExecutingIdentity" (source.Contains("ExecutingIdentity", StringComparison.Ordinal))
 
-bootstrapKeysAreStable ()
-updatePs1ProjectEmitsCanonicalValues ()
-updatePs1ProjectRejectsDuplicateLiteral ()
-bootstrapEntryEmitsCanonicalSummary ()
+let runSuite () = async {
+    bootstrapKeysAreStable ()
+    do! updatePs1ProjectEmitsCanonicalValues ()
+    do! updatePs1ProjectRejectsDuplicateLiteral ()
+    bootstrapEntryEmitsCanonicalSummary ()
 
-printfn "bootstrap-tests summary: passed=%d failed=%d" passed failed
-if failed > 0 then
-    for line in failures do
-        eprintfn "FAIL: %s" line
-    exit 1
+    printfn "bootstrap-tests summary: passed=%d failed=%d" passed failed
+    if failed > 0 then
+        for line in failures do
+            eprintfn "FAIL: %s" line
+        exit 1
+}
+
+// Standalone entry bridge: the FSI process owns the asynchronous regression suite.
+runSuite () |> Async.RunSynchronously

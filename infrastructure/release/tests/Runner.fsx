@@ -5,6 +5,7 @@
 #load "../Compare.fsx"
 #load "../Metadata.fsx"
 #load "Fixture.fsx"
+#load "Process.fsx"
 
 open System
 open System.Diagnostics
@@ -15,6 +16,7 @@ open System.Text.Json.Nodes
 open BuildProvenance
 open ReleaseCompare
 open ReleaseMetadata
+open ReleaseTestProcess
 
 let mutable passed = 0
 let mutable failed = 0
@@ -81,29 +83,31 @@ let metadataAssetNameDeterministic () =
     assertEqual "different component yields different asset name" "workflow-1.0.4-metadata.json" alt
 
 // clean-tree guard surfaces a typed ReleaseError when the working tree is dirty.
-let cleanTreeGuardContract () =
+let cleanTreeGuardContract () = async {
     let root = repoRootForRunner
-    match BuildProvenance.assertCleanTree root |> Async.RunSynchronously with
+    match! BuildProvenance.assertCleanTree root with
     | Ok () ->
         passed <- passed + 1
     | Error error ->
         let message = BuildProvenance.ReleaseError.message error
         assertTrue "clean-tree guard is fail-closed (typed ReleaseError)"
             (message.Contains("dirty", StringComparison.Ordinal) || message.Contains("refusing", StringComparison.Ordinal))
+}
 
 // manifest revision guard contract reads HEAD as 40-hex SHA.
-let manifestRevisionGuardContract () =
+let manifestRevisionGuardContract () = async {
     let root = repoRootForRunner
-    match BuildProvenance.committedHead root |> Async.RunSynchronously with
+    match! BuildProvenance.committedHead root with
     | Ok head ->
         assertTrue "HEAD resolves to a 40-hex commit SHA"
             (head.Length = 40 && head |> Seq.forall (fun c -> Uri.IsHexDigit c))
     | Error error ->
         failed <- failed + 1
         failures.Add(sprintf "committedHead: %s" (BuildProvenance.ReleaseError.message error))
+}
 
 // empty-argv child probe must exit 2 and emit the documented usage line.
-let runnerEmptyArgvExitsWithUsage () =
+let runnerEmptyArgvExitsWithUsage () = async {
     if not (File.Exists runnerPath) then
         skipped <- skipped + 1
         failures.Add(sprintf "runner-empty-argv SKIP: %s missing" runnerPath)
@@ -114,25 +118,16 @@ let runnerEmptyArgvExitsWithUsage () =
         info.RedirectStandardOutput <- true
         info.RedirectStandardError <- true
         info.CreateNoWindow <- true
-        use proc = Process.Start info
-        let stdout = StringBuilder()
-        let stderr = StringBuilder()
-        proc.OutputDataReceived.Add(fun args ->
-            if not (isNull args.Data) then stdout.AppendLine(args.Data) |> ignore)
-        proc.ErrorDataReceived.Add(fun args ->
-            if not (isNull args.Data) then stderr.AppendLine(args.Data) |> ignore)
-        proc.BeginOutputReadLine()
-        proc.BeginErrorReadLine()
-        let exited = proc.WaitForExit(10000)
-        if not exited then
-            try proc.Kill true with _ -> ()
+        match! capture 10000 info with
+        | Error error ->
             failed <- failed + 1
-            failures.Add("runner-empty-argv-times-out: hung >10s on empty argv")
-        else
-            assertEqual "runner empty-argv exitcode is 2" 2 proc.ExitCode
-            let errText = stderr.ToString().TrimEnd()
+            failures.Add(sprintf "runner-empty-argv-times-out: %s" error)
+        | Ok(exitCode, _, stderr) ->
+            assertEqual "runner empty-argv exitcode is 2" 2 exitCode
+            let errText = stderr.TrimEnd()
             assertTrue "runner empty-argv stderr starts with 'usage: ReleaseRunner'"
                 (errText.StartsWith("usage: ReleaseRunner", StringComparison.Ordinal))
+}
 
 // dirty-tree: create a uniquely-owned, unignored temp marker inside the repo
 // so the clean-tree guard sees a dirty tree; run the binary with the
@@ -140,7 +135,7 @@ let runnerEmptyArgvExitsWithUsage () =
 // status=failed, required config context fields present, every published*
 // key absent, reason names the dirty guard. finally removes ONLY the marker
 // the test created, never any other file.
-let runnerDirtyTreeEmitsStructuredFailureJson () =
+let runnerDirtyTreeEmitsStructuredFailureJson () = async {
     if not (File.Exists runnerPath) then
         skipped <- skipped + 1
         failures.Add(sprintf "runner-dirty-tree SKIP: %s missing" runnerPath)
@@ -172,21 +167,13 @@ let runnerDirtyTreeEmitsStructuredFailureJson () =
             info.EnvironmentVariables.Remove "GITHUB_ENV" |> ignore
             info.EnvironmentVariables.Remove "GITHUB_OUTPUT" |> ignore
             info.EnvironmentVariables.Remove "MCP_RELEASE_DO_UPLOAD" |> ignore
-            use proc = Process.Start info
-            let stdout = StringBuilder()
-            let stderr = StringBuilder()
-            proc.OutputDataReceived.Add(fun args -> if not (isNull args.Data) then stdout.AppendLine args.Data |> ignore)
-            proc.ErrorDataReceived.Add(fun args -> if not (isNull args.Data) then stderr.AppendLine args.Data |> ignore)
-            proc.BeginOutputReadLine()
-            proc.BeginErrorReadLine()
-            let exited = proc.WaitForExit(15000)
-            if not exited then
-                try proc.Kill true with _ -> ()
+            match! capture 15000 info with
+            | Error error ->
                 failed <- failed + 1
-                failures.Add("runner-dirty-tree: invocation timed out >15s")
-            else
-                assertEqual "runner dirty-tree exitcode is 4" 4 proc.ExitCode
-                let outText = stdout.ToString().TrimEnd()
+                failures.Add(sprintf "runner-dirty-tree: invocation failed: %s" error)
+            | Ok(exitCode, stdout, _) ->
+                assertEqual "runner dirty-tree exitcode is 4" 4 exitCode
+                let outText = stdout.TrimEnd()
                 match JsonNode.Parse(outText).AsObject() with
                 | null ->
                     failed <- failed + 1
@@ -219,16 +206,23 @@ let runnerDirtyTreeEmitsStructuredFailureJson () =
             try File.Delete markerPath with _ -> ()
             try Directory.Delete(fixtureRoot, true) with _ -> ()
 
-runnerBinaryExists ()
-contractJsonShape ()
-metadataAssetNameDeterministic ()
-cleanTreeGuardContract ()
-manifestRevisionGuardContract ()
-runnerEmptyArgvExitsWithUsage ()
-runnerDirtyTreeEmitsStructuredFailureJson ()
+}
 
-printfn "runner-tests summary: passed=%d failed=%d skipped=%d" passed failed skipped
-if failed > 0 then
-    for line in failures do
-        eprintfn "FAIL: %s" line
-    exit 1
+let runSuite () = async {
+    runnerBinaryExists ()
+    contractJsonShape ()
+    metadataAssetNameDeterministic ()
+    do! cleanTreeGuardContract ()
+    do! manifestRevisionGuardContract ()
+    do! runnerEmptyArgvExitsWithUsage ()
+    do! runnerDirtyTreeEmitsStructuredFailureJson ()
+
+    printfn "runner-tests summary: passed=%d failed=%d skipped=%d" passed failed skipped
+    if failed > 0 then
+        for line in failures do
+            eprintfn "FAIL: %s" line
+        exit 1
+}
+
+// Standalone entry bridge: the FSI process owns the asynchronous regression suite.
+runSuite () |> Async.RunSynchronously

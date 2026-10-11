@@ -97,22 +97,23 @@ let private dtoFrom (archivePath: string) (manifestPath: string) =
     }
 
 // F9: an empty assetUri must be rejected before any candidate read.
-let validateCanonicalAssetUriEmptyRejection () =
+let validateCanonicalAssetUriEmptyRejection () = async {
     let archivePath = Path.Combine(tempRoot, "uri-empty.zip")
     let manifestPath = Path.Combine(tempRoot, "uri-empty.json")
     Fixture.writeRevisionVariantArchive archivePath manifestPath Fixture.canonicalEvaluatedRevision
     let dto = { dtoFrom archivePath manifestPath with AssetUri = "" }
     let observer = scriptedObserver AbsentArchive
-    match ReleaseEvaluate.evaluate observer dto |> Async.RunSynchronously with
+    match! ReleaseEvaluate.evaluate observer dto with
     | Ok _ ->
         failed <- failed + 1
         failures.Add("validateCanonicalAssetUri empty: expected Error")
     | Error error ->
         let message = ReleaseError.message error
         assertTrue "empty assetUri is fail-closed" (message.Contains("assetUri", StringComparison.Ordinal))
+}
 
 // F9: a wrong owner is rejected.
-let validateCanonicalAssetUriWrongOwnerRejection () =
+let validateCanonicalAssetUriWrongOwnerRejection () = async {
     let archivePath = Path.Combine(tempRoot, "uri-wrong.zip")
     let manifestPath = Path.Combine(tempRoot, "uri-wrong.json")
     Fixture.writeRevisionVariantArchive archivePath manifestPath Fixture.canonicalEvaluatedRevision
@@ -120,68 +121,72 @@ let validateCanonicalAssetUriWrongOwnerRejection () =
         { dtoFrom archivePath manifestPath with
             AssetUri = "https://github.com/somebodyelse/mcp-store/releases/download/dotnet/v1.0.4.zip" }
     let observer = scriptedObserver AbsentArchive
-    match ReleaseEvaluate.evaluate observer dto |> Async.RunSynchronously with
+    match! ReleaseEvaluate.evaluate observer dto with
     | Ok _ ->
         failed <- failed + 1
         failures.Add("validateCanonicalAssetUri wrong owner: expected Error")
     | Error error ->
         let message = ReleaseError.message error
         assertTrue "mismatched assetUri is fail-closed" (message.Contains("assetUri", StringComparison.Ordinal) || message.Contains("does not match", StringComparison.Ordinal))
+}
 
 // F9: canonical assetUri (masterlifting/mcp-store) is accepted.
-let validateCanonicalAssetUriAccepted () =
+let validateCanonicalAssetUriAccepted () = async {
     let archivePath = Path.Combine(tempRoot, "uri-ok.zip")
     let manifestPath = Path.Combine(tempRoot, "uri-ok.json")
     Fixture.writeRevisionVariantArchive archivePath manifestPath Fixture.canonicalEvaluatedRevision
     let dto = dtoFrom archivePath manifestPath
     let observer = scriptedObserver AbsentArchive
-    match ReleaseEvaluate.evaluate observer dto |> Async.RunSynchronously with
+    match! ReleaseEvaluate.evaluate observer dto with
     | Ok resolution ->
         assertEqual "canonical assetUri produces a published classification" "published" resolution.Status
     | Error error ->
         failed <- failed + 1
         failures.Add(sprintf "validateCanonicalAssetUri accepted: %s" (ReleaseError.message error))
+}
 
 // F7: missing manifest fails closed before remote observation.
-let missingManifestRejection () =
+let missingManifestRejection () = async {
     let archivePath = Path.Combine(tempRoot, "missing-manifest.zip")
     let manifestPath = Path.Combine(tempRoot, "missing.json")
     Fixture.writeRevisionVariantArchive archivePath manifestPath Fixture.canonicalEvaluatedRevision
     File.Delete manifestPath
     let dto = dtoFrom archivePath manifestPath
     let observer = scriptedObserver AbsentArchive
-    match ReleaseEvaluate.evaluate observer dto |> Async.RunSynchronously with
+    match! ReleaseEvaluate.evaluate observer dto with
     | Ok _ ->
         failed <- failed + 1
         failures.Add("missing manifest: expected Error")
     | Error error ->
         let message = ReleaseError.message error
         assertTrue "missing manifest fails closed" (message.Contains("does not exist", StringComparison.Ordinal) || message.Contains("missing", StringComparison.Ordinal))
+}
 
 // F7: missing archive fails closed before remote observation.
-let missingArchiveRejection () =
+let missingArchiveRejection () = async {
     let archivePath = Path.Combine(tempRoot, "missing-archive.zip")
     let manifestPath = Path.Combine(tempRoot, "missing-archive.json")
     Fixture.writeRevisionVariantArchive archivePath manifestPath Fixture.canonicalEvaluatedRevision
     File.Delete archivePath
     let dto = dtoFrom archivePath manifestPath
     let observer = scriptedObserver AbsentArchive
-    match ReleaseEvaluate.evaluate observer dto |> Async.RunSynchronously with
+    match! ReleaseEvaluate.evaluate observer dto with
     | Ok _ ->
         failed <- failed + 1
         failures.Add("missing archive: expected Error")
     | Error error ->
         let message = ReleaseError.message error
         assertTrue "missing archive fails closed" (message.Contains("does not exist", StringComparison.Ordinal) || message.Contains("missing", StringComparison.Ordinal))
+}
 
 // F2: ArchiveAbsent + transport -> published.
-let publishedOnArchiveAbsent () =
+let publishedOnArchiveAbsent () = async {
     let archivePath = Path.Combine(tempRoot, "abs.zip")
     let manifestPath = Path.Combine(tempRoot, "abs.json")
     Fixture.writeRevisionVariantArchive archivePath manifestPath Fixture.canonicalEvaluatedRevision
     let dto = dtoFrom archivePath manifestPath
     let observer = scriptedObserver AbsentArchive
-    match ReleaseEvaluate.evaluate observer dto |> Async.RunSynchronously with
+    match! ReleaseEvaluate.evaluate observer dto with
     | Ok resolution ->
         assertEqual "ArchiveAbsent produces published" "published" resolution.Status
         assertEqual "ArchiveAbsent reason names the no-asset condition"
@@ -190,15 +195,16 @@ let publishedOnArchiveAbsent () =
     | Error error ->
         failed <- failed + 1
         failures.Add(sprintf "published on archive absent: %s" (ReleaseError.message error))
+}
 
 // F2: ArchiveMissing (release container missing) -> failed with named reason.
-let failedOnArchiveMissing () =
+let failedOnArchiveMissing () = async {
     let archivePath = Path.Combine(tempRoot, "missing-rel.zip")
     let manifestPath = Path.Combine(tempRoot, "missing-rel.json")
     Fixture.writeRevisionVariantArchive archivePath manifestPath Fixture.canonicalEvaluatedRevision
     let dto = dtoFrom archivePath manifestPath
     let observer = scriptedObserver MissingArchive
-    match ReleaseEvaluate.evaluate observer dto |> Async.RunSynchronously with
+    match! ReleaseEvaluate.evaluate observer dto with
     | Ok resolution ->
         assertEqual "ArchiveMissing produces failed" "failed" resolution.Status
         assertTrue "ArchiveMissing reason names the missing container"
@@ -206,15 +212,16 @@ let failedOnArchiveMissing () =
     | Error error ->
         failed <- failed + 1
         failures.Add(sprintf "ArchiveMissing failed: %s" (ReleaseError.message error))
+}
 
 // F2: ArchiveImmutable -> failed with immutable reason.
-let failedOnArchiveImmutable () =
+let failedOnArchiveImmutable () = async {
     let archivePath = Path.Combine(tempRoot, "imm.zip")
     let manifestPath = Path.Combine(tempRoot, "imm.json")
     Fixture.writeRevisionVariantArchive archivePath manifestPath Fixture.canonicalEvaluatedRevision
     let dto = dtoFrom archivePath manifestPath
     let observer = scriptedObserver ImmutableArchive
-    match ReleaseEvaluate.evaluate observer dto |> Async.RunSynchronously with
+    match! ReleaseEvaluate.evaluate observer dto with
     | Ok resolution ->
         assertEqual "ArchiveImmutable produces failed" "failed" resolution.Status
         assertTrue "ArchiveImmutable reason names immutability"
@@ -222,9 +229,10 @@ let failedOnArchiveImmutable () =
     | Error error ->
         failed <- failed + 1
         failures.Add(sprintf "ArchiveImmutable failed: %s" (ReleaseError.message error))
+}
 
 // F2: DifferentBeyondRevision -> failed with bumped version metadata.
-let failedOnBumpedSdk () =
+let failedOnBumpedSdk () = async {
     let publishedPath = Path.Combine(tempRoot, "bump-published.zip")
     let publishedManifest = Path.Combine(tempRoot, "bump-published.json")
     Fixture.writeRevisionVariantArchive publishedPath publishedManifest Fixture.canonicalPublishedRevision
@@ -233,12 +241,13 @@ let failedOnBumpedSdk () =
     let bumpedDllBytes = Encoding.UTF8.GetBytes "dotnet-dll-fixture-bumped"
     Fixture.writeModifiedDotnetDllArchive candidatePath candidateManifest bumpedDllBytes Fixture.canonicalEvaluatedRevision
     let realDto = dtoFrom candidatePath candidateManifest
+    let! publishedResult = observe publishedPath
     let publishedObs =
-        match observe publishedPath |> Async.RunSynchronously with
+        match publishedResult with
         | Ok value -> value
         | Error error -> failwithf "observe published: %s" (ReleaseError.message error)
     let observer = scriptedObserverWith (Ok (ArchiveObserved publishedObs)) (Ok MetadataAbsent)
-    match ReleaseEvaluate.evaluate observer realDto |> Async.RunSynchronously with
+    match! ReleaseEvaluate.evaluate observer realDto with
     | Ok resolution ->
         assertEqual "bumped-sdk produces failed" "failed" resolution.Status
         assertEqual "bumped version recorded" (Some Fixture.contractVersion) resolution.Render.BumpedVersion
@@ -248,14 +257,16 @@ let failedOnBumpedSdk () =
     | Error error ->
         failed <- failed + 1
         failures.Add(sprintf "bumped sdk failed: %s" (ReleaseError.message error))
+}
 
 // F2: ByteIdentical + MetadataObserved matches -> unchanged with published values.
-let unchangedOnByteIdentical () =
+let unchangedOnByteIdentical () = async {
     let archivePath = Path.Combine(tempRoot, "idem.zip")
     let manifestPath = Path.Combine(tempRoot, "idem.json")
     Fixture.writeRevisionVariantArchive archivePath manifestPath Fixture.canonicalEvaluatedRevision
+    let! observationResult = observe archivePath
     let observation =
-        match observe archivePath |> Async.RunSynchronously with
+        match observationResult with
         | Ok value -> value
         | Error error -> failwithf "observe: %s" (ReleaseError.message error)
     let projection =
@@ -264,7 +275,7 @@ let unchangedOnByteIdentical () =
             (observation.ManifestSha256 |> Option.defaultValue "")
             Fixture.canonicalEvaluatedRevision
     let observer = scriptedObserverWith (Ok (ArchiveObserved observation)) (Ok (MetadataObserved (metadataAssetSha projection, projection)))
-    match ReleaseEvaluate.evaluate observer (dtoFrom archivePath manifestPath) |> Async.RunSynchronously with
+    match! ReleaseEvaluate.evaluate observer (dtoFrom archivePath manifestPath) with
     | Ok resolution ->
         assertEqual "byte-identical + matching metadata -> unchanged" "unchanged" resolution.Status
         assertEqual "publishedArchiveSha256 reports the observed remote digest"
@@ -277,17 +288,19 @@ let unchangedOnByteIdentical () =
     | Error error ->
         failed <- failed + 1
         failures.Add(sprintf "unchanged byte-identical: %s" (ReleaseError.message error))
+}
 
 // F2: RevisionOnlyEquivalent + MetadataObserved matches -> unchanged with both revisions distinct.
-let unchangedOnRevisionOnlyEquivalent () =
+let unchangedOnRevisionOnlyEquivalent () = async {
     let publishedPath = Path.Combine(tempRoot, "rev-pub.zip")
     let publishedManifest = Path.Combine(tempRoot, "rev-pub.json")
     Fixture.writeRevisionVariantArchive publishedPath publishedManifest Fixture.canonicalPublishedRevision
     let candidatePath = Path.Combine(tempRoot, "rev-cand.zip")
     let candidateManifest = Path.Combine(tempRoot, "rev-cand.json")
     Fixture.writeRevisionVariantArchive candidatePath candidateManifest Fixture.canonicalEvaluatedRevision
+    let! publishedResult = observe publishedPath
     let publishedObs =
-        match observe publishedPath |> Async.RunSynchronously with
+        match publishedResult with
         | Ok value -> value
         | Error error -> failwithf "observe published: %s" (ReleaseError.message error)
     let projection =
@@ -296,7 +309,7 @@ let unchangedOnRevisionOnlyEquivalent () =
             (publishedObs.ManifestSha256 |> Option.defaultValue "")
             Fixture.canonicalPublishedRevision
     let observer = scriptedObserverWith (Ok (ArchiveObserved publishedObs)) (Ok (MetadataObserved (metadataAssetSha projection, projection)))
-    match ReleaseEvaluate.evaluate observer (dtoFrom candidatePath candidateManifest) |> Async.RunSynchronously with
+    match! ReleaseEvaluate.evaluate observer (dtoFrom candidatePath candidateManifest) with
     | Ok resolution ->
         assertEqual "revision-only + matching metadata -> unchanged" "unchanged" resolution.Status
         assertEqual "publishedArchiveSha256 reports the published remote digest"
@@ -306,18 +319,20 @@ let unchangedOnRevisionOnlyEquivalent () =
     | Error error ->
         failed <- failed + 1
         failures.Add(sprintf "unchanged revision-only: %s" (ReleaseError.message error))
+}
 
 // F2: byte-identical + verified metadata absence -> unchanged with metadataRecoveryNeeded.
-let unchangedWithMetadataRecoveryNeeded () =
+let unchangedWithMetadataRecoveryNeeded () = async {
     let archivePath = Path.Combine(tempRoot, "rec.zip")
     let manifestPath = Path.Combine(tempRoot, "rec.json")
     Fixture.writeRevisionVariantArchive archivePath manifestPath Fixture.canonicalEvaluatedRevision
+    let! observationResult = observe archivePath
     let observation =
-        match observe archivePath |> Async.RunSynchronously with
+        match observationResult with
         | Ok value -> value
         | Error error -> failwithf "observe: %s" (ReleaseError.message error)
     let observer = scriptedObserverWith (Ok (ArchiveObserved observation)) (Ok MetadataAbsent)
-    match ReleaseEvaluate.evaluate observer (dtoFrom archivePath manifestPath) |> Async.RunSynchronously with
+    match! ReleaseEvaluate.evaluate observer (dtoFrom archivePath manifestPath) with
     | Ok resolution ->
         assertEqual "verified metadata absence -> unchanged" "unchanged" resolution.Status
         assertTrue "metadataRecoveryNeeded flag set" resolution.MetadataRecoveryNeeded
@@ -326,21 +341,23 @@ let unchangedWithMetadataRecoveryNeeded () =
     | Error error ->
         failed <- failed + 1
         failures.Add(sprintf "recovery-needed: %s" (ReleaseError.message error))
+}
 
 // F2: byte-identical + corrupt metadata -> failed (no overwrite, no repair).
-let failedOnMetadataCorrupt () =
+let failedOnMetadataCorrupt () = async {
     let archivePath = Path.Combine(tempRoot, "corrupt-meta.zip")
     let manifestPath = Path.Combine(tempRoot, "corrupt-meta.json")
     Fixture.writeRevisionVariantArchive archivePath manifestPath Fixture.canonicalEvaluatedRevision
+    let! observationResult = observe archivePath
     let observation =
-        match observe archivePath |> Async.RunSynchronously with
+        match observationResult with
         | Ok value -> value
         | Error error -> failwithf "observe: %s" (ReleaseError.message error)
     let observer =
         scriptedObserverWith
             (Ok (ArchiveObserved observation))
             (Ok (MetadataCorrupt (FileFailure("verify", "metadata", "metadata transport unavailable"))))
-    match ReleaseEvaluate.evaluate observer (dtoFrom archivePath manifestPath) |> Async.RunSynchronously with
+    match! ReleaseEvaluate.evaluate observer (dtoFrom archivePath manifestPath) with
     | Ok resolution ->
         assertEqual "MetadataCorrupt -> failed" "failed" resolution.Status
         assertTrue "MetadataCorrupt reason references verify/transport"
@@ -351,18 +368,20 @@ let failedOnMetadataCorrupt () =
     | Error error ->
         failed <- failed + 1
         failures.Add(sprintf "MetadataCorrupt failed: %s" (ReleaseError.message error))
+}
 
 // F2: MetadataImmutable -> failed (no repair allowed).
-let failedOnMetadataImmutable () =
+let failedOnMetadataImmutable () = async {
     let archivePath = Path.Combine(tempRoot, "imm-meta.zip")
     let manifestPath = Path.Combine(tempRoot, "imm-meta.json")
     Fixture.writeRevisionVariantArchive archivePath manifestPath Fixture.canonicalEvaluatedRevision
+    let! observationResult = observe archivePath
     let observation =
-        match observe archivePath |> Async.RunSynchronously with
+        match observationResult with
         | Ok value -> value
         | Error error -> failwithf "observe: %s" (ReleaseError.message error)
     let observer = scriptedObserverWith (Ok (ArchiveObserved observation)) (Ok MetadataImmutable)
-    match ReleaseEvaluate.evaluate observer (dtoFrom archivePath manifestPath) |> Async.RunSynchronously with
+    match! ReleaseEvaluate.evaluate observer (dtoFrom archivePath manifestPath) with
     | Ok resolution ->
         assertEqual "MetadataImmutable -> failed" "failed" resolution.Status
         assertTrue "MetadataImmutable reason references immutability"
@@ -370,14 +389,16 @@ let failedOnMetadataImmutable () =
     | Error error ->
         failed <- failed + 1
         failures.Add(sprintf "MetadataImmutable failed: %s" (ReleaseError.message error))
+}
 
 // F2: observed metadata whose field mismatches the candidate -> failed with field name.
-let failedOnObservedMetadataFieldMismatch () =
+let failedOnObservedMetadataFieldMismatch () = async {
     let archivePath = Path.Combine(tempRoot, "mismatch-meta.zip")
     let manifestPath = Path.Combine(tempRoot, "mismatch-meta.json")
     Fixture.writeRevisionVariantArchive archivePath manifestPath Fixture.canonicalEvaluatedRevision
+    let! observationResult = observe archivePath
     let observation =
-        match observe archivePath |> Async.RunSynchronously with
+        match observationResult with
         | Ok value -> value
         | Error error -> failwithf "observe: %s" (ReleaseError.message error)
     let projection =
@@ -393,7 +414,7 @@ let failedOnObservedMetadataFieldMismatch () =
             (Some Fixture.canonicalRuntime)
             (Some Fixture.canonicalPlatform)
     let observer = scriptedObserverWith (Ok (ArchiveObserved observation)) (Ok (MetadataObserved (metadataAssetSha projection, projection)))
-    match ReleaseEvaluate.evaluate observer (dtoFrom archivePath manifestPath) |> Async.RunSynchronously with
+    match! ReleaseEvaluate.evaluate observer (dtoFrom archivePath manifestPath) with
     | Ok resolution ->
         assertEqual "metadata field mismatch -> failed" "failed" resolution.Status
         assertTrue "field mismatch reason references version"
@@ -401,9 +422,10 @@ let failedOnObservedMetadataFieldMismatch () =
     | Error error ->
         failed <- failed + 1
         failures.Add(sprintf "field mismatch: %s" (ReleaseError.message error))
+}
 
 // F7: public status set is exactly published|unchanged|failed across representative cases.
-let publicStatusSetIsExhaustive () =
+let publicStatusSetIsExhaustive () = async {
     let archivePath = Path.Combine(tempRoot, "status.zip")
     let manifestPath = Path.Combine(tempRoot, "status.json")
     Fixture.writeRevisionVariantArchive archivePath manifestPath Fixture.canonicalEvaluatedRevision
@@ -417,22 +439,24 @@ let publicStatusSetIsExhaustive () =
         ]
     for archiveState, metadataState, expected in cases do
         let observer = scriptedObserverWith (archiveStateToResult archiveState) (Ok metadataState)
-        match ReleaseEvaluate.evaluate observer dto |> Async.RunSynchronously with
+        match! ReleaseEvaluate.evaluate observer dto with
         | Ok resolution ->
             assertEqual (sprintf "status %A %A" archiveState metadataState) expected resolution.Status
         | Error error ->
             failed <- failed + 1
             failures.Add(sprintf "public status %A %A: %s" archiveState metadataState (ReleaseError.message error))
+}
 
 // observed metadata asset sha MUST differ from the archive sha and MUST be the
 // value carried into PublishedMetadataAssetSha256; production carries it
 // unchanged through the classification site.
-let observedMetadataAssetShaDiffersArchiveShaAndCarried () =
+let observedMetadataAssetShaDiffersArchiveShaAndCarried () = async {
     let archivePath = Path.Combine(tempRoot, "sha-carry.zip")
     let manifestPath = Path.Combine(tempRoot, "sha-carry.json")
     Fixture.writeRevisionVariantArchive archivePath manifestPath Fixture.canonicalEvaluatedRevision
+    let! observationResult = observe archivePath
     let observation =
-        match observe archivePath |> Async.RunSynchronously with
+        match observationResult with
         | Ok value -> value
         | Error error -> failwithf "observe: %s" (ReleaseError.message error)
     let projection =
@@ -444,7 +468,7 @@ let observedMetadataAssetShaDiffersArchiveShaAndCarried () =
     assertTrue "observed metadata sha differs from archive sha"
         (metadataAssetShaValue <> observation.ArchiveSha256)
     let observer = scriptedObserverWith (Ok (ArchiveObserved observation)) (Ok (MetadataObserved (metadataAssetShaValue, projection)))
-    match ReleaseEvaluate.evaluate observer (dtoFrom archivePath manifestPath) |> Async.RunSynchronously with
+    match! ReleaseEvaluate.evaluate observer (dtoFrom archivePath manifestPath) with
     | Ok resolution ->
         assertEqual "PublishedMetadataAssetSha256 carries the observed metadata sha unchanged"
             (Some metadataAssetShaValue) resolution.PublishedMetadataAssetSha256
@@ -453,16 +477,18 @@ let observedMetadataAssetShaDiffersArchiveShaAndCarried () =
     | Error error ->
         failed <- failed + 1
         failures.Add(sprintf "metadata sha carried: %s" (ReleaseError.message error))
+}
 
 // finalizeVerifiedPublication actual production helper: fills archive + metadata
 // REMOTE digests from the verified values; manifest sha + revision come from
 // the validated snapshot already in the resolution.
-let finalizeVerifiedPublicationFillsRemoteDigests () =
+let finalizeVerifiedPublicationFillsRemoteDigests () = async {
     let archivePath = Path.Combine(tempRoot, "fin-pub.zip")
     let manifestPath = Path.Combine(tempRoot, "fin-pub.json")
     Fixture.writeRevisionVariantArchive archivePath manifestPath Fixture.canonicalEvaluatedRevision
+    let! observationResult = observe archivePath
     let observation =
-        match observe archivePath |> Async.RunSynchronously with
+        match observationResult with
         | Ok value -> value
         | Error error -> failwithf "observe: %s" (ReleaseError.message error)
     let projection =
@@ -471,7 +497,7 @@ let finalizeVerifiedPublicationFillsRemoteDigests () =
             (observation.ManifestSha256 |> Option.defaultValue "")
             Fixture.canonicalEvaluatedRevision
     let observer = scriptedObserverWith (Ok (ArchiveObserved observation)) (Ok (MetadataObserved (metadataAssetSha projection, projection)))
-    match ReleaseEvaluate.evaluate observer (dtoFrom archivePath manifestPath) |> Async.RunSynchronously with
+    match! ReleaseEvaluate.evaluate observer (dtoFrom archivePath manifestPath) with
     | Ok initial ->
         let verifiedArchiveSha = "ff" + String('f', 62)
         let verifiedMetadataSha = "ee" + String('e', 62)
@@ -490,19 +516,21 @@ let finalizeVerifiedPublicationFillsRemoteDigests () =
     | Error error ->
         failed <- failed + 1
         failures.Add(sprintf "finalizeVerifiedPublication: %s" (ReleaseError.message error))
+}
 
 // finalizeRecovery actual production helper: preserves published rev/hash and
 // the current evaluated HEAD; only sets the new metadata asset sha.
-let finalizeRecoveryPreservesVerifiedArchiveFields () =
+let finalizeRecoveryPreservesVerifiedArchiveFields () = async {
     let archivePath = Path.Combine(tempRoot, "fin-rec.zip")
     let manifestPath = Path.Combine(tempRoot, "fin-rec.json")
     Fixture.writeRevisionVariantArchive archivePath manifestPath Fixture.canonicalEvaluatedRevision
+    let! observationResult = observe archivePath
     let observation =
-        match observe archivePath |> Async.RunSynchronously with
+        match observationResult with
         | Ok value -> value
         | Error error -> failwithf "observe: %s" (ReleaseError.message error)
     let observer = scriptedObserverWith (Ok (ArchiveObserved observation)) (Ok MetadataAbsent)
-    match ReleaseEvaluate.evaluate observer (dtoFrom archivePath manifestPath) |> Async.RunSynchronously with
+    match! ReleaseEvaluate.evaluate observer (dtoFrom archivePath manifestPath) with
     | Ok initial ->
         assertTrue "recovery-needed initial resolution" initial.MetadataRecoveryNeeded
         let verifiedMetadataSha = "dd" + String('d', 62)
@@ -523,16 +551,17 @@ let finalizeRecoveryPreservesVerifiedArchiveFields () =
     | Error error ->
         failed <- failed + 1
         failures.Add(sprintf "finalizeRecovery: %s" (ReleaseError.message error))
+}
 
 // finalizeFailure actual production helper: retains known Render(context) and
 // clears ALL published* fields. The Render comes from the real `evaluate`
 // path (ArchiveMissing branch yields a populated Render without remote reads).
-let finalizeFailureClearsAllPublishedButRetainsRender () =
+let finalizeFailureClearsAllPublishedButRetainsRender () = async {
     let archivePath = Path.Combine(tempRoot, "fin-fail.zip")
     let manifestPath = Path.Combine(tempRoot, "fin-fail.json")
     Fixture.writeRevisionVariantArchive archivePath manifestPath Fixture.canonicalEvaluatedRevision
     let observer = scriptedObserver MissingArchive
-    match ReleaseEvaluate.evaluate observer (dtoFrom archivePath manifestPath) |> Async.RunSynchronously with
+    match! ReleaseEvaluate.evaluate observer (dtoFrom archivePath manifestPath) with
     | Ok initial ->
         assertEqual "ArchiveMissing produces a populated Render" "failed" initial.Status
         let failed = ReleaseEvaluate.finalizeFailure initial.Render "synthetic failure"
@@ -552,31 +581,37 @@ let finalizeFailureClearsAllPublishedButRetainsRender () =
     | Error error ->
         failed <- failed + 1
         failures.Add(sprintf "finalizeFailure setup: %s" (ReleaseError.message error))
+}
 
-validateCanonicalAssetUriEmptyRejection ()
-validateCanonicalAssetUriWrongOwnerRejection ()
-validateCanonicalAssetUriAccepted ()
-missingManifestRejection ()
-missingArchiveRejection ()
-publishedOnArchiveAbsent ()
-failedOnArchiveMissing ()
-failedOnArchiveImmutable ()
-failedOnBumpedSdk ()
-unchangedOnByteIdentical ()
-unchangedOnRevisionOnlyEquivalent ()
-unchangedWithMetadataRecoveryNeeded ()
-failedOnMetadataCorrupt ()
-failedOnMetadataImmutable ()
-failedOnObservedMetadataFieldMismatch ()
-publicStatusSetIsExhaustive ()
-observedMetadataAssetShaDiffersArchiveShaAndCarried ()
-finalizeVerifiedPublicationFillsRemoteDigests ()
-finalizeRecoveryPreservesVerifiedArchiveFields ()
-finalizeFailureClearsAllPublishedButRetainsRender ()
+let runSuite () = async {
+    do! validateCanonicalAssetUriEmptyRejection ()
+    do! validateCanonicalAssetUriWrongOwnerRejection ()
+    do! validateCanonicalAssetUriAccepted ()
+    do! missingManifestRejection ()
+    do! missingArchiveRejection ()
+    do! publishedOnArchiveAbsent ()
+    do! failedOnArchiveMissing ()
+    do! failedOnArchiveImmutable ()
+    do! failedOnBumpedSdk ()
+    do! unchangedOnByteIdentical ()
+    do! unchangedOnRevisionOnlyEquivalent ()
+    do! unchangedWithMetadataRecoveryNeeded ()
+    do! failedOnMetadataCorrupt ()
+    do! failedOnMetadataImmutable ()
+    do! failedOnObservedMetadataFieldMismatch ()
+    do! publicStatusSetIsExhaustive ()
+    do! observedMetadataAssetShaDiffersArchiveShaAndCarried ()
+    do! finalizeVerifiedPublicationFillsRemoteDigests ()
+    do! finalizeRecoveryPreservesVerifiedArchiveFields ()
+    do! finalizeFailureClearsAllPublishedButRetainsRender ()
 
-printfn "evaluate-tests summary: passed=%d failed=%d" passed failed
-Fixture.safeDeleteDir tempRoot
-if failed > 0 then
-    for line in failures do
-        eprintfn "FAIL: %s" line
-    exit 1
+    printfn "evaluate-tests summary: passed=%d failed=%d" passed failed
+    Fixture.safeDeleteDir tempRoot
+    if failed > 0 then
+        for line in failures do
+            eprintfn "FAIL: %s" line
+        exit 1
+}
+
+// Standalone entry bridge: the FSI process owns the asynchronous regression suite.
+runSuite () |> Async.RunSynchronously

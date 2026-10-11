@@ -133,6 +133,24 @@ or writes them. `release.yml`'s read-only `tests` job depends on `bootstrap`,
 and the `release` job depends on `tests`, so a failed suite blocks every
 upload.
 
+## Strict entrypoint typecheck gate
+
+`Typecheck.ps1` is the read-only strict FCS gate for the two producer Release
+entrypoints (`dotnet/release/Release.fsx`, `workflow/release/Release.fsx`). It
+resolves the canonical SDK from `dotnet --list-sdks` (no SDK table or hard-coded
+developer path), writes a probe under `$RUNNER_TEMP` — outside the repository,
+so its SDK `#r` reference never enters the in-repo analyzer surface — and
+type-checks each target and its full `#load` closure with `useSdkRefs` using the
+exact canonical SDK's `fsi.dll`. Targets are read and type-checked as text only;
+the entrypoints are never evaluated, so no assets, pins, token, or network are
+touched. The existing `Validation` analyzer typechecks only reusable and
+test-helper roots, so it does not cover these entrypoints; this dedicated gate
+neither adds framework references nor changes the analyzer.
+
+`release.yml`'s read-only `tests` job runs the compiled Expecto gate, this
+typecheck, and `Suite.ps1`; the `release` job depends on `tests`, so a failed
+gate blocks every upload.
+
 ## Workflow result parsing
 
 `release.yml`'s `append <component> structured release result` step parses the

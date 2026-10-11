@@ -190,9 +190,9 @@ let parseRejectsEmptyRequiredField () =
 
 // writeToFileAsync emits the byte-exact JSON the metadata transport will
 // sign and the SHA-256 returned equals the file's disk bytes.
-let writeToFileDeterministic () =
+let writeToFileDeterministic () = async {
     let path = Path.Combine(tempRoot, "metadata.json")
-    let firstDigest = writeToFileAsync path completeProjection |> Async.RunSynchronously
+    let! firstDigest = writeToFileAsync path completeProjection
     let firstResult =
         match firstDigest with
         | Ok digest ->
@@ -211,7 +211,7 @@ let writeToFileDeterministic () =
     assertEqual "writeToFileAsync hash equals disk bytes" firstResult computed
 
     // Round-trip the file through parse and assert the schema-version guard is intact.
-    let readResult = readFromFile path |> Async.RunSynchronously
+    let! readResult = readFromFile path
     match readResult with
     | Ok parsed ->
         assertEqual "readFromFile schemaVersion" completeProjection.SchemaVersion parsed.SchemaVersion
@@ -219,47 +219,51 @@ let writeToFileDeterministic () =
     | Error error ->
         failed <- failed + 1
         failures.Add(sprintf "readFromFile: %s" (ReleaseError.message error))
+}
 
 // sha256OfFileAsync is deterministic across two reads of the same file.
-let sha256OfFileAsyncDeterministic () =
+let sha256OfFileAsyncDeterministic () = async {
     let path = Path.Combine(tempRoot, "sha256-fixture.json")
     File.WriteAllText(path, render completeProjection)
-    let first = sha256OfFileAsync path |> Async.RunSynchronously
-    let second = sha256OfFileAsync path |> Async.RunSynchronously
+    let! first = sha256OfFileAsync path
+    let! second = sha256OfFileAsync path
     match first, second with
     | Ok a, Ok b ->
         assertEqual "two reads produce the same digest" a b
     | _ ->
         failed <- failed + 1
         failures.Add("sha256OfFileAsync could not read fixture")
+}
 
 // writeToFileAsync returns the same digest for two writes of the same
 // projection to the same path (the metadata transport relies on this for the
 // idempotent-recovery check).
-let writeToFileTwiceDeterministic () =
+let writeToFileTwiceDeterministic () = async {
     let path = Path.Combine(tempRoot, "twice.json")
-    let first = writeToFileAsync path completeProjection |> Async.RunSynchronously
-    let second = writeToFileAsync path completeProjection |> Async.RunSynchronously
+    let! first = writeToFileAsync path completeProjection
+    let! second = writeToFileAsync path completeProjection
     match first, second with
     | Ok a, Ok b ->
         assertEqual "two writes yield the same hash" a b
     | _ ->
         failed <- failed + 1
         failures.Add("writeToFileAsync twice could not write")
+}
 
 // The full property the safe-immutable transport uses: the byte-exact JSON
 // rendered for a projection yields a hash that, when stored to disk, reads back
 // to a projection whose compare returns Ok against the original.
-let roundTripByteExactIdentical () =
+let roundTripByteExactIdentical () = async {
     let path = Path.Combine(tempRoot, "roundtrip.json")
+    let! writeResult = writeToFileAsync path completeProjection
     let renderedHash =
-        match writeToFileAsync path completeProjection |> Async.RunSynchronously with
+        match writeResult with
         | Ok digest -> digest
         | Error error ->
             failed <- failed + 1
             failures.Add(sprintf "render hash: %s" (ReleaseError.message error))
             ""
-    match readFromFile path |> Async.RunSynchronously with
+    match! readFromFile path with
     | Ok roundTripped ->
         match compare completeProjection roundTripped with
         | Ok () -> assertEqual "rendered hash matches sha256OfFileAsync" renderedHash (renderedHash)
@@ -269,38 +273,45 @@ let roundTripByteExactIdentical () =
     | Error error ->
         failed <- failed + 1
         failures.Add(sprintf "read round-tripped: %s" (ReleaseError.message error))
+}
 
 // Recovery on corrupted file is typed (a missing or unreadable file
 // returns FileFailure rather than throwing).
-let sha256OfMissingFileFailsTyped () =
+let sha256OfMissingFileFailsTyped () = async {
     let missing = Path.Combine(tempRoot, Guid.NewGuid().ToString("N") + ".json")
-    match sha256OfFileAsync missing |> Async.RunSynchronously with
+    match! sha256OfFileAsync missing with
     | Ok value ->
         failed <- failed + 1
         failures.Add(sprintf "sha256OfFileAsync missing: expected Error got %s" value)
     | Error error ->
         let message = ReleaseError.message error
         assertTrue "missing file hash is a typed failure" (message.Contains("hash", StringComparison.Ordinal) || message.Contains("read", StringComparison.Ordinal))
+}
 
-renderParseRoundTrip ()
-renderDeterministicByteExact ()
-metadataAssetNameDeterministic ()
-compareEqualProjections ()
-comparePerFieldDiff ()
-compareOptionalToolchainDifferences ()
-parseRejectsUnsupportedSchemaVersion ()
-parseRejectsMissingRequiredFields ()
-parseRejectsMalformedJson ()
-parseRejectsEmptyRequiredField ()
-writeToFileDeterministic ()
-sha256OfFileAsyncDeterministic ()
-writeToFileTwiceDeterministic ()
-roundTripByteExactIdentical ()
-sha256OfMissingFileFailsTyped ()
+let runSuite () = async {
+    renderParseRoundTrip ()
+    renderDeterministicByteExact ()
+    metadataAssetNameDeterministic ()
+    compareEqualProjections ()
+    comparePerFieldDiff ()
+    compareOptionalToolchainDifferences ()
+    parseRejectsUnsupportedSchemaVersion ()
+    parseRejectsMissingRequiredFields ()
+    parseRejectsMalformedJson ()
+    parseRejectsEmptyRequiredField ()
+    do! writeToFileDeterministic ()
+    do! sha256OfFileAsyncDeterministic ()
+    do! writeToFileTwiceDeterministic ()
+    do! roundTripByteExactIdentical ()
+    do! sha256OfMissingFileFailsTyped ()
 
-printfn "metadata-tests summary: passed=%d failed=%d" passed failed
-try Directory.Delete(tempRoot, true) with _ -> ()
-if failed > 0 then
-    for line in failures do
-        eprintfn "FAIL: %s" line
-    exit 1
+    printfn "metadata-tests summary: passed=%d failed=%d" passed failed
+    try Directory.Delete(tempRoot, true) with _ -> ()
+    if failed > 0 then
+        for line in failures do
+            eprintfn "FAIL: %s" line
+        exit 1
+}
+
+// Standalone entry bridge: the FSI process owns the asynchronous regression suite.
+runSuite () |> Async.RunSynchronously
