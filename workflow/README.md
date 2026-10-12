@@ -7,7 +7,65 @@ workflow skill, coordinator decisions, and pinned profile catalog extensions;
 project profiles and overlays live under `<project-root>/.workflow/profiles`.
 Persisted task state is only `.tasks/<TASK-ID>/runtime.json` in strict schema v1;
 legacy layouts and aliases are rejected. Coordination is process-ephemeral, so
-`runtime.lock` is never created or retained.
+`runtime.lock` is never created or retained. A task directory may also carry
+narrowly allowlisted task-owned supporting material: an optional `SPEC.md`
+regular file and optional `docs/` and `scripts/` directories; nested contents
+under those directories are opaque to Workflow and never followed or scanned.
+Task creation rejects any occupied task directory (allowlisted-only
+prepopulation included), and an already-empty task directory remains reusable.
+
+## Task-root file-kind classification
+
+Immediate task-root leaf classification that gates the allowlist relies on
+the following per-OS contract:
+
+- **Windows** uses `File.GetAttributes` and accepts any non-`Directory`,
+  non-`ReparsePoint` leaf as a regular file. Read-only and hidden
+  attributes do not disqualify an otherwise-valid regular file.
+- **Unix** uses the .NET 11 runtime's native stat shim
+  `libSystem.Native!SystemNative_LStat`, declared in
+  `release/11.0/src/libraries/Common/src/Interop/Unix/System.Native/Interop.Stat.cs`
+  and implemented as an `lstat(2)` shim in
+  `release/11.0/src/native/libs/System.Native/pal_io.c:277-288`. The
+  output is the normalized sequential `FileStatus` from
+  `release/11.0/src/native/libs/System.Native/pal_io.h:17-38`; only the
+  POSIX `S_IFREG` bit of `Mode` is read, so the runtime owns every
+  libc / architecture / kernel-layout translation. The path argument is
+  marshalled as UTF-8 (`UnmanagedType.LPUTF8Str`) under the Cdecl calling
+  convention. A missing or layout-mismatched native shim is surfaced as
+  `RuntimeError.PersistenceFailure`; per-entry native failures (missing
+  path, permission denied) are mapped to "unsupported entry" so the
+  outer operation can continue.
+
+### Internal runtime dependency qualification
+
+`SystemNative_LStat` is an **internal runtime export**, not a
+compatibility-guaranteed .NET application API. This implementation
+therefore accepts the dependency only for the qualified .NET 11 runtime
+configurations inspected at write-time. Re-validate the struct
+definition, export name, marshalling conventions, and `S_IFREG` value
+against the targeted runtime whenever the .NET runtime baseline changes.
+Do not infer additional supported platforms or runtimes.
+
+### Known verification limits of this producer
+
+- The Unix classification path is **not** independently verified by this
+  producer. Windows unit suites exercise the rule on Windows only; the
+  Unix path requires execution on a Linux x64 / ARM64 and macOS x64 /
+  ARM64 host with a .NET 11 runtime that actually exports
+  `SystemNative_LStat` from `libSystem.Native`. musl-on-Linux and any
+  exotic Unix configuration must be exercised separately before being
+  claimed supported.
+- The classifier avoids blocking **content opens** on planted special
+  files; it does not bound metadata latency on unhealthy filesystems or
+  guarantee atomic check/use ordering against a concurrent Unix
+  filesystem substitution. The OS-named mutex coordinates Workflow
+  participants, not hostile filesystem writers.
+- Native classification failures that indicate a missing shim or a
+  layout mismatch are reported as `RuntimeError.PersistenceFailure`; per-
+  entry native failures (path missing, permission denied) are reported as
+  `RuntimeError.InvalidInput` with "unsupported entry" so other entries
+  in the same task directory can still be classified.
 
 The distribution scripts are component-local: they emit only Workflow artifacts.
 The .NET MCP has its own producer boundary under `dotnet/` and its release is
