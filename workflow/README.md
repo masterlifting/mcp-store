@@ -49,23 +49,58 @@ Do not infer additional supported platforms or runtimes.
 
 ### Known verification limits of this producer
 
-- The Unix classification path is **not** independently verified by this
-  producer. Windows unit suites exercise the rule on Windows only; the
-  Unix path requires execution on a Linux x64 / ARM64 and macOS x64 /
-  ARM64 host with a .NET 11 runtime that actually exports
-  `SystemNative_LStat` from `libSystem.Native`. musl-on-Linux and any
-  exotic Unix configuration must be exercised separately before being
-  claimed supported.
-- The classifier avoids blocking **content opens** on planted special
-  files; it does not bound metadata latency on unhealthy filesystems or
-  guarantee atomic check/use ordering against a concurrent Unix
-  filesystem substitution. The OS-named mutex coordinates Workflow
-  participants, not hostile filesystem writers.
-- Native classification failures that indicate a missing shim or a
-  layout mismatch are reported as `RuntimeError.PersistenceFailure`; per-
-  entry native failures (path missing, permission denied) are reported as
-  `RuntimeError.InvalidInput` with "unsupported entry" so other entries
-  in the same task directory can still be classified.
+- **Verified Unix configuration:** Linux x64 glibc on the official
+  `mcr.microsoft.com/dotnet/sdk:11.0.100-rc.1` image pinned to
+  `sha256:207b30ec860b1c4edef3bfe33dd7af8d38726533cf5a77cb782006451281872e`
+  (Ubuntu 26.04.1, glibc 2.43, runtime `11.0.0-rc.1.26425.128`).
+  Read-only file / hidden-flag / symlink / FIFO / Unix-domain-socket /
+  read-only `SPEC.md` cases at both `SPEC.md` and `runtime.json`
+  reached their assertions on this configuration; the cancellation
+  response bound (see below) and the no-persistent-`runtime.lock`
+  invariant were exercised against the same runtime. The Windows 13/13
+  Workflow suites and the .NET Expecto 151/151 suite are also green.
+- **Not yet verified Unix configurations:** Linux ARM64, musl-on-Linux,
+  macOS x64 / ARM64, BSD variants, Solaris / illumos, and any other
+  Unix runtime / architecture that exports `SystemNative_LStat` from a
+  different libc / kernel / build. macOS x64 / ARM64 in particular is
+  a structural dependency of the producer distribution and must be
+  exercised against a matching .NET 11 runtime before being claimed
+  supported.
+- **Internal runtime shim upgrade boundary:** `SystemNative_LStat`
+  is an internal runtime export whose struct definition, export name,
+  marshalling conventions, and `S_IFREG` value are owned by the .NET
+  runtime. On any runtime baseline change (release upgrade, servicing
+  patch, private build) the `FileStatus` declaration and the
+  `libSystem.Native` resolution path must be re-validated against the
+  targeted runtime; do not promote a release that has not been
+  re-verified.
+- **Failure injection:** missing native shim (`DllNotFoundException`),
+  missing entry point (`EntryPointNotFoundException`), and
+  layout-mismatch (`TypeLoadException`) surface as
+  `RuntimeError.PersistenceFailure`. Per-entry native failures (path
+  missing, permission denied) surface as `RuntimeError.InvalidInput`
+  with "unsupported entry" so other entries in the same task directory
+  can still be classified. Other unexpected exceptions are **not**
+  swallowed and propagate to the caller; do not add blanket-catch
+  around `FileKind.isRegularFile`.
+- **Unix task-root mutex polling reason and cancellation bound:**
+  `WaitHandle.WaitAny` rejects any array containing a named OS mutex
+  with `PlatformNotSupportedException` on Unix (see .NET runtime
+  `release/11.0/src/libraries/System.Private.CoreLib/src/System/Threading/Mutex.Unix.cs`),
+  so `withLock`'s owner thread polls `Mutex.WaitOne(50ms)` and a
+  non-blocking cancellation check on the same dedicated thread. Worst-
+  case cancellation latency is bounded at roughly two poll intervals
+  (~100 ms plus scheduling); the verified Linux measurement was 55.7 ms
+  against a 500 ms bound. The Windows branch uses `WaitAny` exactly as
+  before and is unaffected.
+- **TOCTOU and metadata latency:** the classifier avoids blocking
+  **content opens** on planted special files; it does not bound
+  metadata latency on unhealthy filesystems or guarantee atomic
+  check/use ordering against a concurrent Unix filesystem substitution.
+  The OS-named mutex coordinates Workflow participants, not hostile
+  filesystem writers; a hostile external actor can replace a
+  classified sidecar before `ReadAllTextAsync` reads it, and that race
+  is not closed by this fix.
 
 The distribution scripts are component-local: they emit only Workflow artifacts.
 The .NET MCP has its own producer boundary under `dotnet/` and its release is

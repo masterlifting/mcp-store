@@ -6144,21 +6144,63 @@ let internal withLock
                             // together; the cancel handle is first so a canceled
                             // caller lets this thread exit while an external holder
                             // still owns the mutex. After acquisition only
-                            // releaseRequested (set post-action) releases it.
-                            let handles: WaitHandle[] =
-                                [| acquisitionCancelled :> WaitHandle; mutex :> WaitHandle |]
-
+                            // releaseRequested (set post-action) releases it. On
+                            // Windows `WaitHandle.WaitAny` combines the named mutex
+                            // with the cancellation event atomically. On Unix a
+                            // named OS mutex cannot participate in any multi-handle
+                            // wait at all — the runtime rejects the array with
+                            // `PlatformNotSupportedException` (see .NET runtime
+                            // release/11.0/src/libraries/System.Private.CoreLib/src/System/Threading/Mutex.Unix.cs;
+                            // the named path is what distinguishes it from the
+                            // unnamed cases where WaitAny(anon+anon) and
+                            // WaitAny(anon+event) both succeed). The Unix branch
+                            // therefore alternates between a short `Mutex.WaitOne`
+                            // and a non-blocking cancellation check on this same
+                            // dedicated owner thread until either fires; same-thread
+                            // ownership, abandonment semantics, and the existing
+                            // `releaseRequested`/acquired-publication glue are
+                            // preserved.
                             let mutable signalled = -1
 
-                            try
-                                signalled <- WaitHandle.WaitAny handles
-                            with :? AbandonedMutexException as abandoned ->
-                                signalled <- abandoned.MutexIndex
+                            if OperatingSystem.IsWindows() then
+                                let handles: WaitHandle[] =
+                                    [| acquisitionCancelled :> WaitHandle; mutex :> WaitHandle |]
 
-                                // Ownership transfers only when the abandoned handle
-                                // is the mutex slot, never the cancel slot.
-                                if abandoned.MutexIndex = 1 then
-                                    held <- true
+                                try
+                                    signalled <- WaitHandle.WaitAny handles
+                                with :? AbandonedMutexException as abandoned ->
+                                    signalled <- abandoned.MutexIndex
+
+                                    // Ownership transfers only when the abandoned handle
+                                    // is the mutex slot, never the cancel slot.
+                                    if abandoned.MutexIndex = 1 then
+                                        held <- true
+                            else
+                                let acquisitionPollMs = 50
+                                let mutable cancelled = false
+
+                                while not cancelled && signalled < 0 do
+                                    if acquisitionCancelled.WaitOne 0 then
+                                        cancelled <- true
+                                    else
+                                        try
+                                            if mutex.WaitOne acquisitionPollMs then
+                                                held <- true
+                                                signalled <- 1
+                                        with
+                                        | :? AbandonedMutexException ->
+                                            // `Mutex.WaitOne` raises
+                                            // `AbandonedMutexException` without a
+                                            // meaningful `MutexIndex` (single-handle
+                                            // wait), so the abandoned-vs-cancel
+                                            // distinction that the Windows branch
+                                            // reads from `MutexIndex` is not
+                                            // available here. Treat it as a
+                                            // successful acquire: ownership
+                                            // transfers to this waiter, matching
+                                            // the Windows ownership path.
+                                            held <- true
+                                            signalled <- 1
 
                             if signalled = 1 then
                                 held <- true
