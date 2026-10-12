@@ -4,9 +4,6 @@
 // Exact equality is re-validated, not trusted: allowlist, manifest identity, and payload hashes are cross-checked.
 module ReleaseCompare
 
-#load "../Provenance.fsx"
-#load "Archive.fsx"
-
 open System
 open System.Collections.Generic
 open System.IO

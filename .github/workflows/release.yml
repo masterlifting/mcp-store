@@ -1,8 +1,8 @@
 name: release
 
 # Telegram source and Telegram workflows are out of scope and are never invoked here.
-# Each producer's `*/release/Config.fsx` is the only source of SDK/version/runtime/platform; do not restate those values in YAML or global.json.
-# The read-only tests job runs the compiled Expecto gate, a strict FCS typecheck of both producer release entrypoints, and the non-publishing regression suite before any upload; a producer failure never publishes its artifact.
+# `Participants.json` is the only enrollment authority; each producer's `*/release/Config.fsx` is the only source of SDK/version/runtime/platform; do not restate those values in YAML or global.json.
+# The read-only tests job runs the producer Expecto gate, a strict FCS typecheck of the retained release scripts, and the compiled release regression gate before any upload; a producer failure never publishes its artifact.
 
 run-name: release ${{ github.sha }}
 
@@ -38,6 +38,7 @@ jobs:
       sdk: ${{ steps.project.outputs.sdk }}
       runtime: ${{ steps.project.outputs.runtime }}
       platform: ${{ steps.project.outputs.platform }}
+      components: ${{ steps.project.outputs.components }}
     steps:
       - name: checkout exact event SHA
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -82,6 +83,11 @@ jobs:
         shell: pwsh
         run: pwsh infrastructure/release/Update.ps1 -Project
 
+      - name: verify cross-stage enrollment coherence
+        shell: pwsh
+        # Fails closed when the matrix expression, bootstrap output, fixture wiring, SDK projection or CLI entry path stops matching the roster.
+        run: pwsh infrastructure/release/Coherence.ps1 -OutputFile $env:GITHUB_OUTPUT
+
       - name: setup .NET SDK from canonical config
         uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:
@@ -92,7 +98,7 @@ jobs:
 
       - name: verify executing toolchain against canonical config
         shell: pwsh
-        run: pwsh infrastructure/release/Update.ps1 -Verify -Component dotnet
+        run: pwsh infrastructure/release/Update.ps1 -Verify
 
       - name: queue cancellation/overflow reconciliation (bounded)
         shell: pwsh
@@ -138,7 +144,7 @@ jobs:
     name: release regression suite (non-publishing)
     needs: bootstrap
     runs-on: windows-latest
-    # Read-only and credential-free: the suite never publishes and never needs a token.
+    # Read-only: the gate never publishes; the fixture step reads release assets with the workflow's default token.
     permissions:
       contents: read
     steps:
@@ -157,23 +163,25 @@ jobs:
       - name: build release runner
         run: dotnet build infrastructure/release/Release.fsproj -c Release
 
-      - name: strict FCS typecheck of both producer release entrypoints
+      - name: strict FCS typecheck of the retained release scripts
         shell: pwsh
         run: pwsh infrastructure/release/Typecheck.ps1 -SdkVersion "${{ needs.bootstrap.outputs.sdk }}"
 
-      - name: build producers and the compiled Expecto test project
+      - name: build producers and the two compiled Expecto projects
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          # Build the exact projects the Expecto gate executes; --no-build below then runs that same output.
+          # Build the exact projects the Expecto gates execute; the --no-build runs below then execute that same output.
           dotnet build dotnet/Mcp.Dotnet.fsproj -c Release
           if ($LASTEXITCODE -ne 0) { throw "dotnet producer build failed (exit $LASTEXITCODE)" }
           dotnet build workflow/Mcp.Workflow.fsproj -c Release
           if ($LASTEXITCODE -ne 0) { throw "workflow producer build failed (exit $LASTEXITCODE)" }
           dotnet build dotnet/tests/Mcp.Dotnet.Tests/Mcp.Dotnet.Tests.fsproj -c Release
-          if ($LASTEXITCODE -ne 0) { throw "Expecto test project build failed (exit $LASTEXITCODE)" }
+          if ($LASTEXITCODE -ne 0) { throw "producer Expecto test project build failed (exit $LASTEXITCODE)" }
+          dotnet build infrastructure/release/tests/Tests.fsproj -c Release
+          if ($LASTEXITCODE -ne 0) { throw "compiled release Expecto project build failed (exit $LASTEXITCODE)" }
 
-      - name: run the compiled Expecto gate (native exit preserved)
+      - name: run the producer Expecto gate (native exit preserved)
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -181,8 +189,28 @@ jobs:
           dotnet run --project dotnet/tests/Mcp.Dotnet.Tests/Mcp.Dotnet.Tests.fsproj -c Release --no-build
           exit $LASTEXITCODE
 
-      - name: run focused deterministic release regression suite
+      - name: provision the pinned historical regression fixtures (read-only release assets)
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_COMPONENTS: ${{ needs.bootstrap.outputs.components }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          # The compiled Historical case owns the fixture version and its hash pins; participants and release tags come from the roster projection.
+          $root = Join-Path $env:RUNNER_TEMP "mcp-historical-fixtures"
+          New-Item -ItemType Directory -Path $root -Force | Out-Null
+          $fixtureVersion = "v1.0.3"
+          $components = @(ConvertFrom-Json $env:RELEASE_COMPONENTS)
+          foreach ($component in $components) {
+            gh release download $component --repo "${{ github.repository }}" --pattern "$fixtureVersion.zip" --dir $root --clobber
+            if ($LASTEXITCODE -ne 0) { throw "could not download the pinned historical asset $component/$fixtureVersion.zip" }
+            Move-Item -LiteralPath (Join-Path $root "$fixtureVersion.zip") -Destination (Join-Path $root "$component-$fixtureVersion.zip") -Force
+          }
+          "MCP_RELEASE_HISTORICAL_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: run the complete compiled release regression gate
+        shell: pwsh
+        # Suite.ps1 fails closed without MCP_RELEASE_HISTORICAL_ROOT, runs the complete compiled suite with a case-count check, and never excludes or rewrites a case.
         run: pwsh infrastructure/release/Suite.ps1
 
   release:
@@ -198,9 +226,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        component:
-          - dotnet
-          - workflow
+        # The roster projection is the only participation list; a hand-edited list here would drift from bootstrap and CLI.
+        component: ${{ fromJSON(needs.bootstrap.outputs.components) }}
     steps:
       - name: checkout exact event SHA
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -262,10 +289,13 @@ jobs:
           MCP_RELEASE_DO_UPLOAD: "true"
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          $ErrorActionPreference = "Stop"
           $log = Join-Path $env:RUNNER_TEMP "${{ matrix.component }}-release.log"
           $exitFile = Join-Path $env:RUNNER_TEMP "${{ matrix.component }}-exit-code.txt"
-          $script = "${{ matrix.component }}/release/Release.fsx"
-          & dotnet fsi $script *>&1 | Tee-Object -FilePath $log
+          # The compiled runner is the per-component entrypoint; it sequences build, pins, distribution tests, then the compiled transaction.
+          $runner = Join-Path (Get-Location) "infrastructure/release/bin/Release/net11.0/ReleaseRunner.exe"
+          if (-not (Test-Path -LiteralPath $runner)) { throw "compiled release runner not found: $runner" }
+          & $runner orchestrate "${{ matrix.component }}/release/Config.fsx" *>&1 | Tee-Object -FilePath $log
           # Tee-Object does not reset $LASTEXITCODE; exit explicitly so a summary write cannot mask a non-zero result.
           $code = $LASTEXITCODE
           "$code" | Out-File -FilePath $exitFile -Encoding ascii
@@ -284,7 +314,7 @@ jobs:
           $lines = @()
           if (Test-Path -LiteralPath $log) { $lines = @(Get-Content -LiteralPath $log) }
 
-          # The entrypoint emits a JSON failure object for its own build/pins/tests phases, else the runner's `key=value` summary; parse either on any exit code.
+          # The compiled runner emits one JSON object (status plus config context) on stdout before every exit; a `key=value` line is still tolerated as a fallback.
           $fields = @{}
           $diagnostics = New-Object System.Collections.Generic.List[string]
           $jsonStart = -1

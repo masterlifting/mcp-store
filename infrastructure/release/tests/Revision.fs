@@ -1,4 +1,7 @@
-// role: test entrypoint
+module Release.Tests.Revision
+
+open Expecto
+open Release.Tests
 
 open System
 open System.Collections.Generic
@@ -138,7 +141,6 @@ let private requireMetadata producer revision includeSourceRevision result =
 
 let private inspectBuiltAssembly (path: string) : Result<string, string> =
     try
-        // Avoid loading producer code because this integration check must not run startup.
         use stream = File.OpenRead path
         use pe = new PEReader(stream)
 
@@ -234,13 +236,18 @@ let private runSuite () : Async<unit> =
                     peFailed <- peFailed + 1
                     eprintfn "PE integration FAIL %s owner-built metadata: %s" producer.Name error
             else
-                peNotRun <- peNotRun + 1
-                printfn "PE integration NOT RUN %s: no built DLL at %s" producer.Name producer.BuiltAssemblyPath
+                peFailed <- peFailed + 1
+                eprintfn "PE integration prerequisite missing %s: %s" producer.Name producer.BuiltAssemblyPath
 
         printfn "revision metadata summary: passed=%d failed=%d skipped=0" passed failed
         printfn "producer PE integration summary: passed=%d failed=%d notRun=%d" pePassed peFailed peNotRun
-        if failed > 0 || peFailed > 0 then exit 1
     }
 
-// Standalone entry bridge: the only synchronous wait in this script's flow.
-runSuite () |> Async.RunSynchronously
+
+let tests =
+    testCaseAsync "Revision legacy regression assertions" <| async {
+        do! runSuite ()
+        Expect.equal 0 failed "revision metadata assertions"
+        Expect.equal 0 peFailed "producer PE assertions"
+        Expect.equal 0 peNotRun "producer PE prerequisites must be present"
+    }

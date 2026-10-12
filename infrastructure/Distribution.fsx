@@ -4,7 +4,7 @@
 // provenance, publish, staging, manifest, and archive identical across producers.
 module DistributionBuild
 
-#load "Provenance.fsx"
+#load "Provenance.fs"
 
 open System
 open System.IO

@@ -1,7 +1,7 @@
-// role: test entrypoint
-// Release-metadata projection regression against the real `ReleaseMetadata` module: render/parse identity, strict-field compare, hash determinism, malformed-body rejection.
-#load "../../Provenance.fsx"
-#load "../Metadata.fsx"
+module Release.Tests.Metadata
+
+open Expecto
+open Release.Tests
 
 open System
 open System.IO
@@ -49,11 +49,7 @@ let assertErrorMatches name fragment (result: Result<'a, ReleaseError>) =
             failed <- failed + 1
             failures.Add(sprintf "%s: expected fragment '%s' got '%s'" name fragment message)
 
-let private tempRoot =
-    let path = Path.Combine(Path.GetTempPath(), "mcp-release-metadata-tests-" + Guid.NewGuid().ToString("N"))
-    Directory.CreateDirectory path |> ignore
-    path
-
+let private tempRoot = Path.Combine(Path.GetTempPath(), "mcp-release-metadata-tests-" + Guid.NewGuid().ToString("N"))
 let private completeProjection = {
     SchemaVersion = metadataSchemaVersion
     ComponentId = "dotnet"
@@ -67,10 +63,6 @@ let private completeProjection = {
     ProducerRuntime = Some "11.0.0-rc.1.26425.128"
     ProducerPlatform = Some "win-x64"
 }
-
-// Round-trip identity: every field of the projection survives render then parse.
-// This is the contract the safe-immutable transport relies on for idempotent
-// recovery and for the strict-field compare path.
 let renderParseRoundTrip () =
     let rendered = render completeProjection
     assertTrue "render emits non-empty JSON" (not (String.IsNullOrEmpty rendered))
@@ -91,17 +83,11 @@ let renderParseRoundTrip () =
     | Error error ->
         failed <- failed + 1
         failures.Add(sprintf "round-trip parse: %s" (ReleaseError.message error))
-
-// render is deterministic: two renderings of the same projection produce
-// byte-exact text (this is what makes the file hash an authoritative digest).
 let renderDeterministicByteExact () =
     let first = render completeProjection
     let second = render completeProjection
     assertEqual "two renderings are byte-exact" first second
     assertTrue "rendered bytes have a stable SHA-256" (SHA256.HashData (Encoding.UTF8.GetBytes first) = SHA256.HashData (Encoding.UTF8.GetBytes second))
-
-// Asset name is deterministic from (componentId, version). Versioning the
-// filename is what makes the metadata asset immutable across publishes.
 let metadataAssetNameDeterministic () =
     let first = metadataAssetName "dotnet" "1.0.4"
     let second = metadataAssetName "dotnet" "1.0.4"
@@ -109,9 +95,6 @@ let metadataAssetNameDeterministic () =
     assertEqual "asset name encodes component and version" "dotnet-1.0.4-metadata.json" first
     assertEqual "different version produces different name" "dotnet-1.0.5-metadata.json" (metadataAssetName "dotnet" "1.0.5")
     assertEqual "different component produces different name" "workflow-1.0.4-metadata.json" (metadataAssetName "workflow" "1.0.4")
-
-// compare: equal projections return Ok. This is the helper that gates the
-// idempotent recovery branch of the upload transport.
 let compareEqualProjections () =
     let other = { completeProjection with PublishedRevision = completeProjection.PublishedRevision }
     match compare completeProjection other with
@@ -119,10 +102,6 @@ let compareEqualProjections () =
     | Error error ->
         failed <- failed + 1
         failures.Add(sprintf "compare equal: %s" (ReleaseError.message error))
-
-// compare: any single differing field is reported with the field name so
-// operators can act. This guards the existing-asset check the upload transport
-// performs before allowing an idempotent re-upload.
 let comparePerFieldDiff () =
     let permutations =
         [
@@ -147,9 +126,6 @@ let comparePerFieldDiff () =
         | Error error ->
             let message = ReleaseError.message error
             assertTrue (sprintf "compare per-field %s names the field" label) (message.Contains(label, StringComparison.Ordinal))
-
-// Option-type changes are detected: producerSdk of Some vs None is a
-// structural change that the strict compare must surface.
 let compareOptionalToolchainDifferences () =
     let sdkPresent = completeProjection
     let sdkAbsent = { completeProjection with ProducerSdk = None }
@@ -159,37 +135,23 @@ let compareOptionalToolchainDifferences () =
     assertErrorMatches "sdk Some vs None" "producerSdk differs" (compare sdkPresent sdkAbsent)
     assertErrorMatches "runtime Some vs None" "producerRuntime differs" (compare sdkPresent runtimeAbsent)
     assertErrorMatches "platform Some vs None" "producerPlatform differs" (compare sdkPresent platformAbsent)
-
-// parse rejects unsupported schema versions so a future schema change
-// cannot silently bypass the strict-field check.
 let parseRejectsUnsupportedSchemaVersion () =
     let node = System.Text.Json.Nodes.JsonNode.Parse(render completeProjection).AsObject()
     node.["schemaVersion"] <- System.Text.Json.Nodes.JsonValue.Create(metadataSchemaVersion + 1)
     let text = node.ToJsonString()
     assertErrorMatches "parse rejects future schemaVersion" "unsupported schema version" (parse text)
-
-// parse rejects each missing required field so the safe-immutable check
-// cannot accept a remote asset that is missing required structure.
 let parseRejectsMissingRequiredFields () =
     for field in [ "componentId"; "version"; "assetUri"; "archiveName"; "archiveSha256"; "manifestSha256"; "publishedRevision" ] do
         let node = System.Text.Json.Nodes.JsonNode.Parse(render completeProjection).AsObject()
         if node.ContainsKey field then node.Remove field |> ignore
         assertErrorMatches (sprintf "parse rejects missing field %s" field) (sprintf "missing required field '%s'" field) (parse (node.ToJsonString()))
-
-// parse rejects malformed JSON.
 let parseRejectsMalformedJson () =
     assertErrorMatches "parse rejects malformed JSON" "not valid JSON" (parse "{ this is broken")
     assertErrorMatches "parse rejects empty document" "not valid JSON" (parse "  ")
-
-// parse rejects empty-string required fields so the projection cannot
-// mis-label an empty revision or hash as a valid value.
 let parseRejectsEmptyRequiredField () =
     let node = System.Text.Json.Nodes.JsonNode.Parse(render completeProjection).AsObject()
     node.["publishedRevision"] <- System.Text.Json.Nodes.JsonValue.Create ""
     assertErrorMatches "parse rejects empty publishedRevision" "empty required fields" (parse (node.ToJsonString()))
-
-// writeToFileAsync emits the byte-exact JSON the metadata transport will
-// sign and the SHA-256 returned equals the file's disk bytes.
 let writeToFileDeterministic () = async {
     let path = Path.Combine(tempRoot, "metadata.json")
     let! firstDigest = writeToFileAsync path completeProjection
@@ -209,8 +171,6 @@ let writeToFileDeterministic () = async {
         |> Convert.ToHexString
         |> fun v -> v.ToLowerInvariant()
     assertEqual "writeToFileAsync hash equals disk bytes" firstResult computed
-
-    // Round-trip the file through parse and assert the schema-version guard is intact.
     let! readResult = readFromFile path
     match readResult with
     | Ok parsed ->
@@ -220,8 +180,6 @@ let writeToFileDeterministic () = async {
         failed <- failed + 1
         failures.Add(sprintf "readFromFile: %s" (ReleaseError.message error))
 }
-
-// sha256OfFileAsync is deterministic across two reads of the same file.
 let sha256OfFileAsyncDeterministic () = async {
     let path = Path.Combine(tempRoot, "sha256-fixture.json")
     File.WriteAllText(path, render completeProjection)
@@ -234,10 +192,6 @@ let sha256OfFileAsyncDeterministic () = async {
         failed <- failed + 1
         failures.Add("sha256OfFileAsync could not read fixture")
 }
-
-// writeToFileAsync returns the same digest for two writes of the same
-// projection to the same path (the metadata transport relies on this for the
-// idempotent-recovery check).
 let writeToFileTwiceDeterministic () = async {
     let path = Path.Combine(tempRoot, "twice.json")
     let! first = writeToFileAsync path completeProjection
@@ -249,10 +203,6 @@ let writeToFileTwiceDeterministic () = async {
         failed <- failed + 1
         failures.Add("writeToFileAsync twice could not write")
 }
-
-// The full property the safe-immutable transport uses: the byte-exact JSON
-// rendered for a projection yields a hash that, when stored to disk, reads back
-// to a projection whose compare returns Ok against the original.
 let roundTripByteExactIdentical () = async {
     let path = Path.Combine(tempRoot, "roundtrip.json")
     let! writeResult = writeToFileAsync path completeProjection
@@ -274,9 +224,6 @@ let roundTripByteExactIdentical () = async {
         failed <- failed + 1
         failures.Add(sprintf "read round-tripped: %s" (ReleaseError.message error))
 }
-
-// Recovery on corrupted file is typed (a missing or unreadable file
-// returns FileFailure rather than throwing).
 let sha256OfMissingFileFailsTyped () = async {
     let missing = Path.Combine(tempRoot, Guid.NewGuid().ToString("N") + ".json")
     match! sha256OfFileAsync missing with
@@ -307,11 +254,15 @@ let runSuite () = async {
 
     printfn "metadata-tests summary: passed=%d failed=%d" passed failed
     try Directory.Delete(tempRoot, true) with _ -> ()
-    if failed > 0 then
-        for line in failures do
-            eprintfn "FAIL: %s" line
-        exit 1
 }
 
-// Standalone entry bridge: the FSI process owns the asynchronous regression suite.
-runSuite () |> Async.RunSynchronously
+
+let tests =
+    testCaseAsync "Metadata legacy regression assertions" <| async {
+        Directory.CreateDirectory tempRoot |> ignore
+        try
+            do! runSuite ()
+            Expect.equal 0 failed (String.concat Environment.NewLine failures)
+        finally
+            if Directory.Exists tempRoot then Directory.Delete(tempRoot, true)
+    }

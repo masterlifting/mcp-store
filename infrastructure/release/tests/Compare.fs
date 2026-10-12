@@ -1,9 +1,7 @@
-// role: test entrypoint
-// Strict-archive comparison regression against real `ReleaseCompare.compare`; fixtures carry real SHA-256s so the production self-consistency gate accepts them.
-// Bounds are exercised before allocation/decompression; comparison after observation.
-#load "../../Provenance.fsx"
-#load "../Compare.fsx"
-#load "Fixture.fsx"
+module Release.Tests.Compare
+
+open Expecto
+open Release.Tests
 
 open System
 open System.IO
@@ -40,8 +38,7 @@ let private contract =
 let private evalRevision = Fixture.canonicalEvaluatedRevision
 let private otherRevision = Fixture.canonicalPublishedRevision
 
-let private tempRoot = Fixture.newTempDir "mcp-release-compare-tests"
-
+let private tempRoot = Path.Combine(Path.GetTempPath(), "mcp-release-compare-tests-" + Guid.NewGuid().ToString("N"))
 let private observationOf (path: string) =
     async {
         match! observe path with
@@ -52,23 +49,15 @@ let private observationOf (path: string) =
             return None
     }
 
-let private canonicalRevisionArchive =
-    let archivePath = Path.Combine(tempRoot, "eval.zip")
-    let manifestPath = Path.Combine(tempRoot, "eval.json")
-    Fixture.writeRevisionVariantArchive archivePath manifestPath evalRevision
-    archivePath
+let private canonicalRevisionArchive = Path.Combine(tempRoot, "eval.zip")
+let private canonicalOtherRevisionArchive = Path.Combine(tempRoot, "other.zip")
 
-let private canonicalOtherRevisionArchive =
-    let archivePath = Path.Combine(tempRoot, "other.zip")
-    let manifestPath = Path.Combine(tempRoot, "other.json")
-    Fixture.writeRevisionVariantArchive archivePath manifestPath otherRevision
-    archivePath
+let private ensureCanonicalArchives () =
+    Fixture.writeRevisionVariantArchive canonicalRevisionArchive (Path.Combine(tempRoot, "eval.json")) evalRevision
+    Fixture.writeRevisionVariantArchive canonicalOtherRevisionArchive (Path.Combine(tempRoot, "other.json")) otherRevision
 
 let private compareInvoke (published: ArchiveObservation) (candidate: ArchiveObservation) evaluated =
     compare contract published candidate evaluated
-
-// Byte-identical: byte-equality short-circuits the manifest comparison and
-// surfaces the *published* archive sha256 - never a candidate hash.
 let byteIdenticalDecision () = async {
     let! published = observationOf canonicalRevisionArchive
     let! candidate = observationOf canonicalRevisionArchive
@@ -87,10 +76,6 @@ let byteIdenticalDecision () = async {
         failed <- failed + 1
         failures.Add("byte-identical: could not observe fixture")
 }
-
-// Strictly revision-only-equivalent: only the manifest `revision` differs;
-// the comparison must classify as RevisionOnlyEquivalent and surface both
-// published + evaluated revisions separately (not the candidate as published).
 let revisionOnlyEquivalentDecision () = async {
     let! published = observationOf canonicalOtherRevisionArchive
     let! candidate = observationOf canonicalRevisionArchive
@@ -110,10 +95,6 @@ let revisionOnlyEquivalentDecision () = async {
         failed <- failed + 1
         failures.Add("revision-only: could not observe fixtures")
 }
-
-// Same-archive publisher field differs (sdk bumped): the strict manifest
-// comparison must fail closed (DifferentBeyondRevision) with the field name in
-// the diagnostic - never silently accept.
 let changedSdkRejection () = async {
     let! publishedObs = observationOf canonicalOtherRevisionArchive
     let candidatePath = Path.Combine(tempRoot, "sdk-candidate.zip")
@@ -148,9 +129,6 @@ let changedSdkRejection () = async {
     | Some pub, Some cand ->
         match! compareInvoke pub cand evalRevision with
         | Ok (DifferentBeyondRevision (_, _, reason)) ->
-                        // current production surfaces a generic "manifests differ in more
-            // than the embedded revision value" message. Either is a correct
-            // fail-closed rejection.
             assertTrue "sdk bump is fail-closed"
                 (reason.Contains("sdk", StringComparison.Ordinal)
                  || reason.Contains("11.0.100-rc.1.26425.200", StringComparison.Ordinal)
@@ -166,10 +144,6 @@ let changedSdkRejection () = async {
         failed <- failed + 1
         failures.Add("sdk rejection: could not observe fixtures")
 }
-
-// ZIP metadata differs (compression method on a single entry): an unsupported
-// or changed compression method is fail-closed at observation (canonical Deflate
-// is the only accepted encoding).
 let changedCompressionMethodRejection () = async {
     let! publishedObs = observationOf canonicalRevisionArchive
     let candidatePath = Path.Combine(tempRoot, "comp-candidate.zip")
@@ -199,9 +173,6 @@ let changedCompressionMethodRejection () = async {
     | Some _ -> ()
     | None -> failed <- failed + 1; failures.Add("compression rejection: published fixture failed")
 }
-
-// Malformed/truncated archive: observation must report MalformedArtifact
-// (typed failure) rather than throwing or silently swallowing.
 let malformedArchiveRejected () = async {
     let path = Path.Combine(tempRoot, "malformed.zip")
     File.WriteAllBytes(path, Encoding.UTF8.GetBytes("not a real zip container at all"))
@@ -217,9 +188,6 @@ let malformedArchiveRejected () = async {
              || message.Contains("malformed", StringComparison.Ordinal)
              || message.Contains("central-directory", StringComparison.Ordinal))
 }
-
-// Embedded manifest JSON malformed: the manifest body must fail the production
-// parser and surface as a typed Error rather than be coerced.
 let malformedEmbeddedManifestRejected () = async {
     let path = Path.Combine(tempRoot, "manifest-malformed.zip")
     do
@@ -249,9 +217,6 @@ let malformedEmbeddedManifestRejected () = async {
              || message.Contains("JSON", StringComparison.Ordinal)
              || message.Contains("invalid", StringComparison.Ordinal))
 }
-
-// Allowlist mismatch: candidate archive introduces an entry not in the
-// published allowlist. The production observation must fail closed.
 let duplicateOrExtraEntryRejected () = async {
     let! _ = observationOf canonicalRevisionArchive
     let candidatePath = Path.Combine(tempRoot, "extra-candidate.zip")
@@ -280,9 +245,6 @@ let duplicateOrExtraEntryRejected () = async {
              || message.Contains("allowlist", StringComparison.Ordinal)
              || message.Contains("does not match", StringComparison.Ordinal))
 }
-
-// Same revision field, but different bytes elsewhere: the comparison must
-// classify as ByteIdentical (short-circuit) and never report RevisionOnlyEquivalent.
 let sameRevisionByteIdenticalShortCircuit () = async {
     match! observationOf canonicalRevisionArchive with
     | Some value ->
@@ -299,10 +261,6 @@ let sameRevisionByteIdenticalShortCircuit () = async {
         failed <- failed + 1
         failures.Add("short-circuit: could not observe fixture")
 }
-
-// Trailing bytes after the central directory: a real-world failure mode
-// where a writer appends metadata after the CD. The observation must report
-// MalformedArtifact rather than silently passing a corrupted archive.
 let trailingBytesArchiveRejected () = async {
     let manifestText = Fixture.buildManifestText evalRevision Fixture.canonicalSdk (Fixture.canonicalPayloadHashes ())
     let manifestBytes = Encoding.UTF8.GetBytes manifestText
@@ -333,10 +291,6 @@ let trailingBytesArchiveRejected () = async {
              || message.Contains("trailing", StringComparison.Ordinal)
              || message.Contains("central-directory", StringComparison.Ordinal))
 }
-
-// F4 declared-vs-actual payload hash mismatch: a manifest that claims a
-// payload hash that does not match the actual decompressed bytes must be
-// rejected by the self-consistency gate before reaching the comparator.
 let declaredPayloadHashMismatchRejection () = async {
     let path = Path.Combine(tempRoot, "mismatch.zip")
     let realHashes = Fixture.canonicalPayloadHashes () |> Map.ofList
@@ -370,33 +324,21 @@ let declaredPayloadHashMismatchRejection () = async {
         assertTrue "declared-vs-actual hash mismatch is fail-closed"
             (message.Contains("does not match", StringComparison.Ordinal) || message.Contains("invalid", StringComparison.Ordinal))
 }
-
-// Raw byte patch: a single byte mutated in the compressed bytes of the
-// canonical archive must classify as DifferentBeyondRevision (not ByteIdentical).
-// The patch lands inside the compressed payload of FSharp.Core.dll (well past
-// the local-header zone) so structural headers stay byte-valid.
 let rawBytePatchClassifiedBeyondRevision () = async {
     let originalPath = canonicalRevisionArchive
     let patchedPath = Path.Combine(tempRoot, "raw-patch.zip")
     let original = File.ReadAllBytes originalPath
     let bytes = Array.copy original
-    // local-header layout: signature(4) + version(2) + flags(2) + method(2) +
-    // modtime(2) + moddate(2) + crc(4) + compressed_size(4) +
-    // uncompressed_size(4) + name_length(2) + extra_length(2) = 30 bytes,
-    // then the name bytes, then the compressed payload.
     let nameLength = (int bytes.[26]) ||| ((int bytes.[27]) <<< 8)
     let extraLength = (int bytes.[28]) ||| ((int bytes.[29]) <<< 8)
     let payloadOffset = 30 + nameLength + extraLength
-    let payloadByteOffset = payloadOffset + 8 // patch a few bytes into the deflate stream
+    let payloadByteOffset = payloadOffset + 8
     if payloadByteOffset < bytes.Length then
         bytes.[payloadByteOffset] <- bytes.[payloadByteOffset] ^^^ 0xFFuy
     File.WriteAllBytes(patchedPath, bytes)
     let! published = observationOf originalPath
     match published with
     | Some pub ->
-        // Patched bytes break the deflate stream CRC. Either observation
-        // rejects at decompress (preferred) or comparison classifies the
-        // mutated archive as DifferentBeyondRevision (acceptable).
         match! observe patchedPath with
         | Ok cand ->
             match! compareInvoke pub cand evalRevision with
@@ -418,9 +360,6 @@ let rawBytePatchClassifiedBeyondRevision () = async {
         failed <- failed + 1
         failures.Add("raw byte patch: could not observe canonical")
 }
-
-// Raw entry order: swapping two non-manifest entries by raw byte
-// surgery must classify as DifferentBeyondRevision (or fail at observe).
 let rawEntryOrderChanged () = async {
     let manifestText = Fixture.buildManifestText evalRevision Fixture.canonicalSdk (Fixture.canonicalPayloadHashes ())
     let manifestBytes = Encoding.UTF8.GetBytes manifestText
@@ -434,14 +373,13 @@ let rawEntryOrderChanged () = async {
             use source = new MemoryStream(bytes)
             use target = entry.Open()
             source.CopyTo(target)
-        // Write entries in a different order than canonical (NOTICE.txt first).
         writeEntry "NOTICE.txt" (Encoding.UTF8.GetBytes "mcp-store notice payload")
         for name, bytes in payload do
             if name <> "NOTICE.txt" then writeEntry name bytes
         writeEntry "distribution.json" manifestBytes
     match! observe path with
     | Ok observation ->
-        let _ = observation // produced valid observation but the order differs
+        let _ = observation
         let! published = observationOf canonicalRevisionArchive
         match published with
         | Some pub ->
@@ -464,15 +402,7 @@ let rawEntryOrderChanged () = async {
              || message.Contains("invalid", StringComparison.Ordinal)
              || message.Contains("name", StringComparison.Ordinal))
 }
-
-// Local/central flag differences: a published archive whose central-directory
-// flags differ from the candidate's local-header flags must classify as
-// DifferentBeyondRevision or fail at observe.
 let localAndCentralFlagsChanges () = async {
-    // Build the candidate archive first using a method that allows tweaking
-    // the central-directory header flags after the file is closed. Since the
-    // production archive writer always emits flags=0, the comparison fails at
-    // observe (the patched flags trigger the strict central-flag gate).
     let path = Path.Combine(tempRoot, "flag-mismatch.zip")
     let manifestText = Fixture.buildManifestText evalRevision Fixture.canonicalSdk (Fixture.canonicalPayloadHashes ())
     let manifestBytes = Encoding.UTF8.GetBytes manifestText
@@ -487,10 +417,8 @@ let localAndCentralFlagsChanges () = async {
         for name, bytes in Fixture.canonicalEntryPayloads () do
             writeEntry name bytes
         writeEntry "distribution.json" manifestBytes
-    // Set the data-descriptor flag (bit 3) in the central directory entry for
-    // FSharp.Core.dll to trigger the strict central-flags fail-closed gate.
     let bytes = File.ReadAllBytes path
-    bytes.[7] <- (bytes.[7] ^^^ 0x08uy) // bit 3 in the first central-dir flags
+    bytes.[7] <- (bytes.[7] ^^^ 0x08uy)
     File.WriteAllBytes(path, bytes)
     match! observe path with
     | Ok _ ->
@@ -503,10 +431,6 @@ let localAndCentralFlagsChanges () = async {
              || message.Contains("data descriptors", StringComparison.Ordinal)
              || message.Contains("invalid", StringComparison.Ordinal))
 }
-
-// Extra fields in central directory: an archive whose central-directory
-// extra-field length is non-zero must fail closed at observation (unsupported
-// layout).
 let centralExtraFieldPresentRejected () = async {
     let path = Path.Combine(tempRoot, "central-extra.zip")
     let manifestText = Fixture.buildManifestText evalRevision Fixture.canonicalSdk (Fixture.canonicalPayloadHashes ())
@@ -522,9 +446,7 @@ let centralExtraFieldPresentRejected () = async {
         for name, bytes in Fixture.canonicalEntryPayloads () do
             writeEntry name bytes
         writeEntry "distribution.json" manifestBytes
-    // Find the central directory of FSharp.Core.dll and bump its extra length.
     let bytes = File.ReadAllBytes path
-    // Walk from end-of-central-directory backward to first central-dir signature.
     let eocdPos =
         let len = bytes.Length
         let mutable p = len - 22
@@ -536,9 +458,7 @@ let centralExtraFieldPresentRejected () = async {
             p <- p - 1
         found
     if eocdPos > 0 then
-        // Entry comment length offset: central extra length at offset+30 in
-        // the central directory header.
-        bytes.[eocdPos + 30] <- 4uy // set central extra length = 4 (non-canonical)
+        bytes.[eocdPos + 30] <- 4uy
         bytes.[eocdPos + 31] <- 0uy
     File.WriteAllBytes(path, bytes)
     match! observe path with
@@ -552,14 +472,10 @@ let centralExtraFieldPresentRejected () = async {
              || message.Contains("unsupported", StringComparison.Ordinal)
              || message.Contains("invalid", StringComparison.Ordinal))
 }
-
-// Zip64 marker: an archive whose EOCD is preceded by a Zip64 EOCD-locator
-// signature must fail closed at observation.
 let zip64MarkerRejected () = async {
     let baseArchive = canonicalRevisionArchive
     let target = Path.Combine(tempRoot, "zip64.zip")
     let baseBytes = File.ReadAllBytes baseArchive
-    // Walk to EOCD and insert a 20-byte Zip64 EOCD-locator before it.
     let eocdPos =
         let len = baseBytes.Length
         let mutable p = len - 22
@@ -573,10 +489,10 @@ let zip64MarkerRejected () = async {
     if eocdPos > 0 then
         let preBytes = baseBytes.[.. eocdPos - 1]
         let zip64Locator : byte[] =
-            [| 0x50uy; 0x4Buy; 0x06uy; 0x07uy;  // sig
-               0x00uy; 0x00uy;                   // disk number
-               0x00uy; 0x00uy; 0x00uy; 0x00uy;    // zip64 EOCD offset
-               0x01uy; 0x00uy; 0x00uy; 0x00uy |]  // total disks
+            [| 0x50uy; 0x4Buy; 0x06uy; 0x07uy
+               0x00uy; 0x00uy
+               0x00uy; 0x00uy; 0x00uy; 0x00uy
+               0x01uy; 0x00uy; 0x00uy; 0x00uy |]
         let postBytes = baseBytes.[eocdPos ..]
         let newBytes = Array.concat [| preBytes; zip64Locator; postBytes |]
         File.WriteAllBytes(target, newBytes)
@@ -593,16 +509,10 @@ let zip64MarkerRejected () = async {
              || message.Contains("unsupported", StringComparison.Ordinal)
              || message.Contains("invalid", StringComparison.Ordinal))
 }
-
-// F4 archive-size bound: an archive whose declared length exceeds
-// maxArchiveBytes (256 MiB) must fail closed before any allocation.
 let archiveSizeBoundRejection () = async {
     let path = Path.Combine(tempRoot, "oversize.zip")
-    // Construct a fake file with the EOCD signature followed by enough padding
-    // to exceed the bound; the parser must reject on size alone.
     let payloadSize = ReleaseArchive.maxArchiveBytes + 1L |> int
     let buffer = Array.zeroCreate<byte> payloadSize
-    // EOCD signature at end-22
     let eocdOffset = payloadSize - 22
     buffer.[eocdOffset] <- 0x50uy
     buffer.[eocdOffset + 1] <- 0x4Buy
@@ -620,9 +530,6 @@ let archiveSizeBoundRejection () = async {
              || message.Contains("bound", StringComparison.Ordinal)
              || message.Contains("invalid", StringComparison.Ordinal))
 }
-
-// F4 entry-count bound: 4097 entries exceeds the production bound
-// (4096) and must be rejected before allocation.
 let entryCountUpperBoundRejection () = async {
     let path = Path.Combine(tempRoot, "too-many-entries.zip")
     do
@@ -648,17 +555,12 @@ let entryCountUpperBoundRejection () = async {
              || message.Contains("bound", StringComparison.Ordinal)
              || message.Contains("invalid", StringComparison.Ordinal))
 }
-
-// F4 compression-ratio bound: a single entry whose declared
-// uncompressed size is > 200x compressed size must fail closed at observation.
 let compressionRatioBoundRejection () = async {
     let path = Path.Combine(tempRoot, "ratio-bomb.zip")
-    // Construct a single-entry archive whose uncompressed size is huge but
-    // compressed size is tiny (lying header).
     let entryName = "FSharp.Core.dll"
     let entryBytes = [| 1uy |]
     let compressedSize = entryBytes.Length
-    let uncompressedSize = compressedSize * 201 // exceeds 200:1
+    let uncompressedSize = compressedSize * 201
     do
         use archive = ZipFile.Open(path, ZipArchiveMode.Create)
         let entry = archive.CreateEntry(entryName, CompressionLevel.Optimal)
@@ -667,17 +569,14 @@ let compressionRatioBoundRejection () = async {
         use target = entry.Open()
         source.CopyTo(target)
     let bytes = File.ReadAllBytes path
-    // Find the local-header uncompressed-size field (offset 22) for the single entry
     let mutable pos = 0
     while pos < bytes.Length - 30 && not (bytes.[pos] = 0x50uy && bytes.[pos+1] = 0x4Buy && bytes.[pos+2] = 0x03uy && bytes.[pos+3] = 0x04uy) do
         pos <- pos + 1
     if pos < bytes.Length - 30 then
-        // Local header offset 22-25: uncompressed size (little-endian u32)
         bytes.[pos + 22] <- byte (uncompressedSize &&& 0xFF)
         bytes.[pos + 23] <- byte ((uncompressedSize >>> 8) &&& 0xFF)
         bytes.[pos + 24] <- byte ((uncompressedSize >>> 16) &&& 0xFF)
         bytes.[pos + 25] <- byte ((uncompressedSize >>> 24) &&& 0xFF)
-        // Central directory offset 24-27
         let cdoffset = bytes.Length - 22 - compressedSize - 46
         bytes.[cdoffset + 24] <- byte (uncompressedSize &&& 0xFF)
         bytes.[cdoffset + 25] <- byte ((uncompressedSize >>> 8) &&& 0xFF)
@@ -696,11 +595,6 @@ let compressionRatioBoundRejection () = async {
              || message.Contains("bound", StringComparison.Ordinal)
              || message.Contains("invalid", StringComparison.Ordinal))
 }
-
-// F4 manifest duplicate keys: a manifest with duplicate JSON keys must
-// be rejected by `rejectDuplicateKeys` so two parses cannot silently disagree.
-// `System.Text.Json.Nodes.JsonObject` indexer overwrites rather than preserves
-// duplicates, so the gate is only reachable via raw JSON text.
 let duplicateKeyManifestRejected () = async {
     let path = Path.Combine(tempRoot, "dup-key.zip")
     let payloadHashes = Fixture.canonicalPayloadHashes ()
@@ -731,12 +625,6 @@ let duplicateKeyManifestRejected () = async {
             (message.Contains("duplicate", StringComparison.Ordinal)
              || message.Contains("invalid", StringComparison.Ordinal))
 }
-
-// F4 unknown manifest field: a base archive and a candidate archive that
-// share all canonical payload bytes and a valid revision, where the candidate
-// adds or changes a non-contract field in the embedded manifest, must classify
-// as DifferentBeyondRevision (body differs, so byte-identity does not hold and
-// the only allowed exception is revision-only).
 let unknownManifestFieldAddedClassifiedBeyondRevision () = async {
     let publishedPath = Path.Combine(tempRoot, "unknown-pub.zip")
     let publishedManifestPath = Path.Combine(tempRoot, "unknown-pub.json")
@@ -786,9 +674,6 @@ let unknownManifestFieldAddedClassifiedBeyondRevision () = async {
         failed <- failed + 1
         failures.Add("unknown-field added: observation failed")
 }
-
-// F4 external attributes: a candidate whose central external-attribute field
-// differs from the published must fail at observation (non-canonical layout).
 let externalAttributesRejected () = async {
     let! published = observationOf canonicalRevisionArchive
     let path = Path.Combine(tempRoot, "ext-attr.zip")
@@ -835,10 +720,6 @@ let externalAttributesRejected () = async {
         failed <- failed + 1
         failures.Add("external-attributes: published observation failed")
 }
-
-// F4 entry comment in the central directory (per-entry, distinct from the archive
-// comment) must fail at observation; production rejects any non-zero entry
-// comment length.
 let entryCommentRejected () = async {
     let path = Path.Combine(tempRoot, "entry-comment.zip")
     let manifestText = Fixture.buildManifestText evalRevision Fixture.canonicalSdk (Fixture.canonicalPayloadHashes ())
@@ -879,11 +760,6 @@ let entryCommentRejected () = async {
              || m.Contains("unsupported", StringComparison.Ordinal)
              || m.Contains("invalid", StringComparison.Ordinal))
 }
-
-// F4 total uncompressed bound: a single archive whose summed declared
-// uncompressed size exceeds maxTotalUncompressedBytes (256 MiB) must fail
-// closed before allocation, even if individual entries are below the per-entry
-// bound.
 let totalUncompressedBoundRejection () = async {
     let path = Path.Combine(tempRoot, "total-uncompressed.zip")
     let perEntryLyingSize = ReleaseArchive.maxEntryUncompressedBytes - 1L |> int
@@ -931,10 +807,6 @@ let totalUncompressedBoundRejection () = async {
              || m.Contains("bound", StringComparison.Ordinal)
              || m.Contains("invalid", StringComparison.Ordinal))
 }
-
-// F4 raw non-canonical Deflate: the canonical archive uses Deflate Optimal;
-// rewriting the body to Deflate Fastest (a different but still canonical
-// encoding) with flags=0 must be rejected by the manifest-entry strict check.
 let nonCanonicalDeflateBody () = async {
     let path = Path.Combine(tempRoot, "non-canonical-deflate.zip")
     let manifestText = Fixture.buildManifestText evalRevision Fixture.canonicalSdk (Fixture.canonicalPayloadHashes ())
@@ -961,13 +833,7 @@ let nonCanonicalDeflateBody () = async {
              || message.Contains("canonical", StringComparison.Ordinal)
              || message.Contains("invalid", StringComparison.Ordinal))
 }
-
-// F4 size/count/ratio bounds at compare time: a candidate observation
-// whose entry count exceeds the bound, or whose ratio exceeds the bound,
-// must surface through `validate` as a typed failure.
 let boundsAtValidate () = async {
-    // An archive with a lying uncompressed size on a single entry that
-    // exceeds the per-entry uncompressed bound must fail validate.
     let path = Path.Combine(tempRoot, "oversize-entry.zip")
     let entryBytes = Encoding.UTF8.GetBytes "small-payload"
     let lyingSize = ReleaseArchive.maxEntryUncompressedBytes + 1L |> int
@@ -987,7 +853,6 @@ let boundsAtValidate () = async {
         bytes.[pos + 23] <- byte ((lyingSize >>> 8) &&& 0xFF)
         bytes.[pos + 24] <- byte ((lyingSize >>> 16) &&& 0xFF)
         bytes.[pos + 25] <- byte ((lyingSize >>> 24) &&& 0xFF)
-        // Central directory (single entry) at the position right before EOCD.
         let cdoffset = bytes.Length - 22 - entryBytes.Length - 46
         bytes.[cdoffset + 24] <- byte (lyingSize &&& 0xFF)
         bytes.[cdoffset + 25] <- byte ((lyingSize >>> 8) &&& 0xFF)
@@ -1034,13 +899,13 @@ let runSuite () = async {
     do! nonCanonicalDeflateBody ()
     do! boundsAtValidate ()
 }
-
-// Standalone entry bridge: the FSI process owns the asynchronous regression suite.
-runSuite () |> Async.RunSynchronously
-
-printfn "compare-tests summary: passed=%d failed=%d" passed failed
-Fixture.safeDeleteDir tempRoot
-if failed > 0 then
-    for line in failures do
-        eprintfn "FAIL: %s" line
-    exit 1
+let tests =
+    testCaseAsync "Compare legacy regression assertions" <| async {
+        Directory.CreateDirectory tempRoot |> ignore
+        ensureCanonicalArchives ()
+        try
+            do! runSuite ()
+            Expect.equal 0 failed (String.concat Environment.NewLine failures)
+        finally
+            Fixture.safeDeleteDir tempRoot
+    }

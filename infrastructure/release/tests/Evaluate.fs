@@ -1,10 +1,7 @@
-// role: test entrypoint
-// `ReleaseEvaluate` regression: the public classification site shared by the Runner and tests; injected RemoteObserver covers metadata observation/recovery, JSON-only public statuses, and canonical assetUri enforcement.
-#load "../../Provenance.fsx"
-#load "../Compare.fsx"
-#load "../Metadata.fsx"
-#load "../Evaluate.fsx"
-#load "Fixture.fsx"
+module Release.Tests.Evaluate
+
+open Expecto
+open Release.Tests
 
 open System
 open System.IO
@@ -51,8 +48,6 @@ let assertEqual name expected actual =
     else
         failed <- failed + 1
         failures.Add(sprintf "%s: expected %A got %A" name expected actual)
-
-// verified metadata proof: SHA-256 of the rendered projection body, NOT the archive hash.
 let private sha256HexBytes (bytes: byte[]) : string =
     SHA256.HashData bytes |> Convert.ToHexString |> fun v -> v.ToLowerInvariant()
 
@@ -78,8 +73,7 @@ let private contract =
         EntryAllowlist = Fixture.contractEntryAllowlist
     }
 
-let private tempRoot = Fixture.newTempDir "mcp-release-evaluate-tests"
-
+let private tempRoot = Path.Combine(Path.GetTempPath(), "mcp-release-evaluate-tests-" + Guid.NewGuid().ToString("N"))
 let private dtoFrom (archivePath: string) (manifestPath: string) =
     {
         Contract = contract
@@ -95,8 +89,6 @@ let private dtoFrom (archivePath: string) (manifestPath: string) =
         RepositoryOwner = "masterlifting"
         RepositoryName = "mcp-store"
     }
-
-// F9: an empty assetUri must be rejected before any candidate read.
 let validateCanonicalAssetUriEmptyRejection () = async {
     let archivePath = Path.Combine(tempRoot, "uri-empty.zip")
     let manifestPath = Path.Combine(tempRoot, "uri-empty.json")
@@ -111,8 +103,6 @@ let validateCanonicalAssetUriEmptyRejection () = async {
         let message = ReleaseError.message error
         assertTrue "empty assetUri is fail-closed" (message.Contains("assetUri", StringComparison.Ordinal))
 }
-
-// F9: a wrong owner is rejected.
 let validateCanonicalAssetUriWrongOwnerRejection () = async {
     let archivePath = Path.Combine(tempRoot, "uri-wrong.zip")
     let manifestPath = Path.Combine(tempRoot, "uri-wrong.json")
@@ -129,8 +119,6 @@ let validateCanonicalAssetUriWrongOwnerRejection () = async {
         let message = ReleaseError.message error
         assertTrue "mismatched assetUri is fail-closed" (message.Contains("assetUri", StringComparison.Ordinal) || message.Contains("does not match", StringComparison.Ordinal))
 }
-
-// F9: canonical assetUri (masterlifting/mcp-store) is accepted.
 let validateCanonicalAssetUriAccepted () = async {
     let archivePath = Path.Combine(tempRoot, "uri-ok.zip")
     let manifestPath = Path.Combine(tempRoot, "uri-ok.json")
@@ -144,8 +132,6 @@ let validateCanonicalAssetUriAccepted () = async {
         failed <- failed + 1
         failures.Add(sprintf "validateCanonicalAssetUri accepted: %s" (ReleaseError.message error))
 }
-
-// F7: missing manifest fails closed before remote observation.
 let missingManifestRejection () = async {
     let archivePath = Path.Combine(tempRoot, "missing-manifest.zip")
     let manifestPath = Path.Combine(tempRoot, "missing.json")
@@ -161,8 +147,6 @@ let missingManifestRejection () = async {
         let message = ReleaseError.message error
         assertTrue "missing manifest fails closed" (message.Contains("does not exist", StringComparison.Ordinal) || message.Contains("missing", StringComparison.Ordinal))
 }
-
-// F7: missing archive fails closed before remote observation.
 let missingArchiveRejection () = async {
     let archivePath = Path.Combine(tempRoot, "missing-archive.zip")
     let manifestPath = Path.Combine(tempRoot, "missing-archive.json")
@@ -178,8 +162,6 @@ let missingArchiveRejection () = async {
         let message = ReleaseError.message error
         assertTrue "missing archive fails closed" (message.Contains("does not exist", StringComparison.Ordinal) || message.Contains("missing", StringComparison.Ordinal))
 }
-
-// F2: ArchiveAbsent + transport -> published.
 let publishedOnArchiveAbsent () = async {
     let archivePath = Path.Combine(tempRoot, "abs.zip")
     let manifestPath = Path.Combine(tempRoot, "abs.json")
@@ -196,8 +178,6 @@ let publishedOnArchiveAbsent () = async {
         failed <- failed + 1
         failures.Add(sprintf "published on archive absent: %s" (ReleaseError.message error))
 }
-
-// F2: ArchiveMissing (release container missing) -> failed with named reason.
 let failedOnArchiveMissing () = async {
     let archivePath = Path.Combine(tempRoot, "missing-rel.zip")
     let manifestPath = Path.Combine(tempRoot, "missing-rel.json")
@@ -213,8 +193,6 @@ let failedOnArchiveMissing () = async {
         failed <- failed + 1
         failures.Add(sprintf "ArchiveMissing failed: %s" (ReleaseError.message error))
 }
-
-// F2: ArchiveImmutable -> failed with immutable reason.
 let failedOnArchiveImmutable () = async {
     let archivePath = Path.Combine(tempRoot, "imm.zip")
     let manifestPath = Path.Combine(tempRoot, "imm.json")
@@ -230,8 +208,6 @@ let failedOnArchiveImmutable () = async {
         failed <- failed + 1
         failures.Add(sprintf "ArchiveImmutable failed: %s" (ReleaseError.message error))
 }
-
-// F2: DifferentBeyondRevision -> failed with bumped version metadata.
 let failedOnBumpedSdk () = async {
     let publishedPath = Path.Combine(tempRoot, "bump-published.zip")
     let publishedManifest = Path.Combine(tempRoot, "bump-published.json")
@@ -258,8 +234,6 @@ let failedOnBumpedSdk () = async {
         failed <- failed + 1
         failures.Add(sprintf "bumped sdk failed: %s" (ReleaseError.message error))
 }
-
-// F2: ByteIdentical + MetadataObserved matches -> unchanged with published values.
 let unchangedOnByteIdentical () = async {
     let archivePath = Path.Combine(tempRoot, "idem.zip")
     let manifestPath = Path.Combine(tempRoot, "idem.json")
@@ -289,8 +263,6 @@ let unchangedOnByteIdentical () = async {
         failed <- failed + 1
         failures.Add(sprintf "unchanged byte-identical: %s" (ReleaseError.message error))
 }
-
-// F2: RevisionOnlyEquivalent + MetadataObserved matches -> unchanged with both revisions distinct.
 let unchangedOnRevisionOnlyEquivalent () = async {
     let publishedPath = Path.Combine(tempRoot, "rev-pub.zip")
     let publishedManifest = Path.Combine(tempRoot, "rev-pub.json")
@@ -320,8 +292,6 @@ let unchangedOnRevisionOnlyEquivalent () = async {
         failed <- failed + 1
         failures.Add(sprintf "unchanged revision-only: %s" (ReleaseError.message error))
 }
-
-// F2: byte-identical + verified metadata absence -> unchanged with metadataRecoveryNeeded.
 let unchangedWithMetadataRecoveryNeeded () = async {
     let archivePath = Path.Combine(tempRoot, "rec.zip")
     let manifestPath = Path.Combine(tempRoot, "rec.json")
@@ -342,8 +312,6 @@ let unchangedWithMetadataRecoveryNeeded () = async {
         failed <- failed + 1
         failures.Add(sprintf "recovery-needed: %s" (ReleaseError.message error))
 }
-
-// F2: byte-identical + corrupt metadata -> failed (no overwrite, no repair).
 let failedOnMetadataCorrupt () = async {
     let archivePath = Path.Combine(tempRoot, "corrupt-meta.zip")
     let manifestPath = Path.Combine(tempRoot, "corrupt-meta.json")
@@ -369,8 +337,6 @@ let failedOnMetadataCorrupt () = async {
         failed <- failed + 1
         failures.Add(sprintf "MetadataCorrupt failed: %s" (ReleaseError.message error))
 }
-
-// F2: MetadataImmutable -> failed (no repair allowed).
 let failedOnMetadataImmutable () = async {
     let archivePath = Path.Combine(tempRoot, "imm-meta.zip")
     let manifestPath = Path.Combine(tempRoot, "imm-meta.json")
@@ -390,8 +356,6 @@ let failedOnMetadataImmutable () = async {
         failed <- failed + 1
         failures.Add(sprintf "MetadataImmutable failed: %s" (ReleaseError.message error))
 }
-
-// F2: observed metadata whose field mismatches the candidate -> failed with field name.
 let failedOnObservedMetadataFieldMismatch () = async {
     let archivePath = Path.Combine(tempRoot, "mismatch-meta.zip")
     let manifestPath = Path.Combine(tempRoot, "mismatch-meta.json")
@@ -423,8 +387,6 @@ let failedOnObservedMetadataFieldMismatch () = async {
         failed <- failed + 1
         failures.Add(sprintf "field mismatch: %s" (ReleaseError.message error))
 }
-
-// F7: public status set is exactly published|unchanged|failed across representative cases.
 let publicStatusSetIsExhaustive () = async {
     let archivePath = Path.Combine(tempRoot, "status.zip")
     let manifestPath = Path.Combine(tempRoot, "status.json")
@@ -446,10 +408,6 @@ let publicStatusSetIsExhaustive () = async {
             failed <- failed + 1
             failures.Add(sprintf "public status %A %A: %s" archiveState metadataState (ReleaseError.message error))
 }
-
-// observed metadata asset sha MUST differ from the archive sha and MUST be the
-// value carried into PublishedMetadataAssetSha256; production carries it
-// unchanged through the classification site.
 let observedMetadataAssetShaDiffersArchiveShaAndCarried () = async {
     let archivePath = Path.Combine(tempRoot, "sha-carry.zip")
     let manifestPath = Path.Combine(tempRoot, "sha-carry.json")
@@ -478,10 +436,6 @@ let observedMetadataAssetShaDiffersArchiveShaAndCarried () = async {
         failed <- failed + 1
         failures.Add(sprintf "metadata sha carried: %s" (ReleaseError.message error))
 }
-
-// finalizeVerifiedPublication actual production helper: fills archive + metadata
-// REMOTE digests from the verified values; manifest sha + revision come from
-// the validated snapshot already in the resolution.
 let finalizeVerifiedPublicationFillsRemoteDigests () = async {
     let archivePath = Path.Combine(tempRoot, "fin-pub.zip")
     let manifestPath = Path.Combine(tempRoot, "fin-pub.json")
@@ -517,9 +471,6 @@ let finalizeVerifiedPublicationFillsRemoteDigests () = async {
         failed <- failed + 1
         failures.Add(sprintf "finalizeVerifiedPublication: %s" (ReleaseError.message error))
 }
-
-// finalizeRecovery actual production helper: preserves published rev/hash and
-// the current evaluated HEAD; only sets the new metadata asset sha.
 let finalizeRecoveryPreservesVerifiedArchiveFields () = async {
     let archivePath = Path.Combine(tempRoot, "fin-rec.zip")
     let manifestPath = Path.Combine(tempRoot, "fin-rec.json")
@@ -552,10 +503,6 @@ let finalizeRecoveryPreservesVerifiedArchiveFields () = async {
         failed <- failed + 1
         failures.Add(sprintf "finalizeRecovery: %s" (ReleaseError.message error))
 }
-
-// finalizeFailure actual production helper: retains known Render(context) and
-// clears ALL published* fields. The Render comes from the real `evaluate`
-// path (ArchiveMissing branch yields a populated Render without remote reads).
 let finalizeFailureClearsAllPublishedButRetainsRender () = async {
     let archivePath = Path.Combine(tempRoot, "fin-fail.zip")
     let manifestPath = Path.Combine(tempRoot, "fin-fail.json")
@@ -607,11 +554,15 @@ let runSuite () = async {
 
     printfn "evaluate-tests summary: passed=%d failed=%d" passed failed
     Fixture.safeDeleteDir tempRoot
-    if failed > 0 then
-        for line in failures do
-            eprintfn "FAIL: %s" line
-        exit 1
 }
 
-// Standalone entry bridge: the FSI process owns the asynchronous regression suite.
-runSuite () |> Async.RunSynchronously
+
+let tests =
+    testCaseAsync "Evaluate legacy regression assertions" <| async {
+        Directory.CreateDirectory tempRoot |> ignore
+        try
+            do! runSuite ()
+            Expect.equal 0 failed (String.concat Environment.NewLine failures)
+        finally
+            Fixture.safeDeleteDir tempRoot
+    }

@@ -1,11 +1,7 @@
-// role: test entrypoint
-// Upload-transport regression through the `HttpTransport` seam: scripted `HttpMessageHandler` runs the real `gitHubObserver`/`uploadCandidate`/`uploadMetadata`.
-// Post-POST remote observation and the immutable send buffer force every upload to verify the exact remote bytes; assertions count requests and tokens, not just outcomes.
-#load "../../Provenance.fsx"
-#load "../Compare.fsx"
-#load "../Metadata.fsx"
-#load "../Publish.fsx"
-#load "Fixture.fsx"
+module Release.Tests.Publish
+
+open Expecto
+open Release.Tests
 
 open System
 open System.Collections.Generic
@@ -110,8 +106,6 @@ type RecordingHandler(allowHost: string) =
     member _.Captured = captured.ToArray()
 
     override _.SendAsync (request, cancellationToken) = task {
-        // Allow the asset CDN too so the F5 redirect tests can capture the
-        // token-stripped CDN request.
         let allowed = [ "api.github.com"; "uploads.github.com"; "release-assets.githubusercontent.com" ]
         let requestHost = request.RequestUri.Host
         if not (allowed |> List.exists (fun h -> requestHost.EndsWith(h, StringComparison.OrdinalIgnoreCase))) then
@@ -192,8 +186,7 @@ let private transportFromHandler (handler: HttpMessageHandler) : HttpTransport =
       CreateUploadClient = createUpload
       CreateRedirectClient = createRedirect }
 
-let private tempRoot = Fixture.newTempDir "mcp-release-publish-tests"
-
+let private tempRoot = Path.Combine(Path.GetTempPath(), "mcp-release-publish-tests-" + Guid.NewGuid().ToString("N"))
 let private writeCanonicalCandidate (label: string) : string * string =
     let archivePath = Path.Combine(tempRoot, label + ".zip")
     let manifestPath = Path.Combine(tempRoot, label + ".json")
@@ -253,7 +246,61 @@ let private projectionFor (archiveSha: string) (manifestSha: string) : ProducerM
         (Some "11.0.0-rc.1.26425.128")
         (Some "win-x64")
 
-// F5: redirect chain bound and host allowlist.
+let private uploadMetadataUsesProducerOwnedToolchains () = async {
+    let producers =
+        [ "dotnet", "1.2.3", "dotnet-sdk", "dotnet-runtime", "win-x64"
+          "workflow", "4.5.6", "workflow-sdk", "workflow-runtime", "linux-x64" ]
+
+    for componentId, version, sdk, runtime, platform in producers do
+        use handler = new RecordingHandler("api.github.com")
+        let transport = transportFromHandler handler
+        let archiveName = $"v{version}.zip"
+        let assetUri = $"https://github.com/masterlifting/mcp-store/releases/download/{componentId}/{archiveName}"
+        let projection =
+            makeProjection
+                componentId version assetUri archiveName
+                (String.replicate 64 "1") (String.replicate 64 "2") (String.replicate 40 "3")
+                (Some sdk) (Some runtime) (Some platform)
+        let metadataBytes = Encoding.UTF8.GetBytes(render projection)
+        let metadataDigest = sha256Hex metadataBytes
+        let assetName = ReleaseMetadata.metadataAssetName componentId version
+        let locator = { Owner = "owner"; Repository = "repo"; Tag = componentId }
+        let auth = { Token = "sentinel" }
+
+        handler.Queue(Reply(200, [], releaseJson (Some 99L) false []))
+        handler.Queue(Reply(201, [], "{}"))
+        handler.Queue(Reply(200, [], releaseJson (Some 99L) false [ assetName, "sha256:" + metadataDigest, 1L ]))
+        handler.Queue(ReplyBytes(200, [], metadataBytes))
+
+        let uploadWithoutAmbientIdentity () =
+            withEnv "RELEASE_EXPECTED_SDK" None (fun _ ->
+                withEnv "RELEASE_EXPECTED_RUNTIME" None (fun _ ->
+                    withEnv "RELEASE_EXPECTED_PLATFORM" None (fun _ ->
+                        uploadMetadata auth locator projection transport)))
+
+        let! outcome = withUploadFlag (Some "true") (fun _ -> uploadWithoutAmbientIdentity ())
+
+        match outcome with
+        | Ok digest -> assertEqual $"{componentId} metadata upload returns verified bytes" metadataDigest digest
+        | Error error ->
+            failed <- failed + 1
+            failures.Add(sprintf "%s metadata upload with producer-owned toolchain failed: %s" componentId (ReleaseError.message error))
+
+        let posts = handler.Captured |> Array.filter (fun request -> request.Method = "POST")
+        assertEqual $"{componentId} metadata transport issues one POST" 1 posts.Length
+        match posts |> Array.tryHead with
+        | None -> ()
+        | Some request ->
+            assertTrue $"{componentId} metadata request uses its versioned asset" (request.Url.Contains(assetName, StringComparison.Ordinal))
+            match ReleaseMetadata.parse (Encoding.UTF8.GetString request.Body) with
+            | Error error ->
+                failed <- failed + 1
+                failures.Add(sprintf "%s posted metadata could not be parsed: %s" componentId (ReleaseError.message error))
+            | Ok parsed ->
+                assertEqual $"{componentId} metadata body preserves its SDK" (Some sdk) parsed.ProducerSdk
+                assertEqual $"{componentId} metadata body preserves its runtime" (Some runtime) parsed.ProducerRuntime
+                assertEqual $"{componentId} metadata body preserves its platform" (Some platform) parsed.ProducerPlatform
+}
 let observerUnsafeRedirectRejected () = async {
     use handler = new RecordingHandler("api.github.com")
     let transport = transportFromHandler handler
@@ -272,8 +319,6 @@ let observerUnsafeRedirectRejected () = async {
     })
     assertEqual "unsafe redirect issues exactly one request" 1 (Array.length handler.Captured)
 }
-
-// F5: a 302 followed by an exact-permitted authority is followed once and stops at the asset-absent state.
 let observerSafeRedirectObservedAsset () = async {
     use handler = new RecordingHandler("api.github.com")
     let transport = transportFromHandler handler
@@ -291,10 +336,6 @@ let observerSafeRedirectObservedAsset () = async {
     })
     assertEqual "safe redirect issues lookup + follow-up request" 2 (Array.length handler.Captured)
 }
-
-// F5: 301 Moved Permanently is in the production redirect set (301/302/303/307/308).
-// A safe 301 chain to a permitted authority must be followed to the final
-// release state and the token must be sent on every API-originated hop.
 let observerSafe301ChainFollowedToRelease () = async {
     use handler = new RecordingHandler("api.github.com")
     let transport = transportFromHandler handler
@@ -319,8 +360,6 @@ let observerSafe301ChainFollowedToRelease () = async {
     assertTrue "follow-up request carried Authorization"
         (apiRequests.[1].Authorization.Contains("sentinel", StringComparison.Ordinal))
 }
-
-// F3 + F6: idempotent path - remote archive bytes match candidate, no POST.
 let uploadCandidateIdempotentNoPost () = async {
     use handler = new RecordingHandler("api.github.com")
     let transport = transportFromHandler handler
@@ -342,8 +381,6 @@ let uploadCandidateIdempotentNoPost () = async {
     let gets = handler.Captured |> Array.filter (fun c -> c.Method = "GET") |> Array.length
     assertEqual "idempotent issues GET release + GET asset" 2 gets
 }
-
-// F3 + F6: refuse overwrite when remote bytes differ from candidate.
 let uploadCandidateRefusesOverwrite () = async {
     use handler = new RecordingHandler("api.github.com")
     let transport = transportFromHandler handler
@@ -363,8 +400,6 @@ let uploadCandidateRefusesOverwrite () = async {
     let posts = handler.Captured |> Array.filter (fun c -> c.Method = "POST") |> Array.length
     assertEqual "refuse-overwrite issues zero POSTs" 0 posts
 }
-
-// F3 + F6: archive absent -> POST + GET release + GET asset verifies the upload.
 let uploadCandidateSuccessPath () = async {
     use handler = new RecordingHandler("api.github.com")
     let transport = transportFromHandler handler
@@ -397,16 +432,12 @@ let uploadCandidateSuccessPath () = async {
         assertEqual "POST body equals candidate archive" candidateSha payloadSha
     })
 }
-
-// F3: server-side 503 fails closed with <=1 POST (no blind retry).
 let uploadCandidatePostServerErrorNoRetry () = async {
     use handler = new RecordingHandler("api.github.com")
     let transport = transportFromHandler handler
     let archivePath, candidateSha = writeCanonicalCandidate "server-error"
     handler.Queue(Reply(200, [], releaseJson (Some 99L) false []))
     handler.Queue(Reply(503, [], "service unavailable"))
-    // Post-POST probe: surface the remote state as still-absent so the production
-    // call returns the typed 503 message from the POST (not a "queue empty").
     handler.Queue(Reply(200, [], releaseJson (Some 99L) false []))
     do! withUploadFlag (Some "true") (fun _ -> async {
         let auth = { Token = "sentinel" }
@@ -421,19 +452,13 @@ let uploadCandidatePostServerErrorNoRetry () = async {
     assertTrue "503 upload issued at most one POST (no blind retry)" (postCount <= 1)
     ()
 }
-
-// F5: a CDN redirect (release-assets.githubusercontent.com) must drop the
-// Authorization header; the token must NOT be forwarded to the asset CDN.
 let observerCdnRedirectDropsAuthorization () = async {
     use handler = new RecordingHandler("api.github.com")
     let transport = transportFromHandler handler
     let archivePath, candidateSha = writeCanonicalCandidate "cdn-redirect"
     let archiveBytes = File.ReadAllBytes archivePath
-    // getRelease returns the release JSON with an asset whose digest matches.
     handler.Queue(Reply(200, [], releaseJson (Some 99L) false [("v1.0.4.zip", "sha256:" + candidateSha, 1L)]))
-    // downloadAssetBytes receives a 302 redirect to the asset CDN.
     handler.Queue(Reply(302, ["Location", "https://release-assets.githubusercontent.com/asset"], ""))
-    // CDN returns the actual asset bytes.
     handler.Queue(ReplyBytes(200, [], archiveBytes))
     do! withUploadFlag (Some "true") (fun _ -> async {
         let auth = { Token = "sentinel" }
@@ -455,9 +480,6 @@ let observerCdnRedirectDropsAuthorization () = async {
         failed <- failed + 1
         failures.Add("CDN redirect: redirect not followed as expected")
 }
-
-// F5: HTTP (not HTTPS) redirect is rejected so a token cannot leak to a
-// plaintext authority.
 let observerHttpRedirectRejected () = async {
     use handler = new RecordingHandler("api.github.com")
     let transport = transportFromHandler handler
@@ -476,9 +498,6 @@ let observerHttpRedirectRejected () = async {
     })
     assertEqual "http redirect issues exactly one request" 1 (Array.length handler.Captured)
 }
-
-// F5: a suffix host like "api.github.com.attacker.test" is NOT a permitted
-// origin and must be rejected.
 let observerLookalikeSuffixHostRejected () = async {
     use handler = new RecordingHandler("api.github.com")
     let transport = transportFromHandler handler
@@ -496,8 +515,6 @@ let observerLookalikeSuffixHostRejected () = async {
     })
     assertEqual "lookalike redirect issues exactly one request" 1 (Array.length handler.Captured)
 }
-
-// F5: a non-default port redirect (api.github.com:8443) is rejected.
 let observerNonDefaultPortRejected () = async {
     use handler = new RecordingHandler("api.github.com")
     let transport = transportFromHandler handler
@@ -515,8 +532,6 @@ let observerNonDefaultPortRejected () = async {
     })
     assertEqual "non-default port redirect issues exactly one request" 1 (Array.length handler.Captured)
 }
-
-// F5: a userinfo (user@host) redirect is rejected.
 let observerUserInfoRejected () = async {
     use handler = new RecordingHandler("api.github.com")
     let transport = transportFromHandler handler
@@ -534,10 +549,6 @@ let observerUserInfoRejected () = async {
     })
     assertEqual "userinfo redirect issues exactly one request" 1 (Array.length handler.Captured)
 }
-
-// F5: 303 and 307 and 308 are explicitly supported; the chain bound (5) is
-// respected. We send 4 redirects that all point at a permitted origin and
-// then a release with no asset; the observer must follow them all.
 let observerFollows303Then307Then308ThenRelease () = async {
     use handler = new RecordingHandler("api.github.com")
     let transport = transportFromHandler handler
@@ -557,8 +568,6 @@ let observerFollows303Then307Then308ThenRelease () = async {
     })
     assertEqual "redirect chain of 4 issues 4 requests" 4 (Array.length handler.Captured)
 }
-
-// F5: a redirect chain exceeding the bound (5) fails closed.
 let observerChainBoundRejected () = async {
     use handler = new RecordingHandler("api.github.com")
     let transport = transportFromHandler handler
@@ -578,8 +587,6 @@ let observerChainBoundRejected () = async {
     })
     assertEqual "chain bound issues exactly 6 requests (initial + 5 redirects)" 6 (Array.length handler.Captured)
 }
-
-// F3: post-timeout readback bytes and digest are the verified actual bytes.
 let uploadCandidatePostTimeoutReadsBackVerifiedBytes () = async {
     use handler = new RecordingHandler("api.github.com")
     let transport = transportFromHandler handler
@@ -587,7 +594,6 @@ let uploadCandidatePostTimeoutReadsBackVerifiedBytes () = async {
     let archiveBytes = File.ReadAllBytes archivePath
     handler.Queue(Reply(200, [], releaseJson (Some 99L) false []))
     handler.Queue(Hang)
-    // Post-timeout probe: the remote now carries the asset; verify digest + bytes.
     handler.Queue(Reply(200, [], releaseJson (Some 99L) false [("v1.0.4.zip", "sha256:" + candidateSha, 1L)]))
     handler.Queue(ReplyBytes(200, [], archiveBytes))
     do! withUploadFlag (Some "true") (fun _ -> async {
@@ -605,9 +611,6 @@ let uploadCandidatePostTimeoutReadsBackVerifiedBytes () = async {
     let posts = captured |> Array.filter (fun c -> c.Method = "POST") |> Array.length
     assertEqual "post-timeout issues exactly one POST" 1 posts
 }
-
-// F3: timeout after the POST issues a bounded remote read to confirm whether
-// the upload landed; a bare timeout error is not a verified outcome.
 let uploadCandidateAmbiguousPostMustObserveRemote () = async {
     use handler = new RecordingHandler("api.github.com")
     let transport = transportFromHandler handler
@@ -629,8 +632,6 @@ let uploadCandidateAmbiguousPostMustObserveRemote () = async {
     assertTrue "ambiguous POST issues exactly one POST" (posts = 1)
     assertTrue "ambiguous POST issues at least 3 GETs (lookup + post-POST lookup + post-POST asset)" (gets >= 3)
 }
-
-// F6: snapshot digest mismatch prevents upload before any request is made.
 let uploadCandidateSnapshotMismatchZeroRequests () = async {
     use handler = new RecordingHandler("api.github.com")
     let transport = transportFromHandler handler
@@ -647,9 +648,6 @@ let uploadCandidateSnapshotMismatchZeroRequests () = async {
     })
     assertEqual "snapshot mismatch issues zero requests" 0 (Array.length handler.Captured)
 }
-
-// F1: metadata POST targets the canonical metadata asset name (e.g. dotnet-1.0.4-metadata.json),
-// not the archive name (v1.0.4.zip).
 let uploadMetadataTargetsMetadataAssetName () = async {
     use handler = new RecordingHandler("api.github.com")
     let transport = transportFromHandler handler
@@ -680,9 +678,6 @@ let uploadMetadataTargetsMetadataAssetName () = async {
     let postedSha = sha256Hex posts.[0].Body
     assertEqual "POST body equals rendered projection" renderedSha postedSha
 }
-
-// F5: archives-success/metadata-fail surfaces as a typed failure; metadata upload
-// is the next-step recovery target, not a silent no-op.
 let archiveSuccessThenMetadataFailure () = async {
     use handler = new RecordingHandler("api.github.com")
     let transport = transportFromHandler handler
@@ -699,7 +694,6 @@ let archiveSuccessThenMetadataFailure () = async {
     handler.Queue(ReplyBytes(200, [], archiveBytes))
     handler.Queue(Reply(200, [], releaseJson (Some 99L) false []))
     handler.Queue(Reply(404, [], "metadata-missing"))
-    // Post-POST probe to surface the postOutcome Error
     handler.Queue(Reply(200, [], releaseJson (Some 99L) false []))
     do! withUploadFlag (Some "true") (fun _ -> async {
         let auth = { Token = "sentinel" }
@@ -734,15 +728,20 @@ let runSuite () = async {
     do! uploadCandidateSnapshotMismatchZeroRequests ()
     do! uploadCandidatePostTimeoutReadsBackVerifiedBytes ()
     do! uploadMetadataTargetsMetadataAssetName ()
+    do! uploadMetadataUsesProducerOwnedToolchains ()
     do! archiveSuccessThenMetadataFailure ()
 
     printfn "publish summary: passed=%d failed=%d" passed failed
     Fixture.safeDeleteDir tempRoot
-    if failed > 0 then
-        for line in failures do
-            eprintfn "FAIL: %s" line
-        exit 1
 }
 
-// Standalone entry bridge: the FSI process owns the asynchronous regression suite.
-runSuite () |> Async.RunSynchronously
+
+let tests =
+    testCaseAsync "Publish legacy regression assertions" <| async {
+        Directory.CreateDirectory tempRoot |> ignore
+        try
+            do! runSuite ()
+            Expect.equal 0 failed (String.concat Environment.NewLine failures)
+        finally
+            Fixture.safeDeleteDir tempRoot
+    }

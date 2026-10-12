@@ -4,10 +4,6 @@
 // Archive/metadata bytes are snapshotted and re-hashed before any POST, and every POST is confirmed by re-observing the remote.
 module ReleasePublish
 
-#load "../Provenance.fsx"
-#load "Compare.fsx"
-#load "Metadata.fsx"
-
 open System
 open System.IO
 open System.Net
@@ -210,6 +206,31 @@ let private parseDigest (digest: string) : string =
     else
         ""
 
+// Single strict verifier shared by the GitHub observer, the metadata observer, and the upload/readback probe; bytes verify is never optional.
+let private verifyAssetDigest
+    (assetName: string)
+    (claimedDigest: string)
+    (remoteBytes: byte[])
+    : Result<unit, ReleaseError> =
+    let parsed = parseDigest claimedDigest
+
+    if String.IsNullOrEmpty parsed then
+        Error(
+            MalformedArtifact(
+                "release",
+                $"the API-reported digest '{claimedDigest}' is not a recognized sha256:hex format"))
+    else
+        let actual = sha256Hex remoteBytes
+
+        if parsed <> actual then
+            Error(
+                FileFailure(
+                    "verify",
+                    assetName,
+                    $"downloaded asset SHA-256 ({actual}) does not match the API-reported digest ({parsed})"))
+        else
+            Ok()
+
 let private tryProperty (element: JsonElement) (name: string) : JsonElement option =
     let mutable found = None
 
@@ -404,41 +425,25 @@ let gitHubObserver (auth: AuthToken) (downloadDir: string) (transport: HttpTrans
                     | Error error -> return Error error
                     | Ok None -> return Ok Absent
                     | Ok (Some (claimedDigest, assetId)) ->
-                        let expectedDigest = parseDigest claimedDigest
-
-                        if String.IsNullOrEmpty expectedDigest then
-                            return
-                                Error(
-                                    MalformedArtifact(
-                                        "release",
-                                        $"the API-reported digest '{claimedDigest}' is not a recognized sha256:hex format"))
-                        else
-                            match! downloadAssetBytes transport auth locator assetId ReleaseArchive.maxArchiveBytes with
+                        match! downloadAssetBytes transport auth locator assetId ReleaseArchive.maxArchiveBytes with
+                        | Error error -> return Error error
+                        | Ok bytes ->
+                            match verifyAssetDigest assetName claimedDigest bytes with
                             | Error error -> return Error error
-                            | Ok bytes ->
-                                let actual = sha256Hex bytes
+                            | Ok () ->
+                                if not (Directory.Exists downloadDir) then
+                                    Directory.CreateDirectory downloadDir |> ignore
 
-                                if actual <> expectedDigest then
-                                    return
-                                        Error(
-                                            FileFailure(
-                                                "verify",
-                                                assetName,
-                                                $"downloaded asset SHA-256 ({actual}) does not match the API-reported digest ({expectedDigest})"))
-                                else
-                                    if not (Directory.Exists downloadDir) then
-                                        Directory.CreateDirectory downloadDir |> ignore
+                                let targetPath = Path.Combine(downloadDir, assetName)
 
-                                    let targetPath = Path.Combine(downloadDir, assetName)
+                                if File.Exists targetPath then
+                                    File.Delete targetPath
 
-                                    if File.Exists targetPath then
-                                        File.Delete targetPath
+                                File.WriteAllBytes(targetPath, bytes)
 
-                                    File.WriteAllBytes(targetPath, bytes)
-
-                                    match! ReleaseCompare.observe targetPath with
-                                    | Error error -> return Error error
-                                    | Ok observation -> return Ok(Observed observation)
+                                match! ReleaseCompare.observe targetPath with
+                                | Error error -> return Error error
+                                | Ok observation -> return Ok(Observed observation)
             } }
 
 // The compressed candidate is validated as a real archive before it is ever sent.
@@ -505,26 +510,21 @@ let private probe
                 match! downloadAssetBytes transport auth locator assetId maxBytes with
                 | Error error -> return Error error
                 | Ok remoteBytes ->
-                    let remoteDigest = sha256Hex remoteBytes
-
-                    if remoteDigest <> expectedDigest then
-                        return
-                            Error(
-                                FileFailure(
-                                    "upload",
-                                    assetName,
-                                    $"the {locator.Tag} release already carries '{assetName}'; the remote digest {remoteDigest} does not match the candidate digest {expectedDigest}, refusing to overwrite"))
-                    elif remoteBytes <> expectedBytes then
-                        return
-                            Error(
-                                FileFailure(
-                                    "upload",
-                                    assetName,
-                                    $"the {locator.Tag} release already carries '{assetName}'; the remote bytes differ from the candidate bytes, refusing to overwrite"))
-                    else
-                        match! verify remoteBytes with
-                        | Error error -> return Error error
-                        | Ok() -> return Ok(AssetVerified remoteDigest)
+                    // The API-reported digest must parse and match the downloaded bytes before any byte-level or verification step runs.
+                    match verifyAssetDigest assetName claimedDigest remoteBytes with
+                    | Error error -> return Error error
+                    | Ok () ->
+                        if remoteBytes <> expectedBytes then
+                            return
+                                Error(
+                                    FileFailure(
+                                        "upload",
+                                        assetName,
+                                        $"the {locator.Tag} release already carries '{assetName}'; the remote bytes differ from the candidate bytes, refusing to overwrite"))
+                        else
+                            match! verify remoteBytes with
+                            | Error error -> return Error error
+                            | Ok() -> return Ok(AssetVerified (sha256Hex remoteBytes))
     }
 
 // Snapshot bytes, recompute the digest, then publish and re-observe: the exact sent buffer must be observable remotely.
@@ -667,31 +667,16 @@ let gitHubMetadataObserver (auth: AuthToken) (downloadDir: string) (transport: H
                     | Error error -> return Error error
                     | Ok None -> return Ok MetadataAbsent
                     | Ok (Some (claimedDigest, assetId)) ->
-                        let expectedDigest = parseDigest claimedDigest
-
-                        if String.IsNullOrEmpty expectedDigest then
-                            return
-                                Error(
-                                    MalformedArtifact(
-                                        "metadata",
-                                        $"the API-reported digest '{claimedDigest}' is not a recognized sha256:hex format"))
-                        else
-                            match! downloadAssetBytes transport auth locator assetId maxMetadataAssetBytes with
+                        match! downloadAssetBytes transport auth locator assetId maxMetadataAssetBytes with
+                        | Error error -> return Error error
+                        | Ok bytes ->
+                            match verifyAssetDigest assetName claimedDigest bytes with
                             | Error error -> return Error error
-                            | Ok bytes ->
+                            | Ok () ->
                                 let actualDigest = sha256Hex bytes
+                                let body = Encoding.UTF8.GetString bytes
 
-                                if actualDigest <> expectedDigest then
-                                    return
-                                        Error(
-                                            FileFailure(
-                                                "verify",
-                                                assetName,
-                                                $"downloaded metadata SHA-256 ({actualDigest}) does not match the API-reported digest ({expectedDigest})"))
-                                else
-                                    let body = Encoding.UTF8.GetString bytes
-
-                                    match ReleaseMetadata.parse body with
-                                    | Error error -> return Error error
-                                    | Ok parsed -> return Ok(MetadataObserved(body, actualDigest, parsed))
+                                match ReleaseMetadata.parse body with
+                                | Error error -> return Error error
+                                | Ok parsed -> return Ok(MetadataObserved(body, actualDigest, parsed))
             } }

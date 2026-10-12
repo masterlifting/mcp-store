@@ -1,15 +1,39 @@
 # role: entrypoint/command
-# Strict, read-only FCS typecheck of the producer release entrypoints and their full #load closure.
+# Strict, read-only FCS typecheck of the release-path scripts that no compiled project build covers; targets derive from the enrollment roster, and the compiled modules and compiled regression project are typed by their own builds.
 # The generated probe (with its SDK #r reference) is written under RUNNER_TEMP, outside the repository, so the in-repo analyzer's #r constraint is never violated; targets are read and type-checked as text only and are never evaluated.
 
 [CmdletBinding()]
 param(
     [string]$Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path,
     [string]$SdkVersion = "",
-    [string[]]$Targets = @("dotnet/release/Release.fsx", "workflow/release/Release.fsx")
+    [string[]]$Targets = @()
 )
 
 $ErrorActionPreference = "Stop"
+
+. (Join-Path $PSScriptRoot "Roster.ps1")
+
+# Targets derive from the enrollment roster so no participation list is restated here; an explicit -Targets run still wins.
+function Get-RosterTargets {
+    $derived = New-Object System.Collections.Generic.List[string]
+
+    foreach ($entry in (Get-ReleaseRoster -Root $Root)) {
+        # Producer entrypoints sit beside the roster's canonical config; nothing else is assumed about them.
+        $configDirectory = [System.IO.Path]::GetDirectoryName($entry.configPath).Replace('\', '/')
+        $componentRoot = [System.IO.Path]::GetDirectoryName($configDirectory).Replace('\', '/')
+        $derived.Add("$configDirectory/Build.fsx")
+        $derived.Add("$configDirectory/Pins.fsx")
+        $derived.Add("$componentRoot/tests/DistributionTests.fsx")
+    }
+
+    return $derived
+}
+
+if (-not $Targets -or $Targets.Count -eq 0) {
+    # Scripts the roster does not name (pre-SDK bootstrap, producer provenance contract) still need the strict gate.
+    $fixed = @("infrastructure/release/Bootstrap.fsx", "dotnet/tests/ProvenanceTests.fsx")
+    $Targets = @(@($fixed) + @(Get-RosterTargets) | Sort-Object -Unique)
+}
 
 if (-not $Targets -or $Targets.Count -eq 0) {
     throw "no typecheck targets supplied; a zero-target run is not a pass"

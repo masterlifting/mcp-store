@@ -4,8 +4,6 @@
 // so the script surface and the binary enter the same async boundary.
 module ReleaseCapture
 
-#load "../Provenance.fsx"
-
 open System
 open System.Diagnostics
 open System.IO

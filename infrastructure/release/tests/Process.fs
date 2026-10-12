@@ -1,4 +1,3 @@
-// role: test helper
 module ReleaseTestProcess
 
 open System

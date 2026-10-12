@@ -10,15 +10,18 @@
     <DebugType>None</DebugType>
     <DebugSymbols>false</DebugSymbols>
   </PropertyGroup>
-  <!-- Bootstrap.fsx is excluded: compiling its top-level `Async.RunSynchronously` into the runner's `<Module>` cctor hangs Main on net11.0 RC. -->
+  <!-- Bootstrap.fsx is excluded: compiling its top-level `Async.RunSynchronously` into the runner's `<Module>` cctor hangs Main on net11.0 RC. The same .fs sources are #load`ed by the producer packaging scripts (Build.fsx, Pins.fsx) and the regression tests under tests/*.fsx. -->
   <ItemGroup>
-    <Compile Include="../../infrastructure/Provenance.fsx" />
-    <Compile Include="Archive.fsx" />
-    <Compile Include="Compare.fsx" />
-    <Compile Include="Metadata.fsx" />
-    <Compile Include="Publish.fsx" />
-    <Compile Include="Evaluate.fsx" />
-    <Compile Include="Capture.fsx" />
+    <Compile Include="../../infrastructure/Provenance.fs" />
+    <Compile Include="Archive.fs" />
+    <Compile Include="Compare.fs" />
+    <Compile Include="Metadata.fs" />
+    <Compile Include="Publish.fs" />
+    <Compile Include="Evaluate.fs" />
+    <Compile Include="Capture.fs" />
+    <Compile Include="Enrollment.fs" />
+    <Compile Include="Transaction.fs" />
+    <Compile Include="Orchestration.fs" />
     <Compile Include="Runner.fs" />
   </ItemGroup>
 </Project>

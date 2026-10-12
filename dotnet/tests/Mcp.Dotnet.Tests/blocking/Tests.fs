@@ -6,6 +6,15 @@ open Expecto
 open Mcp.Dotnet.Tests.SyncOverAsyncChecker
 open Mcp.Dotnet.Tests.Support
 
+let private withTempRoot (run: string -> unit) =
+    let root = Path.Combine(Path.GetTempPath(), "mcp-checker", Guid.NewGuid().ToString("N"))
+    Directory.CreateDirectory root |> ignore
+
+    try
+        run root
+    finally
+        if Directory.Exists root then Directory.Delete(root, true)
+
 let private fixtureTests =
     testList "source scanner fixtures" [
         testCase "task.Result and parameterless task.Wait are detected" <| fun _ ->
@@ -160,13 +169,22 @@ let literalCalls = @"pendingTask.Result pendingTask.Wait()"
             let duplicate = documented + "runAgain () |> Async.RunSynchronously\n"
             Expect.equal (violations (checkText "workflow/tests/TaskGet.fsx" duplicate) |> List.length) 2 "more than one bridge in a flow is rejected"
 
+        testCase "compiled release runner allows only its two exact CLI bridges" <| fun _ ->
+            let root = repositoryRoot ()
+            let relative = "infrastructure/release/Runner.fs"
+            let source = File.ReadAllText(Path.Combine(root, "infrastructure", "release", "Runner.fs"))
+            Expect.isEmpty (violations (checkText relative source)) "the two documented host-boundary branches are allowed"
+
+            let extraBridge = source + Environment.NewLine + "let unexpected () = Async.RunSynchronously(work)"
+            let blocked = checkText relative extraBridge |> violations
+            Expect.equal (blocked |> List.map _.Pattern) [ "Async.RunSynchronously"; "Async.RunSynchronously"; "Async.RunSynchronously" ] "an extra bridge invalidates the exact allowlist"
+
         testCase "ordinary inline comments cannot exempt blocking calls" <| fun _ ->
             let source = "// SYNC-OVER-ASYNC-ALLOW: no suppression syntax exists\ntask.Wait()\n"
             Expect.equal (violations (checkText "sample.fs" source) |> List.length) 1 "inline comment is not an exemption"
 
         testCase "generated output directories are excluded, active code is scanned" <| fun _ ->
-            let root = Path.Combine(Path.GetTempPath(), "mcp-checker", Guid.NewGuid().ToString("N"))
-            try
+            withTempRoot (fun root ->
                 let generated = Path.Combine(root, "workflow", "obj")
                 Directory.CreateDirectory generated |> ignore
                 File.WriteAllText(Path.Combine(generated, "Generated.fs"), "task.Result")
@@ -174,8 +192,42 @@ let literalCalls = @"pendingTask.Result pendingTask.Wait()"
                 let findings = checkTree root |> violations
                 Expect.equal findings.Length 1 "only active source is scanned"
                 Expect.equal (Path.GetFileName findings.Head.Path) "active.fs" "active path is reported"
-            finally
-                if Directory.Exists root then Directory.Delete(root, true)
+            )
+
+        testCase "primary checkout marker and ordinary subdirectories remain in scope" <| fun _ ->
+            withTempRoot (fun root ->
+                File.WriteAllText(Path.Combine(root, ".git"), String.Empty)
+                let ordinary = Path.Combine(root, "ordinary")
+                Directory.CreateDirectory ordinary |> ignore
+                File.WriteAllText(Path.Combine(root, "active.fs"), "task.Result")
+                File.WriteAllText(Path.Combine(ordinary, "Nested.fs"), "task.Wait()")
+
+                let findings = checkTree root |> violations
+                Expect.equal
+                    (findings |> List.map (fun finding -> finding.Path, finding.Pattern))
+                    [ "active.fs", "Task.Result"
+                      "ordinary/Nested.fs", "Task.Wait" ]
+                    "the primary checkout marker is not inspected and ordinary source remains blocking"
+            )
+
+        testCase "descendant checkout with a .git file is outside the scanned source tree" <| fun _ ->
+            withTempRoot (fun root ->
+                let checkout = Path.Combine(root, "foreign-checkout")
+                Directory.CreateDirectory checkout |> ignore
+                File.WriteAllText(Path.Combine(checkout, ".git"), String.Empty)
+                File.WriteAllText(Path.Combine(checkout, "Foreign.fs"), "task.Result")
+
+                Expect.isEmpty (checkTree root |> violations) "source under a nested Git checkout is not this repository's source"
+            )
+
+        testCase "descendant checkout with a .git directory is outside the scanned source tree" <| fun _ ->
+            withTempRoot (fun root ->
+                let checkout = Path.Combine(root, "foreign-checkout")
+                Directory.CreateDirectory(Path.Combine(checkout, ".git")) |> ignore
+                File.WriteAllText(Path.Combine(checkout, "Foreign.fsx"), "task.Wait()")
+
+                Expect.isEmpty (checkTree root |> violations) "source under a nested Git checkout is not this repository's source"
+            )
     ]
 
 let private repositorySurfaceTests =
@@ -188,7 +240,7 @@ let private repositorySurfaceTests =
                 |> List.exists (fun path ->
                     String.Equals(
                         Path.GetRelativePath(root, path).Replace('\\', '/'),
-                        "infrastructure/Provenance.fsx",
+                        "infrastructure/Provenance.fs",
                         StringComparison.Ordinal
                     ))
             let hasDotnet = allFiles |> List.exists (fun path -> path.Contains("dotnet", StringComparison.OrdinalIgnoreCase))

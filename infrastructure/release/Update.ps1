@@ -1,29 +1,28 @@
 # role: entrypoint/command
 # Projects canonical SDK/runtime/platform before any SDK install and verifies the executing toolchain after install.
-# Canonical `*/release/Config.fsx` stays the only value source; no table is restated in YAML or global.json.
-# The release transaction, comparison, and upload live in the F# modules, not here.
+# `Participants.json` is the only enrollment authority: the projection, the component list and the workflow matrix derive from it, and `*/release/Config.fsx` stays the only value source.
+# The shared SDK/runtime/platform equality check belongs to this bootstrap guard only; the transaction and runner never require one global toolchain identity.
 
 [CmdletBinding(DefaultParameterSetName = "Project")]
 param(
-    [Parameter(Mandatory = $true, ParameterSetName = "Verify")]
-    [ValidateSet("dotnet", "workflow")]
-    [string]$Component,
+    [Parameter(ParameterSetName = "Verify")]
+    [string]$Component = "",
 
     [Parameter(Mandatory = $true, ParameterSetName = "Project")]
     [switch]$Project,
 
     [Parameter(Mandatory = $true, ParameterSetName = "Verify")]
-    [switch]$Verify
+    [switch]$Verify,
+
+    [string]$Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 )
 
 $ErrorActionPreference = "Stop"
 
-$repoRoot = if ($PSScriptRoot) { Resolve-Path (Join-Path $PSScriptRoot "..\..") } else { (Get-Location).Path }
-$bootstrapScript = Join-Path $repoRoot "infrastructure\release\Bootstrap.fsx"
-$producers = @(
-    @{ Key = "dotnet"; Config = Join-Path $repoRoot "dotnet\release\Config.fsx" },
-    @{ Key = "workflow"; Config = Join-Path $repoRoot "workflow\release\Config.fsx" }
-)
+. (Join-Path $PSScriptRoot "Roster.ps1")
+
+$rosterPath = Join-Path $Root "infrastructure\release\Participants.json"
+$bootstrapScript = Join-Path $Root "infrastructure\release\Bootstrap.fsx"
 
 # Exact-one-literal match; Bootstrap.fsx cross-checks this projection against the evaluated config.
 function Read-CanonicalLiteral {
@@ -52,27 +51,31 @@ function Read-CanonicalLiteral {
 }
 
 function Get-Projection {
+    param([Parameter(Mandatory = $true)][object[]]$Roster)
+
     $result = @{}
     $columns = @("sdkVersion", "runtimeVersion", "platform")
 
-    foreach ($producer in $producers) {
+    foreach ($entry in $Roster) {
+        $configPath = Join-Path $Root $entry.configPath
         $fields = @{}
         # archiveName/assetUri are F# interpolations; Bootstrap.fsx emits them after install.
         foreach ($name in @("componentId", "version", "entryDll") + $columns) {
-            $fields[$name] = Read-CanonicalLiteral -ConfigPath $producer.Config -Name $name
+            $fields[$name] = Read-CanonicalLiteral -ConfigPath $configPath -Name $name
         }
 
-        if ($fields["componentId"] -ne $producer.Key) {
-            throw "componentId '$($fields['componentId'])' in $($producer.Config) does not match producer key '$($producer.Key)'"
+        # A config whose identity contradicts the roster entry for the same path is drift, not policy.
+        if ($fields["componentId"] -ne $entry.componentId) {
+            throw "componentId '$($fields['componentId'])' in $($entry.configPath) does not match roster participant '$($entry.componentId)'"
         }
 
-        $result[$producer.Key] = $fields
+        $result[$entry.componentId] = $fields
     }
 
     foreach ($name in $columns) {
-        $distinct = @($producers | ForEach-Object { $result[$_.Key][$name] } | Sort-Object -Unique)
+        $distinct = @($Roster | ForEach-Object { $result[$_.componentId][$name] } | Sort-Object -Unique)
         if ($distinct.Count -ne 1) {
-            throw "producers disagree on canonical '$name': $($distinct -join ', ')"
+            throw "participants disagree on canonical '$name': $($distinct -join ', ')"
         }
         $result[$name] = $distinct[0]
     }
@@ -94,7 +97,9 @@ function Write-KeyValue {
     }
 }
 
-$projection = Get-Projection
+$roster = Get-ReleaseRoster -Root $Root
+$componentIds = @($roster | ForEach-Object { $_.componentId })
+$projection = Get-Projection -Roster $roster
 $sdk = $projection["sdkVersion"]
 $runtime = $projection["runtimeVersion"]
 $platform = $projection["platform"]
@@ -104,25 +109,35 @@ $summary = [ordered]@{
     "RELEASE_RUNTIME" = $runtime
     "RELEASE_PLATFORM" = $platform
 }
-foreach ($producer in $producers) {
-    $fields = $projection[$producer.Key]
-    $upper = $producer.Key.ToUpperInvariant()
+foreach ($componentId in $componentIds) {
+    $fields = $projection[$componentId]
+    $upper = $componentId.ToUpperInvariant()
     $summary["RELEASE_${upper}_VERSION"] = $fields["version"]
     $summary["RELEASE_${upper}_ENTRY"] = $fields["entryDll"]
 }
 
 if ($Project) {
-    Write-Host "# projected canonical toolchain (no F# evaluation)"
+    Write-Host "# projected canonical toolchain and roster participants (no F# evaluation)"
+    # The matrix is projected as JSON so the workflow carries no participation list of its own.
+    $componentsJson = ConvertTo-Json -Compress -InputObject $componentIds
     if ($env:GITHUB_OUTPUT) {
         Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "sdk=$sdk"
         Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "runtime=$runtime"
         Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "platform=$platform"
+        Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "components=$componentsJson"
     } else {
         Write-Host "GITHUB_OUTPUT is not set; projecting to stdout only (local validation mode)"
     }
     Write-KeyValue -Pairs $summary
     exit 0
 }
+
+# Reject an unlisted target before any bootstrap work so an inventory mismatch fails the job, not the transaction.
+if ($Component -and ($componentIds -notcontains $Component)) {
+    throw "component '$Component' is not enrolled in $rosterPath; refusing to verify an unlisted participant"
+}
+
+$componentLabel = if ($Component) { $Component } else { "all roster participants" }
 
 # Export the projection so Bootstrap.fsx can assert projection == evaluated config == executing toolchain.
 if (-not (Test-Path -LiteralPath $bootstrapScript)) {
@@ -133,7 +148,7 @@ $env:RELEASE_EXPECTED_SDK = $sdk
 $env:RELEASE_EXPECTED_RUNTIME = $runtime
 $env:RELEASE_EXPECTED_PLATFORM = $platform
 
-Write-Host "running toolchain verification: $bootstrapScript (component=$Component)"
+Write-Host "running toolchain verification: $bootstrapScript (component=$componentLabel)"
 $bootstrapOutput = & dotnet fsi $bootstrapScript 2>&1
 $bootstrapExit = $LASTEXITCODE
 
@@ -165,5 +180,5 @@ if ($env:GITHUB_ENV) {
     Write-Host "GITHUB_ENV is not set; skipping environment write (local validation mode)"
 }
 
-Write-Host "toolchain verification complete for component=$Component"
+Write-Host "toolchain verification complete for component=$componentLabel"
 exit 0

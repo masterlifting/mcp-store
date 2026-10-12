@@ -4,8 +4,6 @@
 // Pure: no remote I/O, no producer runtime; the test seam for metadata consistency.
 module ReleaseMetadata
 
-#load "../Provenance.fsx"
-
 open System
 open System.IO
 open System.Security.Cryptography

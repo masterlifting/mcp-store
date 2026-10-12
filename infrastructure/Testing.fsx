@@ -4,7 +4,7 @@
 // exception while only effectful acquisition is asynchronous and Result-valued.
 module DistributionTestHelper
 
-#load "Provenance.fsx"
+#load "Provenance.fs"
 
 open System
 open System.IO

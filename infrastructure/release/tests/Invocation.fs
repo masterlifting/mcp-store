@@ -1,7 +1,7 @@
-// role: test entrypoint
-// Real `Bootstrap.fsx` invocation as a child process; negative cases enforce a wrong SDK/runtime/platform projection through `RELEASE_EXPECTED_*` env overrides.
-#load "../../Provenance.fsx"
-#load "Process.fsx"
+module Release.Tests.Invocation
+
+open Expecto
+open Release.Tests
 
 open System
 open System.Diagnostics
@@ -38,9 +38,6 @@ let private runProcessCapture (executable: string) (args: string list) (workingD
     info.CreateNoWindow <- true
     for a in args do info.ArgumentList.Add(a)
     capture timeoutMs info
-
-// Run the actual `dotnet fsi infrastructure/release/Bootstrap.fsx` and
-// verify the rendered summary lines against the canonical contract.
 let bootstrapRendersCanonicalSummary () = async {
     match! runProcessCapture "dotnet" [ "fsi"; "--nologo"; bootstrapPath ] repoRoot 60000 with
     | Error error ->
@@ -65,12 +62,6 @@ let bootstrapRendersCanonicalSummary () = async {
         assertTrue "bootstrap emits RELEASE_WORKFLOW_VERSION line" hasWorkflowVersion
         assertTrue "bootstrap emits RELEASE_WORKFLOW_ARCHIVE line" hasWorkflowArchive
 }
-
-// Negative enforcement at the boundary: a wrong SDK value projected
-// from `RELEASE_EXPECTED_SDK` causes `Bootstrap.fsx`'s verify path to
-// assert the executing SDK identity and surface an `IdentityMismatch`
-// ReleaseError. The test sets the env var to a value that does not
-// match the canonical SDK and observes the typed failure.
 let bootstrapRefusesWrongSdk () = async {
     let prior = Environment.GetEnvironmentVariable "RELEASE_EXPECTED_SDK"
     Environment.SetEnvironmentVariable("RELEASE_EXPECTED_SDK", "9.9.9-fake-test")
@@ -80,10 +71,6 @@ let bootstrapRefusesWrongSdk () = async {
             failed <- failed + 1
             failures.Add(sprintf "bootstrap wrong-sdk: invocation failed: %s" error)
         | Ok(exit, _, stderr) ->
-            // Bootstrap.fsx `verify` reports IdentityMismatch and
-            // calls failwith (exit non-zero); the test asserts exit<>0.
-            // Different mismatch sources may surface varied failure
-            // shapes; we only assert the fail-closed result.
             if exit = 0 then
                 failed <- failed + 1
                 failures.Add(sprintf "bootstrap wrong-sdk: exit=0 (expected non-zero); stderr=%s" stderr)
@@ -92,8 +79,6 @@ let bootstrapRefusesWrongSdk () = async {
     finally
         Environment.SetEnvironmentVariable("RELEASE_EXPECTED_SDK", prior)
 }
-
-// Negative enforcement: wrong runtime moniker version.
 let bootstrapRefusesWrongRuntime () = async {
     let prior = Environment.GetEnvironmentVariable "RELEASE_EXPECTED_RUNTIME"
     Environment.SetEnvironmentVariable("RELEASE_EXPECTED_RUNTIME", "9.9.9-fake-runtime")
@@ -111,8 +96,6 @@ let bootstrapRefusesWrongRuntime () = async {
     finally
         Environment.SetEnvironmentVariable("RELEASE_EXPECTED_RUNTIME", prior)
 }
-
-// Negative enforcement: wrong platform.
 let bootstrapRefusesWrongPlatform () = async {
     let prior = Environment.GetEnvironmentVariable "RELEASE_EXPECTED_PLATFORM"
     Environment.SetEnvironmentVariable("RELEASE_EXPECTED_PLATFORM", "fake-os-x86")
@@ -138,11 +121,11 @@ let runSuite () = async {
     do! bootstrapRefusesWrongPlatform ()
 
     printfn "bootstrap-invocation-tests summary: passed=%d failed=%d" passed failed
-    if failed > 0 then
-        for line in failures do
-            eprintfn "FAIL: %s" line
-        exit 1
 }
 
-// Standalone entry bridge: the FSI process owns the asynchronous regression suite.
-runSuite () |> Async.RunSynchronously
+
+let tests =
+    testCaseAsync "Invocation legacy regression assertions" <| async {
+        do! runSuite ()
+        Expect.equal 0 failed (String.concat Environment.NewLine failures)
+    }

@@ -4,12 +4,6 @@
 // Public statuses are limited to published|unchanged|failed.
 module ReleaseEvaluate
 
-#load "../Provenance.fsx"
-#load "Archive.fsx"
-#load "Compare.fsx"
-#load "Metadata.fsx"
-#load "Publish.fsx"
-
 open System
 open System.IO
 open System.Security.Cryptography
@@ -140,7 +134,6 @@ let private renderFrom (dto: CandidateDto) (candidateArchiveSha: string) (candid
       ProducerPlatform = dto.ProducerPlatform
       BumpedVersion = None }
 
-// F7 + F2: failure clears `published*` so candidate hashes can never masquerade as observed.
 let finalizeFailure (render: Render) (reason: string) : Resolution =
     { Status = "failed"
       Reason = reason
@@ -152,7 +145,6 @@ let finalizeFailure (render: Render) (reason: string) : Resolution =
       PublishedMetadataAssetSha256 = None
       MetadataRecoveryNeeded = false }
 
-// F2: verified new-publish; archive + metadata sha from transport, manifest sha + revision from the same validated snapshot.
 let finalizeVerifiedPublication
     (resolution: Resolution)
     (verifiedArchiveSha: string)
@@ -183,7 +175,6 @@ let finalizeVerifiedPublication
       PublishedMetadataAssetSha256 = Some verifiedMetadataSha
       MetadataRecoveryNeeded = false }
 
-// F2: verified-absence metadata-only recovery; status stays `unchanged` and only the metadata sha is refreshed.
 let finalizeRecovery (resolution: Resolution) (verifiedMetadataSha: string) : Resolution =
     { Status = "unchanged"
       Reason = "archive unchanged under strict comparison; metadata republished to reconcile the verified absence"
@@ -200,7 +191,6 @@ let private publishedRevision (published: ReleaseCompare.ArchiveObservation) : R
     | Ok header -> Ok header.Revision
     | Error error -> Error error
 
-// F9: reject empty/mismatched assetUri so a reconstructed or injected value cannot reach the public JSON.
 let validateCanonicalAssetUri
     (dto: CandidateDto)
     (contract: ReleaseCompare.ComponentContract)
@@ -242,17 +232,45 @@ let private classifyInternal
                         render
                         $"the {dto.Contract.ComponentId} release container does not exist; refusing to silently create one")
         | Ok ArchiveAbsent ->
-            return
-                Ok
-                    { Status = "published"
-                      Reason = "the remote release has no asset for the declared version; an upload is required"
-                      UploadCompleted = false
-                      Render = render
-                      PublishedArchiveSha256 = None
-                      PublishedManifestSha256 = None
-                      PublishedRevision = None
-                      PublishedMetadataAssetSha256 = None
-                      MetadataRecoveryNeeded = false }
+            // The new-ZIP branch fails closed before any POST when the metadata observation is not a verified absence.
+            match metadataState with
+            | Error error -> return Ok(finalizeFailure render (ReleaseError.message error))
+            | Ok (MetadataCorrupt error) ->
+                return
+                    Ok
+                        (finalizeFailure
+                            render
+                            $"the existing metadata asset for {dto.Contract.ComponentId} {dto.Contract.Version} is corrupt: {ReleaseError.message error}")
+            | Ok MetadataMissing ->
+                return
+                    Ok
+                        (finalizeFailure
+                            render
+                            $"the {dto.Contract.ComponentId} release container does not exist; refusing to silently create one")
+            | Ok MetadataImmutable ->
+                return
+                    Ok
+                        (finalizeFailure
+                            render
+                            $"the existing metadata asset for {dto.Contract.ComponentId} {dto.Contract.Version} is immutable; refusing to publish a new archive alongside stale metadata")
+            | Ok (MetadataObserved _) ->
+                return
+                    Ok
+                        (finalizeFailure
+                            render
+                            $"an existing metadata asset for {dto.Contract.ComponentId} {dto.Contract.Version} was observed; refusing to publish a new archive with stale or orphan metadata before the ZIP POST")
+            | Ok MetadataAbsent ->
+                return
+                    Ok
+                        { Status = "published"
+                          Reason = "the remote release has no asset for the declared version; an upload is required"
+                          UploadCompleted = false
+                          Render = render
+                          PublishedArchiveSha256 = None
+                          PublishedManifestSha256 = None
+                          PublishedRevision = None
+                          PublishedMetadataAssetSha256 = None
+                          MetadataRecoveryNeeded = false }
         | Ok (ArchiveObserved publishedObs) ->
             let! comparison = ReleaseCompare.compare dto.Contract publishedObs candidateObs dto.EvaluatedHead
             match comparison with
@@ -287,18 +305,36 @@ let private classifyInternal
                                 render
                                 $"the {dto.Contract.ComponentId} release container does not exist; refusing to silently create one")
                 | Ok (MetadataObserved (sha256, parsed)) ->
+                    let optToString = function | Some v -> v | None -> "<absent>"
+                    // Published revision is checked against the remote embedded manifest, not the candidate HEAD, and toolchain values participate in identity.
                     let mismatchedField : (string * string * string) option =
                         if parsed.ComponentId <> dto.Contract.ComponentId then
                             Some ("componentId", dto.Contract.ComponentId, parsed.ComponentId)
                         elif parsed.Version <> dto.Contract.Version then
                             Some ("version", dto.Contract.Version, parsed.Version)
+                        elif parsed.AssetUri <> dto.AssetUri then
+                            Some ("assetUri", dto.AssetUri, parsed.AssetUri)
+                        elif parsed.ArchiveName <> dto.Contract.ArchiveName then
+                            Some ("archiveName", dto.Contract.ArchiveName, parsed.ArchiveName)
                         elif parsed.ArchiveSha256 <> publishedObs.ArchiveSha256 then
                             Some ("archiveSha256", publishedObs.ArchiveSha256, parsed.ArchiveSha256)
                         else
                             match publishedObs.ManifestSha256 with
                             | Some value when value <> parsed.ManifestSha256 ->
                                 Some ("manifestSha256", value, parsed.ManifestSha256)
-                            | _ -> None
+                            | _ ->
+                                match ReleaseCompare.parseEmbeddedManifestEntry publishedObs with
+                                | Ok header when header.Revision <> parsed.PublishedRevision ->
+                                    Some ("publishedRevision", header.Revision, parsed.PublishedRevision)
+                                | _ ->
+                                    if parsed.ProducerSdk <> dto.ProducerSdk then
+                                        Some ("producerSdk", optToString dto.ProducerSdk, optToString parsed.ProducerSdk)
+                                    elif parsed.ProducerRuntime <> dto.ProducerRuntime then
+                                        Some ("producerRuntime", optToString dto.ProducerRuntime, optToString parsed.ProducerRuntime)
+                                    elif parsed.ProducerPlatform <> dto.ProducerPlatform then
+                                        Some ("producerPlatform", optToString dto.ProducerPlatform, optToString parsed.ProducerPlatform)
+                                    else
+                                        None
 
                     match mismatchedField with
                     | Some (field, expected, actual) ->

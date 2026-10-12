@@ -3,7 +3,8 @@
 // Each producer Config.fsx declares `module ReleaseConfig`, so the two are evaluated in isolated child `dotnet fsi` processes.
 // Requires the exact canonical runtime patch so a different toolchain cannot quietly reach the build path.
 
-#load "../Provenance.fsx"
+#load "../Provenance.fs"
+#load "Enrollment.fs"
 
 open System
 open System.IO
@@ -31,11 +32,6 @@ type ExecutingIdentity =
 
 // The exact runtime is read from each producer's Config.fsx; the moniker is the only shared constant.
 let private expectedRuntimeMoniker = "Microsoft.NETCore.App"
-
-// Adding a producer requires a row here; the canonical Config.fsx path is the single source of truth.
-let private producerConfigPaths : (string * string) list =
-    [ "dotnet", "dotnet/release/Config.fsx"
-      "workflow", "workflow/release/Config.fsx" ]
 
 let private readSdkVersion (root: string) : Async<Result<string, ReleaseError>> =
     async {
@@ -206,22 +202,15 @@ let private checkExpected (name: string) (expected: string option) (actual: stri
     | Some value when value <> actual -> Some(IdentityMismatch(name, value, actual))
     | _ -> None
 
-// Resolves the canonical runtime from the loaded producers so the exact patch can be required.
-let private verify (root: string) : Async<Result<ExecutingIdentity * ProducerSummary list, ReleaseError>> =
+// The remaining cross-producer equality check stays scoped to the bootstrap toolchain guard.
+let private continueVerify
+    (root: string)
+    (loaded: ProducerSummary list)
+    : Async<Result<ExecutingIdentity * ProducerSummary list, ReleaseError>> =
     async {
-        let mutable failures : ReleaseError list = []
-        let mutable loaded : ProducerSummary list = []
-
-        for componentId, configPath in producerConfigPaths do
-            match! loadProducerConfig root componentId configPath with
-            | Error error -> failures <- error :: failures
-            | Ok producer -> loaded <- producer :: loaded
-
-        let loaded = loaded |> List.rev
-
-        match failures with
-        | first :: _ -> return Error first
-        | [] ->
+        match loaded with
+        | [] -> return Error(MalformedArtifact("Participants.json", "no producers loaded from the enrollment roster"))
+        | _ ->
             let canonicalRuntime =
                 loaded
                 |> List.map (fun producer -> producer.RuntimeVersion)
@@ -265,6 +254,35 @@ let private verify (root: string) : Async<Result<ExecutingIdentity * ProducerSum
                             "producer runtimeVersion",
                             "one canonical value",
                             String.concat ", " canonicalRuntime))
+    }
+
+// Resolves the canonical runtime from the loaded producers so the exact patch can be required.
+let private verify (root: string) : Async<Result<ExecutingIdentity * ProducerSummary list, ReleaseError>> =
+    async {
+        let! rosterResult = ReleaseEnrollment.loadRoster root
+
+        match rosterResult with
+        | Error error -> return Error error
+        | Ok roster ->
+            match ReleaseEnrollment.validateRoster roster with
+            | Error error -> return Error error
+            | Ok () ->
+                let mutable failures : ReleaseError list = []
+                let mutable loaded : ProducerSummary list = []
+
+                for entry in roster.Entries do
+                    match! loadProducerConfig root entry.ComponentId entry.ConfigPath with
+                    | Error error -> failures <- error :: failures
+                    | Ok producer ->
+                        match ReleaseEnrollment.validateProjectionAgainstRoster producer.ComponentId entry.ConfigPath root roster with
+                        | Error rosterError -> failures <- rosterError :: failures
+                        | Ok () -> loaded <- producer :: loaded
+
+                let loaded = loaded |> List.rev
+
+                match failures with
+                | first :: _ -> return Error first
+                | [] -> return! continueVerify root loaded
     }
 
 // The format is additive so older workflow versions keep parsing.

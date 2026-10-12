@@ -1,8 +1,7 @@
-// role: test entrypoint
-// Historical v1.0.3 verification: archive digests are recomputed, not trusted from docs; archive directory is `MCP_RELEASE_HISTORICAL_ROOT`-configurable (no hardcoded developer temp path).
-#load "../../Provenance.fsx"
-#load "../Compare.fsx"
-#load "Fixture.fsx"
+module Release.Tests.Historical
+
+open Expecto
+open Release.Tests
 
 open System
 open System.IO
@@ -41,9 +40,6 @@ let private dotnetArchive103Path =
 
 let private workflowArchive103Path =
     Path.Combine(bootstrapDir, "workflow-v1.0.3.zip")
-
-// Re-hash the historical v1.0.3 archives on disk and assert they
-//    match the digests in `docs/GHI-24/packages.md` §7.
 let historicalHashPinning () =
     if File.Exists dotnetArchive103Path then
         let bytes = File.ReadAllBytes dotnetArchive103Path
@@ -62,8 +58,6 @@ let historicalHashPinning () =
     else
         failed <- failed + 1
         failures.Add(sprintf "historical v1.0.3 archive missing: %s" workflowArchive103Path)
-
-// Helper: observe an archive and return its ArchiveObservation.
 let private observe path =
     async {
         match! observe path with
@@ -75,8 +69,6 @@ let private writeTempCopy (sourcePath: string) (label: string) =
     let tempPath = Path.Combine(Path.GetTempPath(), "mcp-historical-" + label + "-" + Guid.NewGuid().ToString("N") + ".zip")
     File.Copy(sourcePath, tempPath)
     tempPath
-
-// Same archive observed twice → ByteIdentical.
 let historicalSameArchiveIdentical () = async {
     if not (File.Exists dotnetArchive103Path) then
         failed <- failed + 1
@@ -97,9 +89,6 @@ let historicalSameArchiveIdentical () = async {
                   "Mcp.Dotnet.runtimeconfig.json"
                   "NOTICE.txt"
                   "distribution.json" ] }
-        // The historical archive's revision field is something like
-        // `fc0aefa9db0fb3262ee6ca1254bd6bbb752b8b01`; for an
-        // identical-archive test the caller passes that same revision.
         let manifestRevision = "fc0aefa9db0fb3262ee6ca1254bd6bbb752b8b01"
         match! compare contract obsA obsB manifestRevision with
         | Ok (ByteIdentical published) ->
@@ -112,22 +101,8 @@ let historicalSameArchiveIdentical () = async {
             failures.Add(sprintf "historical same-archive: %s" (ReleaseError.message error))
 }
 
-// Bumped candidate against historical v1.0.3: the canonical
-//    v1.0.4-only files (`Mcp.Dotnet.dll` 256,000 B vs 225,792 B; the
-//    F# compiled output changed between v1.0.3 and v1.0.4) →
-//    DifferentBeyondRevision. The test pairs the historical v1.0.3
-//    archive against a rebuilt v1.0.4 manifest body embedded inside a
-//    new archive that contains a v1.0.3-compatible entry table for
-//    every entry EXCEPT the binary `Mcp.Dotnet.dll` (which differs).
-//    A real fixture reuses the historical archive's allowed list but
-//    replaces `Mcp.Dotnet.dll` with the post-refactor bytes.
-
 let private writeModifiedV104LikeArchive (sourcePath: string) (label: string) =
     let tempPath = Path.Combine(Path.GetTempPath(), "mcp-historical-" + label + "-" + Guid.NewGuid().ToString("N") + ".zip")
-
-    // First pass: read every entry from the source archive into memory
-    // so the source ZIP file handle can be closed before we open the
-    // destination for writing.
     let snapshots = ResizeArray<string * byte[]>()
     let mutable manifestText = ""
     do
@@ -140,10 +115,6 @@ let private writeModifiedV104LikeArchive (sourcePath: string) (label: string) =
             snapshots.Add(name, bytes)
             if name = "distribution.json" then
                 manifestText <- Encoding.UTF8.GetString(bytes)
-
-    // Build a manifest with the bumped revision; declared `files` hashes
-    // mirror the post-bump archive so the production self-consistency gate
-    // accepts the modified archive.
     let bogus = Encoding.UTF8.GetBytes "v1.0.4-built-dll-fixture-payload"
     let bumpedRevision = "3612e8e6dd4655543e6d4b9dc0edee9c24b82bf1"
     let payloadHashes =
@@ -158,7 +129,7 @@ let private writeModifiedV104LikeArchive (sourcePath: string) (label: string) =
 
     use dst = ZipFile.Open(tempPath, ZipArchiveMode.Create)
     for (name, bytes) in snapshots do
-        if name = "distribution.json" then () // written below as the canonical manifest
+        if name = "distribution.json" then ()
         else
             let entry = dst.CreateEntry(name, CompressionLevel.Optimal)
             entry.LastWriteTime <- DateTimeOffset(1980, 1, 1, 0, 0, 0, TimeSpan.Zero)
@@ -191,11 +162,6 @@ let historicalBumpedCandidateDifferent () = async {
                       "Mcp.Dotnet.runtimeconfig.json"
                       "NOTICE.txt"
                       "distribution.json" ] }
-            // The candidate manifest's `revision` is the bumped one; we
-            // pass it to `compare`. The historical archive's
-            // `revision` field will differ; the comparison must
-            // surface the diff (DifferentBeyondRevision) because the
-            // Mcp.Dotnet.dll bytes differ.
             let manifestRevision = "3612e8e6dd4655543e6d4b9dc0edee9c24b82bf1"
             match! compare contract publishedObs candidateObs manifestRevision with
             | Ok (DifferentBeyondRevision (_, _, reason)) ->
@@ -204,10 +170,6 @@ let historicalBumpedCandidateDifferent () = async {
                 failed <- failed + 1
                 failures.Add(sprintf "historical bumped candidate: expected DifferentBeyondRevision got %A" other)
             | Error error ->
-                // The strict comparison rejects on the manifest `version`
-                // field (v1.0.3 contract vs v1.0.4 candidate) or on the
-                // different Mcp.Dotnet.dll payload bytes. Either failure
-                // shape is a correct rejection of the bumped candidate.
                 let m = ReleaseError.message error
                 assertTrue (sprintf "historical bumped candidate: %s" m)
                     (m.Contains("version", StringComparison.Ordinal)
@@ -217,28 +179,15 @@ let historicalBumpedCandidateDifferent () = async {
         finally
             try File.Delete candidatePath with _ -> ()
 }
-
-// Consecutive distinct HEAD fixtures: a pair of archives whose only
-//    difference is the embedded `revision` field (simulating a
-//    docs-only or Telegram-only commit that does not change package
-//    bytes). The comparison must classify both as
-//    `RevisionOnlyEquivalent` so the workflow's no-op branch fires.
 let consecutiveDistinctHeadFixturesClassifiedRevisionOnlyEquivalent () = async {
     let tempRoot = Path.Combine(Path.GetTempPath(), "mcp-consecutive-" + Guid.NewGuid().ToString("N"))
     Directory.CreateDirectory tempRoot |> ignore
     let writeWithManifestRevision (label: string) (revision: string) =
         let archivePath = Path.Combine(tempRoot, label + ".zip")
         let manifestPath = Path.Combine(tempRoot, label + ".json")
-        // Reuse Fixture so the declared `files` SHA-256s match the actual
-        // decompressed payloads and the F4 self-consistency gate accepts the
-        // archive before it reaches the comparator.
         Fixture.writeRevisionVariantArchive archivePath manifestPath revision
         archivePath
     try
-        // Two archives whose embedded `revision` differs but every
-        // other byte (and the corresponding file payload SHA) is
-        // identical. This simulates a docs/Telegram-only commit that
-        // changes nothing in the package bytes.
         let headA = "aaaa" + String('a', 36)
         let headB = "bbbb" + String('b', 36)
         let archiveA = writeWithManifestRevision "a" headA
@@ -258,8 +207,6 @@ let consecutiveDistinctHeadFixturesClassifiedRevisionOnlyEquivalent () = async {
                   "distribution.json" ] }
         let pair = ref 0
         for (label, pubObs, pubRev) in [ ("A->B", obsA, headA); ("B->A", obsB, headB) ] do
-            // For each pair, the "candidate" is the OTHER archive. The
-            // `evaluatedRevision` argument is the candidate's HEAD.
             let candObs, candRev = if label = "A->B" then obsB, headB else obsA, headA
             match! compare contract pubObs candObs candRev with
             | Ok (RevisionOnlyEquivalent (_, publishedRev, evaluatedRev)) ->
@@ -283,11 +230,11 @@ let runSuite () = async {
     do! consecutiveDistinctHeadFixturesClassifiedRevisionOnlyEquivalent ()
 
     printfn "historical-bootstrap-tests summary: passed=%d failed=%d" passed failed
-    if failed > 0 then
-        for line in failures do
-            eprintfn "FAIL: %s" line
-        exit 1
 }
 
-// Standalone entry bridge: the optional historical FSI process owns this suite.
-runSuite () |> Async.RunSynchronously
+
+let tests =
+    testCaseAsync "Historical legacy regression assertions" <| async {
+        do! runSuite ()
+        Expect.equal 0 failed (String.concat Environment.NewLine failures)
+    }

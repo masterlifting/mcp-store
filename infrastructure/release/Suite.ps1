@@ -1,10 +1,13 @@
 # role: entrypoint/command
-# Runs the focused deterministic release regression suite non-publishing; a nonzero child fails the gate.
-# Historical.fsx is the optional integration that needs locally downloaded archives, so it never gates CI.
+# Runs the complete non-publishing release regression gate: the compiled Expecto release suite plus the retained producer provenance entrypoint.
+# The compiled suite is a console Expecto entrypoint, so `dotnet test` reports no counts for it; the native Expecto exit code and the executed-case count are the gate.
+# The historical integration is a required case, so a missing pinned historical fixture fails the gate closed instead of excluding or rewriting any case.
 
 [CmdletBinding()]
 param(
-    [string]$Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+    [string]$Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path,
+    [string]$Configuration = "Release",
+    [string]$HistoricalRoot = $env:MCP_RELEASE_HISTORICAL_ROOT
 )
 
 $ErrorActionPreference = "Stop"
@@ -21,41 +24,98 @@ function Get-OutputState([string]$Name) {
     if (-not (Test-Path -LiteralPath $target)) { return "target=$target;absent" }
     return "target=$target;content=$(Get-Content -LiteralPath $target -Raw -ErrorAction SilentlyContinue)"
 }
+
+$suiteDll = Join-Path $Root "infrastructure\release\tests\bin\$Configuration\net11.0\Release.Tests.dll"
+if (-not (Test-Path -LiteralPath $suiteDll)) {
+    throw "the compiled release regression project is not built: $suiteDll (build infrastructure/release/tests/Tests.fsproj -c $Configuration first)"
+}
+
+# Producer scripts run by this gate; the packaging tests need a clean tree, so `orchestrate` runs them per component instead.
+. (Join-Path $PSScriptRoot "Roster.ps1")
+$roster = Get-ReleaseRoster -Root $Root
+
+# The provenance contract is producer-owned and roster-independent; packaging entrypoints follow each participant's config directory.
+$scriptEntrypoints = @("dotnet/tests/ProvenanceTests.fsx")
+$orchestratedEntrypoints = @($roster | ForEach-Object {
+    $configDirectory = [System.IO.Path]::GetDirectoryName($_.configPath).Replace('\', '/')
+    $componentRoot = [System.IO.Path]::GetDirectoryName($configDirectory).Replace('\', '/')
+    "$componentRoot/tests/DistributionTests.fsx"
+})
+
+foreach ($relative in $scriptEntrypoints + $orchestratedEntrypoints) {
+    if (-not (Test-Path -LiteralPath (Join-Path $Root $relative))) {
+        throw "release-path script entrypoint is missing: $relative"
+    }
+}
+
+# The pinned fixture identity mirrors the compiled Historical case, which owns the fixture names and re-verifies each archive's SHA-256 and size itself.
+
+# The complete suite cannot run without the historical archives, and no case may be excluded to work around that.
+if ([string]::IsNullOrWhiteSpace($HistoricalRoot)) {
+    Write-Host "::error::MCP_RELEASE_HISTORICAL_ROOT is not set; the complete compiled release suite requires the pinned historical fixtures and this gate does not exclude cases"
+    exit 1
+}
+if (-not (Test-Path -LiteralPath $HistoricalRoot -PathType Container)) {
+    Write-Host "::error::MCP_RELEASE_HISTORICAL_ROOT does not name a directory: $HistoricalRoot"
+    exit 1
+}
+
+$historicalRootResolved = (Resolve-Path -LiteralPath $HistoricalRoot).Path
+
 $outputBefore = @{}
 foreach ($name in @("GITHUB_ENV", "GITHUB_OUTPUT")) {
     $outputBefore[$name] = Get-OutputState $name
 }
 
-$tests = Join-Path $Root "infrastructure\release\tests"
-if (-not (Test-Path -LiteralPath $tests)) {
-    throw "release regression test directory not found: $tests"
+$ansi = [regex]"\x1b\[[0-9;]*m"
+
+function Read-Lines([object[]]$Output) {
+    return @($Output | ForEach-Object { $ansi.Replace("$_", "").TrimEnd() })
 }
 
-# Only `test entrypoint` scripts are test cases; a `test helper` module must not run standalone.
-$scripts = @(
-    Get-ChildItem -LiteralPath $tests -Filter *.fsx |
-        Where-Object {
-            $_.Name -ne "Historical.fsx" -and
-            (Get-Content -LiteralPath $_.FullName -TotalCount 1) -match '^//\s*role:\s*test entrypoint\s*$'
-        } |
-        Sort-Object Name
-)
+function Get-ExpectoCount([string[]]$Lines) {
+    $match = $Lines | Select-String -Pattern '(\d+) tests run' | Select-Object -Last 1
+    if (-not $match) { return -1 }
+    return [int]([regex]::Match($match.Line, '(\d+) tests run').Groups[1].Value)
+}
 
-if ($scripts.Count -eq 0) {
-    throw "no deterministic release regression tests found under $tests"
+# The compiled suite reports its own case inventory, so neither a removed case nor an unrun case can pass unnoticed.
+$inventoryLines = Read-Lines (& dotnet $suiteDll --list-tests 2>&1)
+$inventory = @($inventoryLines | Where-Object { $_ -match '^compiled release regressions\.' })
+if ($inventory.Count -eq 0) {
+    throw "could not enumerate the compiled release regression suite in $suiteDll"
+}
+
+$historicalCases = @($inventory | Where-Object { $_ -match '\.Historical ' })
+if ($historicalCases.Count -eq 0) {
+    throw "the compiled suite does not report its historical integration case; refusing to run an unverified inventory"
 }
 
 $failed = New-Object System.Collections.Generic.List[string]
 Push-Location $Root
 try {
-    foreach ($script in $scripts) {
-        Write-Host "::group::release regression $($script.Name)"
-        & dotnet fsi --nologo $script.FullName
-        $code = $LASTEXITCODE
+    $env:MCP_RELEASE_HISTORICAL_ROOT = $historicalRootResolved
+
+    Write-Host "::group::Release.Tests (complete compiled suite)"
+    $lines = Read-Lines (& dotnet $suiteDll --sequenced --no-spinner 2>&1)
+    $code = $LASTEXITCODE
+    foreach ($line in $lines) { Write-Host $line }
+    Write-Host "::endgroup::"
+
+    $count = Get-ExpectoCount $lines
+    if ($count -ne $inventory.Count) {
+        $observed = if ($count -lt 0) { "no Expecto summary line" } else { "$count" }
+        $failed.Add("expected $($inventory.Count) compiled case(s) but observed $observed")
+    } elseif ($code -ne 0) {
+        $failed.Add("compiled release suite (exit $code)")
+    }
+
+    foreach ($relative in $scriptEntrypoints) {
+        Write-Host "::group::release regression $relative"
+        & dotnet fsi --nologo (Join-Path $Root $relative)
+        $scriptCode = $LASTEXITCODE
         Write-Host "::endgroup::"
-        if ($code -ne 0) {
-            $failed.Add("$($script.Name) (exit $code)")
-        }
+        if ($scriptCode -ne 0) { $failed.Add("$relative (exit $scriptCode)") }
     }
 } finally {
     Pop-Location
@@ -68,9 +128,9 @@ foreach ($name in @("GITHUB_ENV", "GITHUB_OUTPUT")) {
 }
 
 if ($failed.Count -gt 0) {
-    Write-Host "::error::release regression suite failed: $($failed -join ', ')"
+    Write-Host "::error::release regression gate failed: $($failed -join '; ')"
     exit 1
 }
 
-Write-Host "release regression suite passed: $($scripts.Count) deterministic script(s)"
+Write-Host "release regression gate passed: $($inventory.Count) compiled case(s) (including $($historicalCases.Count) historical) plus $($scriptEntrypoints.Count) producer script(s)"
 exit 0

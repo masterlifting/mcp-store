@@ -4,8 +4,6 @@
 // Only the canonical Deflate32 shape the producer emits is accepted; any other layout fails closed.
 module ReleaseArchive
 
-#load "../Provenance.fsx"
-
 open System
 open System.IO
 open System.IO.Compression

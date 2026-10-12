@@ -38,51 +38,50 @@ let private sourceExtensions = Set.ofList [ ".fs"; ".fsx" ]
 
 let private topLevelBridgeSites =
     Map.ofList
-        [ "dotnet/release/Release.fsx", "let exitCode = runWrapper () |> Async.RunSynchronously"
-          "workflow/release/Release.fsx", "let exitCode = runWrapper () |> Async.RunSynchronously"
-          "infrastructure/release/Bootstrap.fsx", "match verify root |> Async.RunSynchronously with"
-          "infrastructure/release/Runner.fs", "runAsync () |> Async.RunSynchronously"
-          "infrastructure/release/tests/Bootstrap.fsx", "runSuite () |> Async.RunSynchronously"
-          "infrastructure/release/tests/Compare.fsx", "runSuite () |> Async.RunSynchronously"
-          "infrastructure/release/tests/Evaluate.fsx", "runSuite () |> Async.RunSynchronously"
-          "infrastructure/release/tests/Historical.fsx", "runSuite () |> Async.RunSynchronously"
-          "infrastructure/release/tests/Invocation.fsx", "runSuite () |> Async.RunSynchronously"
-          "infrastructure/release/tests/Metadata.fsx", "runSuite () |> Async.RunSynchronously"
-          "infrastructure/release/tests/Publish.fsx", "runSuite () |> Async.RunSynchronously"
-          "infrastructure/release/tests/Runner.fsx", "runSuite () |> Async.RunSynchronously"
-          "infrastructure/release/tests/Telegram.fsx", "runSuite () |> Async.RunSynchronously"
-          "dotnet/release/Build.fsx", "match run () |> Async.RunSynchronously with"
-          "dotnet/release/Pins.fsx", "match run () |> Async.RunSynchronously with"
-          "dotnet/tests/DistributionTests.fsx", "|> Async.RunSynchronously"
-          "dotnet/tests/ProvenanceTests.fsx", "suite () |> Async.RunSynchronously"
-          "infrastructure/release/tests/Revision.fsx", "runSuite () |> Async.RunSynchronously"
-          "infrastructure/scripts/tests/Regression.fsx", "runTests () |> Async.RunSynchronously"
-          "infrastructure/scripts/Validate.fs", "run args |> Async.RunSynchronously"
-          "dotnet/protocol/Host.fs", "McpHost.run service |> Async.RunSynchronously"
-          "workflow/release/Build.fsx", "match run () |> Async.RunSynchronously with"
-          "workflow/release/Pins.fsx", "match run () |> Async.RunSynchronously with"
-          "workflow/protocol/Mcp.fs", "run () |> Async.RunSynchronously"
-          "workflow/tests/DistributionTests.fsx", "|> Async.RunSynchronously"
-          "workflow/tests/TaskApply.fsx", "|> Async.RunSynchronously"
-          "workflow/tests/TaskCreate.fsx", "match execute (CreateTask { Root = root; ProfileId = profile; Request = request }) |> Async.RunSynchronously with"
-          "workflow/tests/TaskGet.fsx", "match execute (GetTask { Root = args.[0]; TaskId = args.[1] }) |> Async.RunSynchronously with"
-          "workflow/tests/TaskValidate.fsx", "match execute (ValidateTask { Root = args.[0]; TaskId = args.[1] }) |> Async.RunSynchronously with"
-          "workflow/tests/TaskPathSafetyTests.fsx", "|> Async.RunSynchronously"
-          "workflow/tests/TaskContractTests.fsx", "|> Async.RunSynchronously"
-          "workflow/tests/EphemeralLockInvariantTests.fsx", "|> Async.RunSynchronously"
-          "workflow/tests/AuthorityMetadataTests.fsx", "|> Async.RunSynchronously"
-          "workflow/tests/WorkflowTests.fsx", "|> Async.RunSynchronously"
-          "workflow/tests/TaskProfileTests.fsx", "|> Async.RunSynchronously"
-          "workflow/tests/WorkflowMcpTests.fsx", "|> Async.RunSynchronously"
-          "workflow/tests/WorkflowMcpNativeCompatTests.fsx", "|> Async.RunSynchronously"
-          "workflow/tests/WorkflowMcpFindingTests.fsx", "|> Async.RunSynchronously"
-          "workflow/tests/PackagedRuntimeCoordinationTests.fsx", "|> Async.RunSynchronously" ]
+        [ "infrastructure/release/Bootstrap.fsx", [ "match verify root |> Async.RunSynchronously with" ]
+          "infrastructure/release/Runner.fs",
+          [ "runOrchestrateMode argv |> Async.RunSynchronously"
+            "runTransactionMode argv |> Async.RunSynchronously" ]
+          "dotnet/release/Build.fsx", [ "match run () |> Async.RunSynchronously with" ]
+          "dotnet/release/Pins.fsx", [ "match run () |> Async.RunSynchronously with" ]
+          "dotnet/tests/DistributionTests.fsx", [ "|> Async.RunSynchronously" ]
+          "dotnet/tests/ProvenanceTests.fsx", [ "suite () |> Async.RunSynchronously" ]
+          "infrastructure/scripts/tests/Regression.fsx", [ "runTests () |> Async.RunSynchronously" ]
+          "infrastructure/scripts/Validate.fs", [ "run args |> Async.RunSynchronously" ]
+          "dotnet/protocol/Host.fs", [ "McpHost.run service |> Async.RunSynchronously" ]
+          "workflow/release/Build.fsx", [ "match run () |> Async.RunSynchronously with" ]
+          "workflow/release/Pins.fsx", [ "match run () |> Async.RunSynchronously with" ]
+          "workflow/protocol/Mcp.fs", [ "run () |> Async.RunSynchronously" ]
+          "workflow/tests/DistributionTests.fsx", [ "|> Async.RunSynchronously" ]
+          "workflow/tests/TaskApply.fsx", [ "|> Async.RunSynchronously" ]
+          "workflow/tests/TaskCreate.fsx", [ "match execute (CreateTask { Root = root; ProfileId = profile; Request = request }) |> Async.RunSynchronously with" ]
+          "workflow/tests/TaskGet.fsx", [ "match execute (GetTask { Root = args.[0]; TaskId = args.[1] }) |> Async.RunSynchronously with" ]
+          "workflow/tests/TaskValidate.fsx", [ "match execute (ValidateTask { Root = args.[0]; TaskId = args.[1] }) |> Async.RunSynchronously with" ]
+          "workflow/tests/TaskPathSafetyTests.fsx", [ "|> Async.RunSynchronously" ]
+          "workflow/tests/TaskContractTests.fsx", [ "|> Async.RunSynchronously" ]
+          "workflow/tests/EphemeralLockInvariantTests.fsx", [ "|> Async.RunSynchronously" ]
+          "workflow/tests/AuthorityMetadataTests.fsx", [ "|> Async.RunSynchronously" ]
+          "workflow/tests/WorkflowTests.fsx", [ "|> Async.RunSynchronously" ]
+          "workflow/tests/TaskProfileTests.fsx", [ "|> Async.RunSynchronously" ]
+          "workflow/tests/WorkflowMcpTests.fsx", [ "|> Async.RunSynchronously" ]
+          "workflow/tests/WorkflowMcpNativeCompatTests.fsx", [ "|> Async.RunSynchronously" ]
+          "workflow/tests/WorkflowMcpFindingTests.fsx", [ "|> Async.RunSynchronously" ]
+          "workflow/tests/PackagedRuntimeCoordinationTests.fsx", [ "|> Async.RunSynchronously" ] ]
 
 let isExcludedPath (path: string) =
     path.Split([| Path.DirectorySeparatorChar; Path.AltDirectorySeparatorChar |])
     |> Array.exists excludedSegments.Contains
 
 let isInScope (path: string) = sourceExtensions.Contains(Path.GetExtension path)
+
+let private isNestedCheckout (root: string) (path: string) =
+    let isRoot = String.Equals(Path.GetRelativePath(root, path), ".", StringComparison.Ordinal)
+
+    if isRoot then
+        false
+    else
+        let gitMarker = Path.Combine(path, ".git")
+        File.Exists gitMarker || Directory.Exists gitMarker
 
 let private blankRange (chars: char array) startIndex endIndex =
     for i in startIndex .. endIndex - 1 do
@@ -272,7 +271,7 @@ let private relativePath (root: string) (path: string) =
 
 let private documentedBridge (relative: string) (code: string) (lines: string array) (lineNumber: int) =
     let normalized = relative.Replace('\\', '/')
-    let approvedLine = Map.tryFind normalized topLevelBridgeSites
+    let approvedLines = Map.tryFind normalized topLevelBridgeSites
     let bridgeRule = rules |> List.find (fun rule -> rule.Name = "Async.RunSynchronously")
     let bridgeLines =
         bridgeRule.Regex.Matches(code)
@@ -282,19 +281,26 @@ let private documentedBridge (relative: string) (code: string) (lines: string ar
             line, matched.Index)
         |> Seq.toArray
 
-    if approvedLine.IsNone || bridgeLines.Length <> 1 || fst bridgeLines.[0] <> lineNumber then
-        None
-    else
-        let line = lines.[lineNumber - 1].Trim()
-        let bridgeShape = line = approvedLine.Value
-        let documentation =
-            lines
-            |> Array.exists (fun comment ->
-                let trimmed = comment.Trim()
-                trimmed.StartsWith("//", StringComparison.Ordinal)
-                && (trimmed.Contains("Standalone entry bridge", StringComparison.Ordinal)
-                    || trimmed = "// FSI needs one synchronous top-level entry for the asynchronous script."))
-        if bridgeShape && documentation then Some "documented standalone entry bridge" else None
+    let observedLines =
+        bridgeLines
+        |> Array.map (fun (line, _) -> lines.[line - 1].Trim())
+        |> Array.toList
+
+    let exactSites =
+        match approvedLines with
+        | Some expected -> observedLines = expected && List.contains (lines.[lineNumber - 1].Trim()) expected
+        | None -> false
+
+    let documentation =
+        lines
+        |> Array.exists (fun comment ->
+            let trimmed = comment.Trim()
+            trimmed.StartsWith("//", StringComparison.Ordinal)
+            && (trimmed.Contains("Standalone entry bridge", StringComparison.Ordinal)
+                || trimmed = "// FSI needs one synchronous top-level entry for the asynchronous script."
+                || trimmed.Contains("synchronous wait is at the host boundary", StringComparison.Ordinal)))
+
+    if exactSites && documentation then Some "documented standalone entry bridge" else None
 
 let checkText (path: string) (source: string) : Finding list =
     let code = maskStringsAndComments source
@@ -332,13 +338,14 @@ let checkFile path =
     else []
 
 let enumerateFiles root =
+    let canonicalRoot = Path.GetFullPath root
     let stack = Stack<string>()
     let files = ResizeArray<string>()
-    stack.Push root
+    stack.Push canonicalRoot
 
     while stack.Count > 0 do
         let path = stack.Pop()
-        if not (isExcludedPath path) then
+        if not (isExcludedPath path) && not (Directory.Exists path && isNestedCheckout canonicalRoot path) then
             if Directory.Exists path then
                 for child in Directory.EnumerateFileSystemEntries path do
                     if not (isExcludedPath child) then stack.Push child

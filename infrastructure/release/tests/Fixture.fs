@@ -1,6 +1,5 @@
-// role: test helper
-// Shared deterministic fixture writer: real-byte canonical archives whose embedded `files` hashes match the actual decompressed payloads.
-// Caller loads Provenance.fsx and the production Compare.fsx so every shared type comes from one FSI module.
+module Release.Tests.Fixture
+
 
 open System
 open System.IO
@@ -41,8 +40,6 @@ let canonicalEntryPayloads () : (string * byte[]) list =
 
 let sha256Hex (bytes: byte[]) : string =
     SHA256.HashData bytes |> Convert.ToHexString |> fun v -> v.ToLowerInvariant()
-
-// ComponentContract fields; tests instantiate their own contract with these values.
 let contractComponentId = canonicalComponentId
 let contractVersion = canonicalVersion
 let contractArchiveName = canonicalArchiveName
@@ -69,10 +66,6 @@ let buildManifestText (revision: string) (sdk: string) (payloadHashes: (string *
         archiveFiles.Add(JsonValue.Create path)
     manifest.["archiveFiles"] <- archiveFiles
     manifest.ToJsonString(JsonSerializerOptions(WriteIndented = true))
-
-// Canonical payload SHA-256s computed from the canonical payload bytes.
-// The manifest `files` table covers only the runtime payload files (not NOTICE.txt
-// or distribution.json, which are excluded by the production self-consistency gate).
 let canonicalPayloadHashes () : (string * string) list =
     canonicalEntryPayloads ()
     |> List.filter (fun (name, _) -> name <> "NOTICE.txt")
@@ -100,23 +93,14 @@ let private writeArchiveInternal (archivePath: string) (manifestBytes: byte[]) (
     use manifestSource = new MemoryStream(manifestBytes)
     use manifestTarget = manifestEntry.Open()
     manifestSource.CopyTo(manifestTarget)
-
-// Writes a single canonical archive; manifest's `files` SHA-256s match the actual payloads.
 let writeCanonicalArchive (archivePath: string) (manifestPath: string) (revision: string) (sdk: string) =
     let payloadHashes = canonicalPayloadHashes ()
     let manifestText = buildManifestText revision sdk payloadHashes
     let manifestBytes = Encoding.UTF8.GetBytes manifestText
     File.WriteAllText(manifestPath, manifestText)
     writeArchiveInternal archivePath manifestBytes []
-
-// Manifest with `files` SHA-256s matching the actual payload bytes; used by every
-// archive test that requires self-consistency to pass.
 let writeRevisionVariantArchive (archivePath: string) (manifestPath: string) (revision: string) =
     writeCanonicalArchive archivePath manifestPath revision canonicalSdk
-
-// Replaces the canonical `Mcp.Dotnet.dll` payload with caller-supplied bytes; the
-// manifest is rewritten so the declared SHA-256 matches the new payload, preserving
-// self-consistency under the production gate.
 let writeModifiedDotnetDllArchive (archivePath: string) (manifestPath: string) (replacementBytes: byte[]) (revision: string) =
     let payloadHashes =
         canonicalEntryPayloads ()
