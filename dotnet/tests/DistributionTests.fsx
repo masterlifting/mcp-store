@@ -60,9 +60,6 @@ let layout: DistributionTestHelper.Layout =
 
 // Concurrent pipe drains prevent child output from filling a redirected stream.
 async {
-    do! runDotnet [ "clean"; "dotnet/Mcp.Dotnet.fsproj"; "-c"; "Release"; "--nologo" ] |> Async.Ignore
-    do! runDotnet [ "build"; "dotnet/Mcp.Dotnet.fsproj"; "-c"; "Release"; "--nologo" ] |> Async.Ignore
-
     try
         Directory.CreateDirectory(Path.GetDirectoryName stalePublishPath) |> ignore
         File.WriteAllText(stalePublishPath, "stale staging output")
