@@ -8,6 +8,7 @@
 
 open System
 open System.Collections.Concurrent
+open System.Diagnostics
 open System.IO
 open System.Security.Cryptography
 open System.Text
@@ -52,6 +53,7 @@ let verifyCancelledWaiterReleasesMutex root id : Async<unit> =
         let mutexName = if OperatingSystem.IsWindows() then $"Local\\Mcp.Workflow.Runtime.{digest}" else $"Mcp.Workflow.Runtime.{digest}"
         let holderAcquired = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
         let holderReleased = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+        let cancelledActionPath = Path.Combine(taskDirectory root id, "cancelled-waiter-action.txt")
         use releaseHolder = new ManualResetEvent(false)
         let holderThread =
             Thread(ThreadStart(fun () ->
@@ -71,7 +73,8 @@ let verifyCancelledWaiterReleasesMutex root id : Async<unit> =
         holderThread.IsBackground <- true
         holderThread.Start()
         let baselineOwnerCount = activeLockOwnerThreads ()
-        let mutable waitingTask: Task<Result<TaskModel, RuntimeError>> option = None
+        let mutable waitingTask: Task<Result<unit, RuntimeError>> option = None
+        let cancellationWatch = Stopwatch()
 
         let! outcome =
             async {
@@ -79,7 +82,15 @@ let verifyCancelledWaiterReleasesMutex root id : Async<unit> =
                     do! holderAcquired.Task.WaitAsync(TimeSpan.FromSeconds 5.0) |> Async.AwaitTask
                 with :? TimeoutException -> return failwith "mutex-holder acquisition timed out"
                 use cancellation = new CancellationTokenSource()
-                let waiting = Async.StartAsTask(getTask root id, cancellationToken = cancellation.Token)
+                let waiting =
+                    Async.StartAsTask(
+                        withLock sidecar (fun () ->
+                            async {
+                                File.WriteAllText(cancelledActionPath, "executed")
+                                return Ok ()
+                            }),
+                        cancellationToken = cancellation.Token
+                    )
                 waitingTask <- Some waiting
 
                 let awaitOwnerCount predicate : Async<bool> =
@@ -94,6 +105,7 @@ let verifyCancelledWaiterReleasesMutex root id : Async<unit> =
 
                 let! contenderStarted = awaitOwnerCount (fun count -> count > baselineOwnerCount)
                 assertTrue "cancelled operation started its native mutex owner" contenderStarted
+                cancellationWatch.Start()
                 cancellation.Cancel()
 
                 let! ownerReturned = awaitOwnerCount ((=) baselineOwnerCount)
@@ -115,7 +127,15 @@ let verifyCancelledWaiterReleasesMutex root id : Async<unit> =
                     | Choice2Of2 error -> isCancellation error
                     | Choice1Of2 _ -> false
 
-                assertTrue "contended getTask preserves caller cancellation" cancelled
+                assertTrue "contended lock operation preserves caller cancellation" cancelled
+                cancellationWatch.Stop()
+                assertTrue "cancelled waiter does not execute or mutate its protected action" (not (File.Exists cancelledActionPath))
+                if not (OperatingSystem.IsWindows()) then
+                    assertTrue
+                        (sprintf "Unix cancellation completes within 500ms (elapsed %O)" cancellationWatch.Elapsed)
+                        (cancellationWatch.Elapsed <= TimeSpan.FromMilliseconds 500.0)
+                    printfn "Unix cancelled waiter released its owner and skipped the protected action in %O" cancellationWatch.Elapsed
+
                 releaseHolder.Set() |> ignore
                 do! holderReleased.Task.WaitAsync(TimeSpan.FromSeconds 5.0) |> Async.AwaitTask
                 let nextTask = Async.StartAsTask(getTask root id)

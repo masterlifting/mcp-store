@@ -299,6 +299,7 @@ let run () : Async<unit> =
     }
 
 if OperatingSystem.IsWindows() then
+    // Standalone entry bridge: FSI owns the process entry for this asynchronous script.
     run () |> Async.RunSynchronously
 else
     printfn "SKIP TaskScratch promote smoke: the current consumer is Windows-only"

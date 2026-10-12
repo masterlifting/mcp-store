@@ -135,6 +135,8 @@ async {
         File.WriteAllBytes(specPath, specBytes)
         if OperatingSystem.IsWindows() then
             File.SetAttributes(specPath, FileAttributes.ReadOnly ||| FileAttributes.Hidden)
+        else
+            File.SetUnixFileMode(specPath, UnixFileMode.UserRead ||| UnixFileMode.GroupRead ||| UnixFileMode.OtherRead)
         Directory.CreateDirectory referenceDirectory |> ignore
         Directory.CreateDirectory nestedScriptDirectory |> ignore
         File.WriteAllBytes(referencePath, referenceBytes)
@@ -160,6 +162,10 @@ async {
         if OperatingSystem.IsWindows() then
             assertTrue "read-only and hidden SPEC attributes survive reads" ((File.GetAttributes specPath &&& (FileAttributes.ReadOnly ||| FileAttributes.Hidden)) = (FileAttributes.ReadOnly ||| FileAttributes.Hidden))
             File.SetAttributes(specPath, FileAttributes.Normal)
+        else
+            let specMode = File.GetUnixFileMode specPath
+            let writeBits = UnixFileMode.UserWrite ||| UnixFileMode.GroupWrite ||| UnixFileMode.OtherWrite
+            assertTrue "read-only SPEC remains non-writable" ((specMode &&& writeBits) = enum<UnixFileMode> 0)
         assertTrue "nested link target remains untouched" (File.Exists(Path.Combine(opaqueTarget, "outside.txt")))
         let sidecarBytesBeforeCreate = File.ReadAllBytes(sidecar tempRoot activeId)
         do!
@@ -377,5 +383,5 @@ async {
         if Directory.Exists tempRoot && tempRoot.Contains("workflow-supporting-artifacts-", StringComparison.Ordinal) then
             Directory.Delete(tempRoot, true)
 }
-// FSI requires one synchronous bridge at the standalone script entry.
+// Standalone entry bridge: FSI owns the process entry for this asynchronous script.
 |> Async.RunSynchronously
