@@ -5946,6 +5946,127 @@ module private DirectoryBoundary =
             Error(PersistenceFailure $"could not open directory boundary: {error.Message}")
         | :? ArgumentException as error -> Error(PersistenceFailure $"could not open directory boundary: {error.Message}")
 
+// Classify the type of a task-root leaf. Windows uses FileAttributes (the
+// existing non-directory / non-reparse rule). On Unix, .NET's FileAttributes
+// does not encode the underlying file kind: FIFOs, sockets, character
+// devices, and block devices all map to Normal in release/11.0
+// FileStatus.Unix.cs.GetAttributes, so a Normal-based gate would let an
+// attacker plant a FIFO at the supporting SPEC.md path and stall the
+// workflow inside the mutex critical section on the next open/read. The
+// classification instead uses the .NET 11 runtime's native stat shim
+// `libSystem.Native!SystemNative_LStat`, which is documented as the
+// shim over lstat(2) in
+// release/11.0/src/native/libs/System.Native/pal_io.c:277-288 and
+// declared in
+// release/11.0/src/libraries/Common/src/Interop/Unix/System.Native/Interop.Stat.cs:65-66
+// with StringMarshalling.Utf8. The output is the normalized sequential
+// FileStatus from pal_io.h:17-38; only Mode is consumed, and only the
+// POSIX S_IFREG bit is checked, so the runtime—not Workflow—owns every
+// libc / architecture / kernel-layout translation. `SystemNative_LStat`
+// is an internal runtime export; this is documented in the producer
+// README and re-validated whenever the .NET runtime baseline changes.
+module private FileKind =
+    [<Literal>]
+    let private S_IFMT = 0xF000
+
+    [<Literal>]
+    let private S_IFREG = 0x8000
+
+    // Sequential layout matches release/11.0/pal_io.h FileStatus fields
+    // in declaration order with default natural alignment; same order as
+    // the C# struct in release/11.0/Interop.Stat.cs.
+    [<StructLayout(LayoutKind.Sequential)>]
+    type private FileStatus =
+        struct
+            val Flags : int32
+            val Mode : int32
+            val Uid : uint32
+            val Gid : uint32
+            val Size : int64
+            val ATime : int64
+            val ATimeNsec : int64
+            val MTime : int64
+            val MTimeNsec : int64
+            val CTime : int64
+            val CTimeNsec : int64
+            val BirthTime : int64
+            val BirthTimeNsec : int64
+            val Dev : int64
+            val RDev : int64
+            val Ino : int64
+            val UserFlags : uint32
+            val HardLinkCount : int32
+        end
+
+    [<DllImport("libSystem.Native", EntryPoint = "SystemNative_LStat", CallingConvention = CallingConvention.Cdecl)>]
+    extern int private lstat(
+        [<MarshalAs(UnmanagedType.LPUTF8Str)>] string path,
+        FileStatus& output)
+
+    /// Result of the Unix native classification. `Failure` carries the
+    /// original exception so the caller can surface it as a typed
+    /// `PersistenceFailure` instead of swallowing it.
+    type private Classification =
+        | Regular
+        | NotRegular
+        | Failure of exn
+
+    let private unixClassify (path: string) : Classification =
+        try
+            let mutable status : FileStatus = Unchecked.defaultof<FileStatus>
+            let result = lstat(path, &status)
+
+            if result <> 0 then
+                // Native lstat returns -1 on missing path, permission denied,
+                // symlink loop, name too long, etc. None of these is a
+                // regular file, so the entry is rejected at the same boundary
+                // as a directory / FIFO / socket; the outer operation continues
+                // with the remaining entries.
+                NotRegular
+            elif (status.Mode &&& S_IFMT) = S_IFREG then
+                Regular
+            else
+                NotRegular
+        with
+        | :? DllNotFoundException as error ->
+            Failure error
+        | :? EntryPointNotFoundException as error ->
+            Failure error
+        | :? TypeLoadException as error ->
+            // Struct layout mismatch with the native shim is a runtime /
+            // configuration defect; surface it instead of treating it as a
+            // safe "not regular".
+            Failure error
+
+    /// True only when the leaf at `path` is a regular file at that path.
+    /// On Unix, the .NET 11 `SystemNative_LStat` shim classifies the entry
+    /// itself, so symlinks, FIFOs, sockets, character devices, and block
+    /// devices all yield `Ok false` without opening or blocking on them.
+    /// A missing native shim or layout mismatch yields `Error
+    /// PersistenceFailure`; expected per-entry failures (path missing,
+    /// permission denied) yield `Ok false`.
+    let isRegularFile (path: string) : Result<bool, RuntimeError> =
+        if OperatingSystem.IsWindows() then
+            try
+                let attrs = File.GetAttributes path
+
+                Ok(
+                    not (attrs.HasFlag FileAttributes.Directory)
+                    && not (attrs.HasFlag FileAttributes.ReparsePoint)
+                )
+            with
+            | :? IOException -> Ok false
+            | :? UnauthorizedAccessException -> Ok false
+        else
+            match unixClassify path with
+            | Regular -> Ok true
+            | NotRegular -> Ok false
+            | Failure error ->
+                Error(
+                    PersistenceFailure
+                        $"SystemNative_LStat shim unavailable for {path}: {error.GetType().Name}: {error.Message}"
+                )
+
 let private sidecarPath root requestedTaskId =
     match taskId requestedTaskId with
     | Error error -> Error error
@@ -6218,11 +6339,39 @@ let private loadTaskLenient path = readTaskLenient path
 
 let private loadTaskWith (profiles: Map<string, EffectiveProfile>) path = readTaskWith profiles path
 
-// A task directory has one supported layout: the runtime sidecar at its root.
-// TASK.md/references layouts and persisted locks are not inputs.
+// Task-owned supporting material is narrowly allowlisted at the task root:
+// the runtime sidecar, an optional SPEC.md regular file, and optional `docs/`
+// and `scripts/` directories. Nested contents under those directories are
+// opaque to Workflow and never followed; legacy `runtime.lock`, `TASK.md`,
+// and root `references/` layouts stay unsupported. The file-kind classifier
+// is `FileKind.isRegularFile`, which uses the .NET 11
+// `SystemNative_LStat` shim on Unix and the existing FileAttributes rule on
+// Windows, so FIFOs, sockets, and devices fail closed at the immediate root
+// without opening or blocking on them. A missing or layout-mismatched native
+// shim is reported as `PersistenceFailure`; per-entry native failures
+// (missing path, permission denied) are mapped to "unsupported entry" so
+// the outer operation can continue.
 let private validateTaskDirectory (taskDirectory: string) : Result<unit, RuntimeError> =
     let comparison =
         if OperatingSystem.IsWindows() then StringComparison.OrdinalIgnoreCase else StringComparison.Ordinal
+
+    let isDirectory (attributes: FileAttributes) = attributes.HasFlag FileAttributes.Directory
+
+    let isAllowlistedEntry (entryPath: string) (entryName: string) (attributes: FileAttributes) : Result<bool, RuntimeError> =
+        if isDirectory attributes then
+            Ok(
+                String.Equals(entryName, "docs", comparison)
+                || String.Equals(entryName, "scripts", comparison)
+            )
+        else
+            match FileKind.isRegularFile entryPath with
+            | Error error -> Error error
+            | Ok isRegular ->
+                Ok(
+                    isRegular
+                    && (String.Equals(entryName, SidecarFileName, comparison)
+                        || String.Equals(entryName, "SPEC.md", comparison))
+                )
 
     try
         if not (Directory.Exists taskDirectory) then
@@ -6235,17 +6384,19 @@ let private validateTaskDirectory (taskDirectory: string) : Result<unit, Runtime
                 | [] -> Ok()
                 | entry :: rest ->
                     let attributes = File.GetAttributes entry
+                    let entryName = Path.GetFileName entry
 
                     if attributes.HasFlag FileAttributes.ReparsePoint then
                         Error(InvalidInput $"task directory must not contain a reparse point: {entry}")
-                    elif String.Equals(Path.GetFileName entry, SidecarFileName, comparison)
-                         && not (attributes.HasFlag FileAttributes.Directory) then
-                        visit rest
                     else
-                        Error(
-                            InvalidInput
-                                $"task directory contains unsupported entry; only '{SidecarFileName}' is permitted: {entry}"
-                        )
+                        match isAllowlistedEntry entry entryName attributes with
+                        | Error error -> Error error
+                        | Ok true -> visit rest
+                        | Ok false ->
+                            Error(
+                                InvalidInput
+                                    $"task directory contains unsupported entry: {entry}"
+                            )
 
             visit entries
     with
@@ -6385,11 +6536,24 @@ let createTaskWithProfile root profileId request : Async<Result<TaskModel, Runti
                                         match validateTaskDirectory taskDirectory with
                                         | Error error -> return Error error
                                         | Ok() ->
+                                            // Reject occupied task directories so create cannot bootstrap
+                                            // alongside pre-existing supporting artifacts. An empty
+                                            // directory remains reusable; a missing directory is created
+                                            // on demand below.
                                             if File.Exists path then
                                                 return
                                                     Error(
                                                         InvalidInput
                                                             $"task directory contains runtime state '{SidecarFileName}': {path}"
+                                                    )
+                                            elif
+                                                Directory.Exists taskDirectory
+                                                && not (Seq.isEmpty (Directory.EnumerateFileSystemEntries taskDirectory))
+                                            then
+                                                return
+                                                    Error(
+                                                        InvalidInput
+                                                            $"task directory is already occupied: {taskDirectory}"
                                                     )
                                             else
                                                 return! persist path task

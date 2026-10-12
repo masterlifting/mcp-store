@@ -1,8 +1,7 @@
 // role: test entrypoint
-// Source-level ephemeral-lock invariant coverage. Every normal Workflow
-// operation must leave .tasks/<id>/ containing only runtime.json. A background
-// sampler watches for any sub-second runtime.lock appearance while task_create,
-// task_get, task_apply, and task_validate run against one real task directory.
+// This fixture has no supporting artifacts. A background sampler watches for
+// any sub-second runtime.lock appearance while task operations run; coexistence
+// with supporting artifacts is covered separately.
 
 #load "../domain/ComputationExpressions.fs"
 #load "../domain/Workflow.fs"

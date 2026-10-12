@@ -1,5 +1,5 @@
 // role: test entrypoint
-// Focused deterministic coverage for runtime path containment and the strict
+// Focused deterministic coverage for runtime path containment and the typed
 // task-directory layout. Reparse points fail closed and runtime.lock is never
 // a supported persistence boundary.
 
