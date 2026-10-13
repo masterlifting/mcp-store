@@ -179,6 +179,29 @@ let literalCalls = @"pendingTask.Result pendingTask.Wait()"
             let blocked = checkText relative extraBridge |> violations
             Expect.equal (blocked |> List.map _.Pattern) [ "Async.RunSynchronously"; "Async.RunSynchronously"; "Async.RunSynchronously" ] "an extra bridge invalidates the exact allowlist"
 
+        testCase "supporting artifact test entry bridges require exact paths, shapes, and documentation" <| fun _ ->
+            let supportingArtifact =
+                "// Standalone entry bridge: FSI owns the process entry for this asynchronous script.\n|> Async.RunSynchronously\n"
+            Expect.isEmpty
+                (violations (checkText "workflow/tests/TaskSupportingArtifactTests.fsx" supportingArtifact))
+                "the documented entry bridge is allowed at the supporting-artifact test entry"
+
+            let taskScratch =
+                "// Standalone entry bridge: FSI owns the process entry for this asynchronous script.\nrun () |> Async.RunSynchronously\n"
+            Expect.isEmpty
+                (violations (checkText "workflow/tests/TaskScratchCompatibilityTests.fsx" taskScratch))
+                "the documented guarded entry bridge is allowed at the TaskScratch test entry"
+
+            Expect.equal
+                (violations (checkText "workflow/tests/TaskSupportingArtifactTests.fsx" "|> Async.RunSynchronously\n") |> List.length)
+                1
+                "an undocumented bridge remains blocked"
+
+            Expect.equal
+                (violations (checkText "other.fsx" taskScratch) |> List.length)
+                1
+                "the exact bridge is not allowlisted at another path"
+
         testCase "ordinary inline comments cannot exempt blocking calls" <| fun _ ->
             let source = "// SYNC-OVER-ASYNC-ALLOW: no suppression syntax exists\ntask.Wait()\n"
             Expect.equal (violations (checkText "sample.fs" source) |> List.length) 1 "inline comment is not an exemption"

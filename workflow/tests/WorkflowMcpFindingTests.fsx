@@ -445,7 +445,13 @@ async {
     let linkedStderrTask = mcpLinked.StandardError.ReadToEndAsync()
     let! response = callTool mcpLinked "ARCH trusted reparse" 50 "task_get" (getArgs trustedLink "FND-1")
     let error = expectToolError "ARCH trusted reparse" "INVALID_INPUT" response
-    assertContains "ARCH trusted reparse message" "trusted workspace must not be a reparse point" (nodeString error.["message"])
+    let trustedRootMessage = nodeString error.["message"]
+
+    if OperatingSystem.IsWindows() then
+        assertContains "ARCH trusted reparse message" "trusted workspace must not be a reparse point" trustedRootMessage
+    else
+        assertContains "ARCH trusted reparse message" "outside the trusted workspace" trustedRootMessage
+
     do! stopMcp mcpLinked linkedStderrTask
 
     [ traversalLink; trustedLink ] |> List.iter removeLink

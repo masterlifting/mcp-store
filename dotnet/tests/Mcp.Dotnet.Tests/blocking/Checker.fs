@@ -66,6 +66,8 @@ let private topLevelBridgeSites =
           "workflow/tests/WorkflowMcpTests.fsx", [ "|> Async.RunSynchronously" ]
           "workflow/tests/WorkflowMcpNativeCompatTests.fsx", [ "|> Async.RunSynchronously" ]
           "workflow/tests/WorkflowMcpFindingTests.fsx", [ "|> Async.RunSynchronously" ]
+          "workflow/tests/TaskSupportingArtifactTests.fsx", [ "|> Async.RunSynchronously" ]
+          "workflow/tests/TaskScratchCompatibilityTests.fsx", [ "run () |> Async.RunSynchronously" ]
           "workflow/tests/PackagedRuntimeCoordinationTests.fsx", [ "|> Async.RunSynchronously" ] ]
 
 let isExcludedPath (path: string) =
@@ -291,14 +293,14 @@ let private documentedBridge (relative: string) (code: string) (lines: string ar
         | Some expected -> observedLines = expected && List.contains (lines.[lineNumber - 1].Trim()) expected
         | None -> false
 
+    // Shared runtime exemption rule references the standalone entry bridge or the documented FSI entry; a comment that only mentions a synchronous wait at the host boundary is not an exemption.
     let documentation =
         lines
         |> Array.exists (fun comment ->
             let trimmed = comment.Trim()
             trimmed.StartsWith("//", StringComparison.Ordinal)
             && (trimmed.Contains("Standalone entry bridge", StringComparison.Ordinal)
-                || trimmed = "// FSI needs one synchronous top-level entry for the asynchronous script."
-                || trimmed.Contains("synchronous wait is at the host boundary", StringComparison.Ordinal)))
+                || trimmed = "// FSI needs one synchronous top-level entry for the asynchronous script."))
 
     if exactSites && documentation then Some "documented standalone entry bridge" else None
 
