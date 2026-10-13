@@ -30,7 +30,7 @@ if (-not (Test-Path -LiteralPath $suiteDll)) {
     throw "the compiled release regression project is not built: $suiteDll (build infrastructure/release/tests/Tests.fsproj -c $Configuration first)"
 }
 
-# Producer scripts run by this gate; the packaging tests need a clean tree, so `orchestrate` runs them per component instead.
+# Producer scripts run by this gate; the packaging tests need a clean tree, so the `prepare` tests phase runs them per component instead.
 . (Join-Path $PSScriptRoot "Roster.ps1")
 $roster = Get-ReleaseRoster -Root $Root
 
@@ -42,7 +42,10 @@ $orchestratedEntrypoints = @($roster | ForEach-Object {
     "$componentRoot/tests/DistributionTests.fsx"
 })
 
-foreach ($relative in $scriptEntrypoints + $orchestratedEntrypoints) {
+# The `prepare` tests phase runs this package-dependent suite against the clean built distribution, so the gate asserts it exists without executing it.
+$packagedEntrypoints = @("workflow/tests/PackagedRuntimeCoordinationTests.fsx")
+
+foreach ($relative in $scriptEntrypoints + $orchestratedEntrypoints + $packagedEntrypoints) {
     if (-not (Test-Path -LiteralPath (Join-Path $Root $relative))) {
         throw "release-path script entrypoint is missing: $relative"
     }

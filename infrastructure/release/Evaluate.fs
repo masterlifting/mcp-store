@@ -7,6 +7,7 @@ module ReleaseEvaluate
 open System
 open System.IO
 open System.Security.Cryptography
+open System.Text
 open BuildProvenance
 
 type CandidateDto =
@@ -67,72 +68,359 @@ type Resolution =
       PublishedMetadataAssetSha256: string option
       MetadataRecoveryNeeded: bool }
 
-let private sha256Hex (bytes: byte[]) : string =
-    SHA256.HashData bytes |> Convert.ToHexString |> fun value -> value.ToLowerInvariant()
+// Bounded snapshot of one candidate: the verified archive + manifest bytes,
+// every parse-observed digest and size, the verified embedded manifest, the
+// derived DTO and projection. The internal constructor and exposed factory
+// guarantee that no VerifiedCandidate ever exists whose bytes, hashes, sizes,
+// toolchain, or embedded manifest disagree with the supplied parsed policy
+// and evaluated HEAD; the rejection happens BEFORE any transport, auth, or
+// upload-core composition is constructed.
+//
+// The verified byte arrays live behind private fields; public accessors
+// return defensive copies so a caller can never mutate the snapshot, and the
+// upload core reads them only via the `ArchiveBytesCopy` / `ManifestBytesCopy`
+// accessors or the ownership-transfer stream methods.
+type VerifiedCandidate internal
+    (
+        archiveBytes: byte[],
+        manifestBytes: byte[],
+        archiveObservation: ReleaseCompare.ArchiveObservation,
+        archiveSha256: string,
+        manifestSha256: string,
+        archiveSize: int,
+        manifestSize: int,
+        embeddedManifestBytes: byte[],
+        embeddedManifestSha256: string,
+        embeddedRevision: string,
+        dto: CandidateDto,
+        projection: ReleaseMetadata.ProducerMetadataProjection
+    ) =
+    member _.ArchiveBytesCopy () = Array.copy archiveBytes
+    member _.ManifestBytesCopy () = Array.copy manifestBytes
+    member _.ArchiveBytesStream () = new MemoryStream(archiveBytes, false) :> Stream
+    member _.ManifestBytesStream () = new MemoryStream(manifestBytes, false) :> Stream
+    member _.ArchiveObservation = archiveObservation
+    member _.ArchiveSha256 = archiveSha256
+    member _.ManifestSha256 = manifestSha256
+    member _.ArchiveSize = archiveSize
+    member _.ManifestSize = manifestSize
+    member _.EmbeddedManifestBytesCopy () = Array.copy embeddedManifestBytes
+    member _.EmbeddedManifestSha256 = embeddedManifestSha256
+    member _.EmbeddedRevision = embeddedRevision
+    member _.Dto = dto
+    member _.Projection = projection
 
-let private readCandidateRevision (manifestPath: string) : Async<Result<string, ReleaseError>> =
-    async {
-        match! BuildProvenance.readAllTextAsync manifestPath with
-        | Error error -> return Error error
-        | Ok text ->
-            let mutable failure : ReleaseError option = None
-            let mutable revision : string option = None
+// Factory module: the only path that constructs a VerifiedCandidate. Every
+// required check below is run BEFORE any transport, auth, or upload-core
+// composition is constructed. A failure in any check yields a typed
+// `ReleaseError` without ever touching the network or opening a file.
+module VerifiedCandidate =
+    let private candidateLabel = "<publisher-candidate>"
+    let private manifestLabel = "<verified-manifest>"
+    let private archiveLabel = "<verified-archive>"
 
-            try
-                let doc = System.Text.Json.Nodes.JsonNode.Parse text
+    let private sha256Hex (bytes: byte[]) : string =
+        SHA256.HashData bytes |> Convert.ToHexString |> fun v -> v.ToLowerInvariant()
 
-                if isNull doc then
-                    failure <- Some(MalformedArtifact(manifestPath, "the document is empty"))
+    let private requireField (label: string) (value: string) : Result<unit, ReleaseError> =
+        if String.IsNullOrWhiteSpace value then
+            Error(MalformedArtifact(candidateLabel, $"the verified candidate is missing required field '{label}'"))
+        else
+            Ok()
+
+    let create
+        (policy: ReleasePolicy.PolicyProjection)
+        (archiveBytes: byte[])
+        (manifestBytes: byte[])
+        (archiveName: string)
+        (evaluatedHead: string)
+        (metadataLocalPath: string)
+        (repositoryOwner: string)
+        (repositoryName: string)
+        : Async<Result<VerifiedCandidate, ReleaseError>> =
+        // Defensive copies of the caller-supplied byte arrays so the
+        // VerifiedCandidate snapshot is intrinsically immutable: even if the
+        // caller mutates the underlying byte[] after the factory returns,
+        // the VerifiedCandidate still holds the verified snapshot bytes.
+        let archiveBytesCopy = Array.copy archiveBytes
+        let manifestBytesCopy = Array.copy manifestBytes
+
+        let computation () : Result<VerifiedCandidate, ReleaseError> =
+            let fieldCheck label value =
+                if String.IsNullOrWhiteSpace value then
+                    Error(MalformedArtifact(candidateLabel, "the verified candidate is missing required field '" + label + "'"))
                 else
-                    let obj = doc.AsObject()
+                    Ok ()
+            let ensure cond error = if cond then Ok () else Error error
+            let bytesAvailable () =
+                if isNull archiveBytesCopy || archiveBytesCopy.Length = 0 then
+                    Error(MalformedArtifact(candidateLabel, "the verified candidate archive bytes are missing or empty"))
+                elif isNull manifestBytesCopy || manifestBytesCopy.Length = 0 then
+                    Error(MalformedArtifact(candidateLabel, "the verified candidate manifest bytes are missing or empty"))
+                else
+                    Ok ()
+            let archiveSha = sha256Hex archiveBytesCopy
+            let archiveSize = archiveBytesCopy.Length
+            let manifestSha = sha256Hex manifestBytesCopy
+            let manifestSize = manifestBytesCopy.Length
+            let buildCandidate (header: ReleaseCompare.EmbeddedManifestHeader) (observation: ReleaseCompare.ArchiveObservation) (embeddedBytes: byte[]) (embeddedSha: string) =
+                let contract : ReleaseCompare.ComponentContract =
+                    { ComponentId = policy.ComponentId
+                      Version = policy.Version
+                      ArchiveName = archiveName
+                      EntryAllowlist = List.sort (policy.PublishedFiles @ [ "NOTICE.txt"; "distribution.json" ]) }
+                let metadataAssetName = ReleaseMetadata.metadataAssetName policy.ComponentId policy.Version
+                let dto : CandidateDto =
+                    { Contract = contract
+                      ManifestPath = manifestLabel
+                      ArchivePath = archiveLabel
+                      EvaluatedHead = evaluatedHead
+                      AssetUri = policy.AssetUri
+                      MetadataAssetName = metadataAssetName
+                      MetadataLocalPath = metadataLocalPath
+                      ProducerSdk = Some policy.SdkVersion
+                      ProducerRuntime = Some policy.RuntimeVersion
+                      ProducerPlatform = Some policy.Platform
+                      RepositoryOwner = repositoryOwner
+                      RepositoryName = repositoryName }
+                let projection =
+                    ReleaseMetadata.makeProjection
+                        policy.ComponentId
+                        policy.Version
+                        policy.AssetUri
+                        archiveName
+                        archiveSha
+                        manifestSha
+                        header.Revision
+                        (Some policy.SdkVersion)
+                        (Some policy.RuntimeVersion)
+                        (Some policy.Platform)
+                VerifiedCandidate(archiveBytesCopy, manifestBytesCopy, observation, archiveSha, manifestSha, archiveSize, manifestSize, embeddedBytes, embeddedSha, header.Revision, dto, projection)
+            let fieldChecks =
+                fieldCheck "policy.componentId" policy.ComponentId
+                |> Result.bind (fun _ -> fieldCheck "policy.version" policy.Version)
+                |> Result.bind (fun _ -> fieldCheck "policy.entryDll" policy.EntryDll)
+                |> Result.bind (fun _ -> fieldCheck "policy.sdkVersion" policy.SdkVersion)
+                |> Result.bind (fun _ -> fieldCheck "policy.runtimeVersion" policy.RuntimeVersion)
+                |> Result.bind (fun _ -> fieldCheck "policy.platform" policy.Platform)
+                |> Result.bind (fun _ -> fieldCheck "policy.archiveName" policy.ArchiveName)
+                |> Result.bind (fun _ -> fieldCheck "policy.assetUri" policy.AssetUri)
+                |> Result.bind (fun _ -> fieldCheck "archiveName" archiveName)
+                |> Result.bind (fun _ -> fieldCheck "evaluatedHead" evaluatedHead)
+                |> Result.bind (fun _ -> fieldCheck "metadataLocalPath" metadataLocalPath)
+                |> Result.bind (fun _ -> fieldCheck "repositoryOwner" repositoryOwner)
+                |> Result.bind (fun _ -> fieldCheck "repositoryName" repositoryName)
+            let expectedEntryNames = List.sort (policy.PublishedFiles @ [ "NOTICE.txt"; "distribution.json" ])
+            let runEmbeddedChecks (observation: ReleaseCompare.ArchiveObservation) (embeddedBody: string) (embeddedBytes: byte[]) (embeddedSha: string) =
+                let manifestBytesCheck = ensure (embeddedBytes = manifestBytesCopy) (IdentityMismatch("candidate manifest bytes", "embedded == standalone", "embedded " + string embeddedBytes.Length + " bytes (sha " + embeddedSha + ") vs standalone " + string manifestSize + " bytes (sha " + manifestSha + ")"))
+                let manifestShaCheck = ensure (embeddedSha = manifestSha) (IdentityMismatch("candidate manifest sha", embeddedSha, manifestSha))
+                let archiveShaCheck = ensure (archiveSha = observation.ArchiveSha256) (IdentityMismatch("candidate archive sha", archiveSha, observation.ArchiveSha256))
+                let allowlistCheck =
+                        let actualEntryNames = List.sort (List.map (fun (e: ReleaseCompare.EntryObservation) -> e.Name) observation.Entries)
+                        ensure (actualEntryNames = expectedEntryNames) (AllowlistMismatch("the candidate archive entry allowlist does not match the producer contract", expectedEntryNames, actualEntryNames))
+                let entryFieldsChecks (header: ReleaseCompare.EmbeddedManifestHeader) =
+                    let revisionCheck = ensure (header.Revision = evaluatedHead) (RevisionMismatch(evaluatedHead, header.Revision))
+                    let idCheck = ensure (header.Id = policy.ComponentId) (IdentityMismatch("id", policy.ComponentId, header.Id))
+                    let versionCheck = ensure (header.Version = policy.Version) (IdentityMismatch("version", policy.Version, header.Version))
+                    let archiveCheck = ensure (header.Archive = archiveName) (IdentityMismatch("archive", archiveName, header.Archive))
+                    revisionCheck
+                    |> Result.bind (fun _ -> idCheck)
+                    |> Result.bind (fun _ -> versionCheck)
+                    |> Result.bind (fun _ -> archiveCheck)
+                manifestBytesCheck
+                |> Result.bind (fun _ -> manifestShaCheck)
+                |> Result.bind (fun _ -> archiveShaCheck)
+                |> Result.bind (fun _ -> allowlistCheck)
+                |> Result.bind (fun _ ->
+                    ReleaseCompare.parseEmbeddedManifestHeader embeddedBody
+                    |> Result.bind (fun header -> entryFieldsChecks header |> Result.map (fun _ -> header)))
+            let fromObservation (observation: ReleaseCompare.ArchiveObservation) =
+                match observation.ManifestBody with
+                | None -> Error(MalformedArtifact(candidateLabel, "the candidate archive is missing the canonical distribution.json entry; refusing to publish"))
+                | Some embeddedBody ->
+                    let embeddedBytes = Encoding.UTF8.GetBytes embeddedBody
+                    let embeddedSha = sha256Hex embeddedBytes
+                    runEmbeddedChecks observation embeddedBody embeddedBytes embeddedSha
+                    |> Result.map (fun header -> (header, observation, embeddedBytes, embeddedSha))
+            fieldChecks
+            |> Result.bind (fun _ -> bytesAvailable ())
+            |> Result.bind (fun _ -> ReleaseCompare.observeBytes candidateLabel archiveBytesCopy)
+            |> Result.bind fromObservation
+            |> Result.bind (fun (header, observation, embeddedBytes, embeddedSha) -> Ok(buildCandidate header observation embeddedBytes embeddedSha))
+        async { return computation () }
 
-                    if not (obj.ContainsKey "revision") then
-                        failure <- Some(MalformedArtifact(manifestPath, "the 'revision' field is missing"))
+    // SEC1 boundary adapter: builds a VerifiedCandidate from the typed
+    // `CandidateArchiveSnapshot` produced by `ReleaseHandoff.readRawTransport`.
+    // The snapshot already holds the bounded outer/inner archive bytes, the
+    // standalone manifest bytes, the embedded manifest bytes, the canonical
+    // outer/inner digests, and the verified `distribution.json` payload —
+    // every byte the factory needs is read through defensive-copy or stream
+    // accessors so no mutable reference escapes the snapshot. The factory
+    // re-runs the canonical embedded-manifest check (entry allowlist, embedded
+    // id/version/archive/revision) using the snapshot's bytes; no policy or
+    // toolchain values are duplicated from the trusted receipt. The policy
+    // argument is the byte-safe `parseBytes` projection re-derived from the
+    // canonical Config.fsx bytes by the publisher, never a candidate-supplied
+    // projection. The evaluated head, owner and name come from the platform-
+    // supplied CLI / event context; the metadata local path is supplied by the
+    // caller and is the only place outside `VerifiedCandidate` that references
+    // the on-disk metadata asset.
+    let createFromSnapshot
+        (snapshot: ReleaseHandoff.CandidateArchiveSnapshot)
+        (policy: ReleasePolicy.PolicyProjection)
+        (archiveName: string)
+        (evaluatedHead: string)
+        (metadataLocalPath: string)
+        (repositoryOwner: string)
+        (repositoryName: string)
+        : Async<Result<VerifiedCandidate, ReleaseError>> =
+        async {
+            let fieldCheck label value =
+                if String.IsNullOrWhiteSpace value then
+                    Error(MalformedArtifact(candidateLabel, "the verified candidate is missing required field '" + label + "'"))
+                else
+                    Ok ()
+            let ensure cond error = if cond then Ok () else Error error
+
+            let computation () : Result<VerifiedCandidate, ReleaseError> =
+                let innerBytesCopy = snapshot.InnerArchiveBytesCopy ()
+                let manifestBytesCopy = snapshot.ManifestBytesCopy ()
+                let embeddedBytesCopy = snapshot.EmbeddedManifestBytesCopy ()
+
+                let archiveSha = sha256Hex innerBytesCopy
+                let archiveSize = innerBytesCopy.Length
+                let manifestSha = sha256Hex manifestBytesCopy
+                let manifestSize = manifestBytesCopy.Length
+                let embeddedSha = sha256Hex embeddedBytesCopy
+
+                let buildCandidate (header: ReleaseCompare.EmbeddedManifestHeader) (observation: ReleaseCompare.ArchiveObservation) =
+                    let contract : ReleaseCompare.ComponentContract =
+                        { ComponentId = policy.ComponentId
+                          Version = policy.Version
+                          ArchiveName = archiveName
+                          EntryAllowlist = List.sort (policy.PublishedFiles @ [ "NOTICE.txt"; "distribution.json" ]) }
+                    let metadataAssetName = ReleaseMetadata.metadataAssetName policy.ComponentId policy.Version
+                    let dto : CandidateDto =
+                        { Contract = contract
+                          ManifestPath = manifestLabel
+                          ArchivePath = archiveLabel
+                          EvaluatedHead = evaluatedHead
+                          AssetUri = policy.AssetUri
+                          MetadataAssetName = metadataAssetName
+                          MetadataLocalPath = metadataLocalPath
+                          ProducerSdk = Some policy.SdkVersion
+                          ProducerRuntime = Some policy.RuntimeVersion
+                          ProducerPlatform = Some policy.Platform
+                          RepositoryOwner = repositoryOwner
+                          RepositoryName = repositoryName }
+                    let projection =
+                        ReleaseMetadata.makeProjection
+                            policy.ComponentId
+                            policy.Version
+                            policy.AssetUri
+                            archiveName
+                            archiveSha
+                            manifestSha
+                            header.Revision
+                            (Some policy.SdkVersion)
+                            (Some policy.RuntimeVersion)
+                            (Some policy.Platform)
+                    VerifiedCandidate
+                        (innerBytesCopy,
+                         manifestBytesCopy,
+                         observation,
+                         archiveSha,
+                         manifestSha,
+                         archiveSize,
+                         manifestSize,
+                         embeddedBytesCopy,
+                         embeddedSha,
+                         header.Revision,
+                         dto,
+                         projection)
+
+                let fieldChecks =
+                    fieldCheck "policy.componentId" policy.ComponentId
+                    |> Result.bind (fun _ -> fieldCheck "policy.version" policy.Version)
+                    |> Result.bind (fun _ -> fieldCheck "policy.entryDll" policy.EntryDll)
+                    |> Result.bind (fun _ -> fieldCheck "policy.sdkVersion" policy.SdkVersion)
+                    |> Result.bind (fun _ -> fieldCheck "policy.runtimeVersion" policy.RuntimeVersion)
+                    |> Result.bind (fun _ -> fieldCheck "policy.platform" policy.Platform)
+                    |> Result.bind (fun _ -> fieldCheck "policy.archiveName" policy.ArchiveName)
+                    |> Result.bind (fun _ -> fieldCheck "policy.assetUri" policy.AssetUri)
+                    |> Result.bind (fun _ -> fieldCheck "archiveName" archiveName)
+                    |> Result.bind (fun _ -> fieldCheck "evaluatedHead" evaluatedHead)
+                    |> Result.bind (fun _ -> fieldCheck "metadataLocalPath" metadataLocalPath)
+                    |> Result.bind (fun _ -> fieldCheck "repositoryOwner" repositoryOwner)
+                    |> Result.bind (fun _ -> fieldCheck "repositoryName" repositoryName)
+
+                let bytesAvailable () =
+                    if isNull innerBytesCopy || innerBytesCopy.Length = 0 then
+                        Error(MalformedArtifact(candidateLabel, "the verified candidate inner archive bytes are missing or empty"))
+                    elif isNull manifestBytesCopy || manifestBytesCopy.Length = 0 then
+                        Error(MalformedArtifact(candidateLabel, "the verified candidate manifest bytes are missing or empty"))
+                    elif isNull embeddedBytesCopy || embeddedBytesCopy.Length = 0 then
+                        Error(MalformedArtifact(candidateLabel, "the verified candidate embedded manifest bytes are missing or empty"))
                     else
-                        let value = obj.["revision"]
-                        if isNull value then
-                            failure <- Some(MalformedArtifact(manifestPath, "the 'revision' field is missing"))
-                        else
-                            revision <- Some(value.GetValue<string>())
-            with
-            | :? System.Text.Json.JsonException as error ->
-                failure <- Some(MalformedArtifact(manifestPath, $"the manifest is not valid JSON: {error.Message}"))
-            | :? FormatException as error ->
-                failure <- Some(MalformedArtifact(manifestPath, $"the manifest is not valid JSON: {error.Message}"))
-            | :? InvalidOperationException as error ->
-                failure <- Some(MalformedArtifact(manifestPath, $"the manifest is not valid JSON: {error.Message}"))
+                        Ok ()
 
-            match failure, revision with
-            | Some error, _ -> return Error error
-            | None, Some value -> return Ok value
-            | None, None -> return Error(MalformedArtifact(manifestPath, "the manifest did not yield a parseable revision"))
-    }
+                // The snapshot already cross-checked standalone/embedded
+                // manifest byte equality and the canonical outer entry set;
+                // the factory re-runs the policy-bound checks against the
+                // snapshot's bytes so no candidate-controlled value escapes.
+                let expectedEntryNames = List.sort (policy.PublishedFiles @ [ "NOTICE.txt"; "distribution.json" ])
+                let runSnapshotChecks
+                    (observation: ReleaseCompare.ArchiveObservation)
+                    (embeddedBody: string)
+                    : Result<ReleaseCompare.EmbeddedManifestHeader, ReleaseError> =
+                    let manifestBytesCheck =
+                        ensure (embeddedBytesCopy = manifestBytesCopy)
+                            (IdentityMismatch("candidate manifest bytes", "embedded == standalone",
+                                $"embedded {embeddedBytesCopy.Length} bytes (sha {embeddedSha}) vs standalone {manifestSize} bytes (sha {manifestSha})"))
+                    let manifestShaCheck =
+                        ensure (embeddedSha = manifestSha)
+                            (IdentityMismatch("candidate manifest sha", embeddedSha, manifestSha))
+                    let archiveShaCheck =
+                        ensure (archiveSha = observation.ArchiveSha256)
+                            (IdentityMismatch("candidate archive sha", archiveSha, observation.ArchiveSha256))
+                    let allowlistCheck =
+                        let actualEntryNames = List.sort (List.map (fun (e: ReleaseCompare.EntryObservation) -> e.Name) observation.Entries)
+                        ensure (actualEntryNames = expectedEntryNames)
+                            (AllowlistMismatch("the candidate archive entry allowlist does not match the producer contract", expectedEntryNames, actualEntryNames))
+                    let entryFieldsChecks (header: ReleaseCompare.EmbeddedManifestHeader) =
+                        let revisionCheck = ensure (header.Revision = evaluatedHead) (RevisionMismatch(evaluatedHead, header.Revision))
+                        let idCheck = ensure (header.Id = policy.ComponentId) (IdentityMismatch("id", policy.ComponentId, header.Id))
+                        let versionCheck = ensure (header.Version = policy.Version) (IdentityMismatch("version", policy.Version, header.Version))
+                        let archiveCheck = ensure (header.Archive = archiveName) (IdentityMismatch("archive", archiveName, header.Archive))
+                        revisionCheck
+                        |> Result.bind (fun _ -> idCheck)
+                        |> Result.bind (fun _ -> versionCheck)
+                        |> Result.bind (fun _ -> archiveCheck)
+                        |> Result.map (fun _ -> header)
+                    manifestBytesCheck
+                    |> Result.bind (fun _ -> manifestShaCheck)
+                    |> Result.bind (fun _ -> archiveShaCheck)
+                    |> Result.bind (fun _ -> allowlistCheck)
+                    |> Result.bind (fun _ ->
+                        ReleaseCompare.parseEmbeddedManifestHeader embeddedBody
+                        |> Result.bind entryFieldsChecks)
 
-let private hashFileOrError (path: string) : Async<Result<string, ReleaseError>> =
-    async {
-        try
-            let bytes = File.ReadAllBytes path
-            return Ok(sha256Hex bytes)
-        with
-        | :? IOException as error -> return Error(FileFailure("hash", path, error.Message))
-        | :? UnauthorizedAccessException as error -> return Error(FileFailure("hash", path, error.Message))
-    }
+                let fromObservation (observation: ReleaseCompare.ArchiveObservation) =
+                    match observation.ManifestBody with
+                    | None ->
+                        Error(MalformedArtifact(candidateLabel, "the candidate archive is missing the canonical distribution.json entry; refusing to publish"))
+                    | Some embeddedBody ->
+                        runSnapshotChecks observation embeddedBody
+                        |> Result.map (fun header -> (header, observation))
 
-let private renderFrom (dto: CandidateDto) (candidateArchiveSha: string) (candidateManifestSha: string) (candidateRevision: string) : Render =
-    { ComponentId = dto.Contract.ComponentId
-      Version = dto.Contract.Version
-      ArchiveName = dto.Contract.ArchiveName
-      AssetUri = dto.AssetUri
-      MetadataAssetName = dto.MetadataAssetName
-      MetadataLocalPath = dto.MetadataLocalPath
-      CandidateArchiveSha256 = candidateArchiveSha
-      CandidateManifestSha256 = candidateManifestSha
-      EvaluatedHead = dto.EvaluatedHead
-      CandidateRevision = candidateRevision
-      ProducerSdk = dto.ProducerSdk
-      ProducerRuntime = dto.ProducerRuntime
-      ProducerPlatform = dto.ProducerPlatform
-      BumpedVersion = None }
+                fieldChecks
+                |> Result.bind (fun _ -> bytesAvailable ())
+                |> Result.bind (fun _ -> ReleaseCompare.observeBytes candidateLabel innerBytesCopy)
+                |> Result.bind fromObservation
+                |> Result.map (fun (header, observation) -> buildCandidate header observation)
+            return computation ()
+        }
+
 
 let finalizeFailure (render: Render) (reason: string) : Resolution =
     { Status = "failed"
@@ -208,7 +496,25 @@ let validateCanonicalAssetUri
     else
         Ok()
 
+let private renderFrom (candidate: VerifiedCandidate) : Render =
+    let dto = candidate.Dto
+    { ComponentId = dto.Contract.ComponentId
+      Version = dto.Contract.Version
+      ArchiveName = dto.Contract.ArchiveName
+      AssetUri = dto.AssetUri
+      MetadataAssetName = dto.MetadataAssetName
+      MetadataLocalPath = dto.MetadataLocalPath
+      CandidateArchiveSha256 = candidate.ArchiveSha256
+      CandidateManifestSha256 = candidate.ManifestSha256
+      EvaluatedHead = dto.EvaluatedHead
+      CandidateRevision = candidate.EmbeddedRevision
+      ProducerSdk = dto.ProducerSdk
+      ProducerRuntime = dto.ProducerRuntime
+      ProducerPlatform = dto.ProducerPlatform
+      BumpedVersion = None }
+
 // One classification site; metadata errors fail closed; verified absence is the only signal that permits a metadata-only recovery.
+// The remote observation flows through the genuine HTTP observer (`RemoteObserver` from the production transport).
 let private classifyInternal
     (dto: CandidateDto)
     (candidateObs: ReleaseCompare.ArchiveObservation)
@@ -232,7 +538,6 @@ let private classifyInternal
                         render
                         $"the {dto.Contract.ComponentId} release container does not exist; refusing to silently create one")
         | Ok ArchiveAbsent ->
-            // The new-ZIP branch fails closed before any POST when the metadata observation is not a verified absence.
             match metadataState with
             | Error error -> return Ok(finalizeFailure render (ReleaseError.message error))
             | Ok (MetadataCorrupt error) ->
@@ -306,35 +611,35 @@ let private classifyInternal
                                 $"the {dto.Contract.ComponentId} release container does not exist; refusing to silently create one")
                 | Ok (MetadataObserved (sha256, parsed)) ->
                     let optToString = function | Some v -> v | None -> "<absent>"
-                    // Published revision is checked against the remote embedded manifest, not the candidate HEAD, and toolchain values participate in identity.
+                    // Remote revision is checked against the remote embedded manifest, not the candidate HEAD; toolchain values participate in identity.
                     let mismatchedField : (string * string * string) option =
-                        if parsed.ComponentId <> dto.Contract.ComponentId then
-                            Some ("componentId", dto.Contract.ComponentId, parsed.ComponentId)
-                        elif parsed.Version <> dto.Contract.Version then
-                            Some ("version", dto.Contract.Version, parsed.Version)
-                        elif parsed.AssetUri <> dto.AssetUri then
-                            Some ("assetUri", dto.AssetUri, parsed.AssetUri)
-                        elif parsed.ArchiveName <> dto.Contract.ArchiveName then
-                            Some ("archiveName", dto.Contract.ArchiveName, parsed.ArchiveName)
-                        elif parsed.ArchiveSha256 <> publishedObs.ArchiveSha256 then
-                            Some ("archiveSha256", publishedObs.ArchiveSha256, parsed.ArchiveSha256)
-                        else
-                            match publishedObs.ManifestSha256 with
-                            | Some value when value <> parsed.ManifestSha256 ->
-                                Some ("manifestSha256", value, parsed.ManifestSha256)
-                            | _ ->
-                                match ReleaseCompare.parseEmbeddedManifestEntry publishedObs with
-                                | Ok header when header.Revision <> parsed.PublishedRevision ->
-                                    Some ("publishedRevision", header.Revision, parsed.PublishedRevision)
+                            if parsed.ComponentId <> dto.Contract.ComponentId then
+                                Some ("componentId", dto.Contract.ComponentId, parsed.ComponentId)
+                            elif parsed.Version <> dto.Contract.Version then
+                                Some ("version", dto.Contract.Version, parsed.Version)
+                            elif parsed.AssetUri <> dto.AssetUri then
+                                Some ("assetUri", dto.AssetUri, parsed.AssetUri)
+                            elif parsed.ArchiveName <> dto.Contract.ArchiveName then
+                                Some ("archiveName", dto.Contract.ArchiveName, parsed.ArchiveName)
+                            elif parsed.ArchiveSha256 <> publishedObs.ArchiveSha256 then
+                                Some ("archiveSha256", publishedObs.ArchiveSha256, parsed.ArchiveSha256)
+                            else
+                                match publishedObs.ManifestSha256 with
+                                | Some value when value <> parsed.ManifestSha256 ->
+                                    Some ("manifestSha256", value, parsed.ManifestSha256)
                                 | _ ->
-                                    if parsed.ProducerSdk <> dto.ProducerSdk then
-                                        Some ("producerSdk", optToString dto.ProducerSdk, optToString parsed.ProducerSdk)
-                                    elif parsed.ProducerRuntime <> dto.ProducerRuntime then
-                                        Some ("producerRuntime", optToString dto.ProducerRuntime, optToString parsed.ProducerRuntime)
-                                    elif parsed.ProducerPlatform <> dto.ProducerPlatform then
-                                        Some ("producerPlatform", optToString dto.ProducerPlatform, optToString parsed.ProducerPlatform)
-                                    else
-                                        None
+                                    match ReleaseCompare.parseEmbeddedManifestEntry publishedObs with
+                                    | Ok header when header.Revision <> parsed.PublishedRevision ->
+                                        Some ("publishedRevision", header.Revision, parsed.PublishedRevision)
+                                    | _ ->
+                                        if parsed.ProducerSdk <> dto.ProducerSdk then
+                                            Some ("producerSdk", optToString dto.ProducerSdk, optToString parsed.ProducerSdk)
+                                        elif parsed.ProducerRuntime <> dto.ProducerRuntime then
+                                            Some ("producerRuntime", optToString dto.ProducerRuntime, optToString parsed.ProducerRuntime)
+                                        elif parsed.ProducerPlatform <> dto.ProducerPlatform then
+                                            Some ("producerPlatform", optToString dto.ProducerPlatform, optToString parsed.ProducerPlatform)
+                                        else
+                                            None
 
                     match mismatchedField with
                     | Some (field, expected, actual) ->
@@ -352,7 +657,6 @@ let private classifyInternal
                                       PublishedArchiveSha256 = Some publishedObs.ArchiveSha256
                                       PublishedManifestSha256 = publishedObs.ManifestSha256
                                       PublishedRevision = Some rev
-                                      // Verified remote sha from the metadata transport; never substitute the archive sha or re-render.
                                       PublishedMetadataAssetSha256 = Some sha256
                                       MetadataRecoveryNeeded = false }
                 | Ok MetadataAbsent ->
@@ -372,47 +676,29 @@ let private classifyInternal
                                   MetadataRecoveryNeeded = true }
     }
 
+// The single canonical classifier entry. The genuine HTTP remote observer
+// (built by `buildRemoteObserverWith` in `ReleaseTransaction`) supplies the
+// real remote archive + metadata observations; the candidate observation
+// comes from `VerifiedCandidate.ArchiveObservation`. The verified snapshot
+// never re-reads from a mutable on-disk path.
 let evaluate
     (observer: RemoteObserver)
-    (dto: CandidateDto)
+    (candidate: VerifiedCandidate)
     : Async<Result<Resolution, ReleaseError>> =
     async {
-        match validateCanonicalAssetUri dto dto.Contract with
+        match validateCanonicalAssetUri candidate.Dto candidate.Dto.Contract with
         | Error error -> return Error error
         | Ok () ->
 
-        if not (File.Exists dto.ManifestPath) then
-            return Error(MissingArtifact dto.ManifestPath)
-        elif not (File.Exists dto.ArchivePath) then
-            return Error(MissingArtifact dto.ArchivePath)
-        else
-            let! archiveShaResult = hashFileOrError dto.ArchivePath
-            match archiveShaResult with
+            match ReleaseCompare.validate candidate.Dto.Contract candidate.ArchiveObservation "candidate" with
             | Error error -> return Error error
-            | Ok candidateArchiveSha ->
-                let! manifestShaResult = hashFileOrError dto.ManifestPath
-                match manifestShaResult with
-                | Error error -> return Error error
-                | Ok candidateManifestSha ->
-                    let! candidateRevisionResult = readCandidateRevision dto.ManifestPath
-                    match candidateRevisionResult with
-                    | Error error -> return Error error
-                    | Ok candidateRevision ->
+            | Ok () ->
 
-                        let render = renderFrom dto candidateArchiveSha candidateManifestSha candidateRevision
+                let! archiveStateResult =
+                    observer.ObserveArchive (candidate.Dto.Contract.ComponentId, candidate.Dto.Contract.ArchiveName)
 
-                        match! ReleaseCompare.observe dto.ArchivePath with
-                        | Error error -> return Error error
-                        | Ok candidateObs ->
-                            match ReleaseCompare.validate dto.Contract candidateObs "candidate" with
-                            | Error error -> return Error error
-                            | Ok () ->
+                let! metadataStateResult =
+                    observer.ObserveMetadata (candidate.Dto.Contract.ComponentId, candidate.Dto.MetadataAssetName)
 
-                            let! archiveStateResult =
-                                observer.ObserveArchive (dto.Contract.ComponentId, dto.Contract.ArchiveName)
-
-                            let! metadataStateResult =
-                                observer.ObserveMetadata (dto.Contract.ComponentId, dto.MetadataAssetName)
-
-                            return! classifyInternal dto candidateObs archiveStateResult metadataStateResult render
+                return! classifyInternal candidate.Dto candidate.ArchiveObservation archiveStateResult metadataStateResult (renderFrom candidate)
     }

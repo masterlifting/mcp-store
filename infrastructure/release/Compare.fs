@@ -293,63 +293,79 @@ let private selfConsistency (observation: ArchiveObservation) : Result<unit, Rel
                         else
                             Ok()
 
-let private observeArchive (path: string) : Async<Result<ArchiveObservation, ReleaseError>> =
+// Shared validation pipeline for both path-based and byte-based observations:
+// extracts entries, computes payload sha256, parses the embedded manifest, and
+// verifies self-consistency. The single source of validation truth lives here
+// so the path-based and byte-based public entries share the exact same checks.
+let private validateParsedArchive
+    (parsed: ReleaseArchive.Archive)
+    (path: string)
+    (bytes: byte[])
+    : Result<ArchiveObservation, ReleaseError> =
+    let entries = ResizeArray<EntryObservation>()
+    let mutable failure : ReleaseError option = None
+    let mutable manifestBody : string option = None
+    let mutable manifestSha256 : string option = None
+    let mutable manifestCount = 0
+
+    for raw in parsed.Entries do
+        match failure with
+        | Some _ -> ()
+        | None ->
+            match ReleaseArchive.decompress raw with
+            | Error error -> failure <- Some error
+            | Ok payload ->
+                let payloadSha256 = sha256Hex payload
+
+                if raw.Name = embeddedManifestEntryName then
+                    manifestCount <- manifestCount + 1
+                    manifestBody <- Some(Encoding.UTF8.GetString payload)
+                    manifestSha256 <- Some payloadSha256
+
+                entries.Add(
+                    { Name = raw.Name
+                      Raw = raw
+                      PayloadSha256 = payloadSha256 }
+                )
+
+    match failure with
+    | Some error -> Error error
+    | None ->
+        if manifestCount <> 1 then
+            Error(
+                MalformedArtifact(
+                    path,
+                    $"the archive must contain exactly one '{embeddedManifestEntryName}' entry"))
+        else
+            let observation =
+                { ArchivePath = path
+                  ArchiveSha256 = sha256Hex bytes
+                  Entries = List.ofSeq entries
+                  ManifestBody = manifestBody
+                  ManifestSha256 = manifestSha256 }
+
+            match selfConsistency observation with
+            | Error error -> Error error
+            | Ok () -> Ok observation
+
+// Public entry: observe and fully validate one archive, surfacing a typed failure.
+let observe (path: string) : Async<Result<ArchiveObservation, ReleaseError>> =
     async {
         match readArchiveBytes path with
         | Error error -> return Error error
         | Ok bytes ->
             match ReleaseArchive.parse path bytes with
             | Error error -> return Error error
-            | Ok archive ->
-                let entries = ResizeArray<EntryObservation>()
-                let mutable failure : ReleaseError option = None
-                let mutable manifestBody : string option = None
-                let mutable manifestSha256 : string option = None
-                let mutable manifestCount = 0
-
-                for raw in archive.Entries do
-                    if failure.IsNone then
-                        match ReleaseArchive.decompress raw with
-                        | Error error -> failure <- Some error
-                        | Ok payload ->
-                            let payloadSha256 = sha256Hex payload
-
-                            if raw.Name = embeddedManifestEntryName then
-                                manifestCount <- manifestCount + 1
-                                manifestBody <- Some(Encoding.UTF8.GetString payload)
-                                manifestSha256 <- Some payloadSha256
-
-                            entries.Add(
-                                { Name = raw.Name
-                                  Raw = raw
-                                  PayloadSha256 = payloadSha256 }
-                            )
-
-                match failure with
-                | Some error -> return Error error
-                | None ->
-                    if manifestCount <> 1 then
-                        return
-                            Error(
-                                MalformedArtifact(
-                                    path,
-                                    $"the archive must contain exactly one '{embeddedManifestEntryName}' entry"))
-                    else
-                        let observation =
-                            { ArchivePath = path
-                              ArchiveSha256 = sha256Hex bytes
-                              Entries = List.ofSeq entries
-                              ManifestBody = manifestBody
-                              ManifestSha256 = manifestSha256 }
-
-                        match selfConsistency observation with
-                        | Error error -> return Error error
-                        | Ok () -> return Ok observation
+            | Ok parsed -> return validateParsedArchive parsed path bytes
     }
 
-// Public entry: observe and fully validate one archive, surfacing a typed failure.
-let observe (path: string) : Async<Result<ArchiveObservation, ReleaseError>> =
-    observeArchive path
+// Byte-safe variant: the publisher has already read and verified the bytes;
+// this entrypoint re-uses the exact same validation pipeline without ever
+// touching the filesystem.
+let observeBytes (path: string) (bytes: byte[]) : Result<ArchiveObservation, ReleaseError> =
+    match ReleaseArchive.parse path bytes with
+    | Error error -> Error error
+    | Ok parsed -> validateParsedArchive parsed path bytes
 
 let private precheck (contract: ComponentContract) (observation: ArchiveObservation) (label: string) : Result<unit, ReleaseError> =
     let actualNames = observation.Entries |> List.map _.Name |> List.sort

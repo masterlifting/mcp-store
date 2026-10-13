@@ -1,6 +1,5 @@
 // role: reusable module/helper
-// Single authoritative enrollment roster for the release transaction.
-// Loads `infrastructure/release/Participants.json` and rejects any drift between the roster and a per-component projection (componentId, configPath).
+// Single authoritative enrollment roster for the release transaction; rejects any drift between the roster and a per-component projection.
 // Versions, SDKs, allowlists, and URIs stay in each producer's canonical Config.fsx; this module never mirrors them.
 module ReleaseEnrollment
 
@@ -121,6 +120,39 @@ let private parseRoster (text: string) (sourcePath: string) : Result<Roster, Rel
                 | Some error -> Error error
                 | None -> Ok { Entries = entries |> List.rev; SourcePath = sourcePath }
 
+// Absolute-path form: cross-checks the projected config path against the roster's config path so a moved Config.fsx cannot silently route to the wrong component.
+let private normalizePath (root: string) (path: string) : string =
+    let full =
+        if Path.IsPathRooted path then
+            path
+        else
+            Path.Combine(root, path)
+    Path.GetFullPath full
+
+// Reject any roster that resolves two entries to the same canonical configPath; without this, `validateConfigPathAgainstRoster` could never guarantee an exact-one match, and a CLI configPath could mask which component it routes to.
+let private validateCanonicalConfigPaths (root: string) (roster: Roster) : Result<unit, ReleaseError> =
+    let mutable seen : Set<string> = Set.empty
+    let mutable failure : ReleaseError option = None
+
+    for entry in roster.Entries do
+        match failure with
+        | None ->
+            let resolved = normalizePath root entry.ConfigPath
+
+            if seen.Contains resolved then
+                failure <-
+                    Some(
+                        MalformedArtifact(
+                            roster.SourcePath,
+                            $"the enrollment roster entry for componentId '{entry.ComponentId}' resolves to the same canonical configPath '{resolved}' as another entry (path '{entry.ConfigPath}'); refusing to admit an ambiguous configPath projection so authorize-before-FSI can match exactly one"))
+            else
+                seen <- seen.Add resolved
+        | Some _ -> ()
+
+    match failure with
+    | Some error -> Error error
+    | None -> Ok()
+
 let loadRoster (root: string) : Async<Result<Roster, ReleaseError>> =
     async {
         let path = rosterPath root
@@ -130,7 +162,13 @@ let loadRoster (root: string) : Async<Result<Roster, ReleaseError>> =
         else
             match! BuildProvenance.readAllTextAsync path with
             | Error error -> return Error error
-            | Ok text -> return parseRoster text path
+            | Ok text ->
+                match parseRoster text path with
+                | Error error -> return Error error
+                | Ok roster ->
+                    match validateCanonicalConfigPaths root roster with
+                    | Error error -> return Error error
+                    | Ok () -> return Ok roster
     }
 
 // Structural validation: non-empty, no duplicate componentIds, and the componentId set must match `supportedComponentIds` exactly (AC-06 mandatory scope). The loader already rejects duplicates and unsupported componentIds; this is a defense-in-depth check for callers that construct a Roster directly.
@@ -168,15 +206,6 @@ let validateRoster (roster: Roster) : Result<unit, ReleaseError> =
         match failure with
         | Some error -> Error error
         | None -> Ok()
-
-// Absolute-path form: cross-checks the projected config path against the roster's config path so a moved Config.fsx cannot silently route to the wrong component.
-let private normalizePath (root: string) (path: string) : string =
-    let full =
-        if Path.IsPathRooted path then
-            path
-        else
-            Path.Combine(root, path)
-    Path.GetFullPath full
 
 // Validates a per-component projection against the roster. Rejects: unsupported componentId, configID mismatch, path drift, omission.
 let validateProjectionAgainstRoster
@@ -218,3 +247,42 @@ let validateComponentIdInRoster (componentId: string) (roster: Roster) : Result<
         Ok()
     else
         Error(MalformedArtifact(roster.SourcePath, $"unsupported componentId '{componentId}'; not present in the enrollment roster"))
+
+// Path-only authorization: counts how many enrolled entries resolve to the same canonical configPath as the CLI path and rejects anything other than exactly one, before any Config.fsx evaluation runs. Run this once before `loadProducerConfig` so an unregistered or ambiguous file never reaches `dotnet fsi`.
+let validateConfigPathAgainstRoster
+    (configPath: string)
+    (root: string)
+    (roster: Roster)
+    : Result<unit, ReleaseError> =
+    let projectedFull = normalizePath root configPath
+    let mutable matches : (string * string) list = []
+
+    for entry in roster.Entries do
+        let rosterFull = normalizePath root entry.ConfigPath
+
+        if String.Equals(rosterFull, projectedFull, StringComparison.Ordinal) then
+            matches <- (entry.ComponentId, entry.ConfigPath) :: matches
+
+    match matches with
+    | [ (componentId, _) ] -> Ok()
+    | [] ->
+        let known =
+            roster.Entries
+            |> List.map (fun e -> sprintf "'%s' (%s)" e.ComponentId e.ConfigPath)
+            |> String.concat "; "
+
+        Error(
+            MalformedArtifact(
+                roster.SourcePath,
+                $"configPath '{configPath}' (resolved '{projectedFull}') is not registered in the enrollment roster; refusing to launch a child FSI process. Known entries: {known}"))
+    | many ->
+        let ambiguous =
+            many
+            |> List.rev
+            |> List.map (fun (id, path) -> sprintf "'%s' (%s)" id path)
+            |> String.concat "; "
+
+        Error(
+            MalformedArtifact(
+                roster.SourcePath,
+                $"configPath '{configPath}' (resolved '{projectedFull}') matches {List.length many} enrolled entries: {ambiguous}; the authorization must resolve to exactly one and the roster has duplicate canonical configPaths. Refusing to launch a child FSI process."))

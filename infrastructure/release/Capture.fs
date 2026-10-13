@@ -1,7 +1,6 @@
 // role: reusable module/helper
-// Capture exit, stdout and stderr for one child process without blocking on
-// `WaitForExit`/`ReadToEnd`; the wrappers and the compiled runner share this
-// so the script surface and the binary enter the same async boundary.
+// Capture exit, stdout, and stderr for one child process without blocking on `WaitForExit`/`ReadToEnd`.
+// Build/pins/tests/config-evaluation callers scrub publication credentials here so the runner keeps the only auth boundary.
 module ReleaseCapture
 
 open System
@@ -22,6 +21,7 @@ let runProcessCapture
     (workingDirectory: string)
     (executable: string)
     (arguments: string list)
+    (scrubEnvVars: string list)
     (cancellationToken: CancellationToken)
     : Async<Result<int * string * string, ReleaseError>> =
     async {
@@ -33,6 +33,10 @@ let runProcessCapture
         info.RedirectStandardOutput <- true
         info.RedirectStandardError <- true
         arguments |> List.iter info.ArgumentList.Add
+
+        // Scrub credentials the caller names (by environment variable name only) so pre-publication stages never inherit publication authority.
+        for name in scrubEnvVars do
+            info.EnvironmentVariables.Remove name |> ignore
 
         let exitCodePlaceholder = -1
         use child = new Process(StartInfo = info)

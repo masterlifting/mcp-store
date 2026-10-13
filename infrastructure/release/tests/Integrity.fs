@@ -29,18 +29,18 @@ type private Producer =
       EntryAllowlist: string list
       Sdk: string
       Runtime: string
-      Platform: string }
+      Platform: string
+      Policy: ReleasePolicy.PolicyProjection }
 
 type private Candidate =
     { Producer: Producer
-      ArchivePath: string
-      ManifestPath: string
       ArchiveBytes: byte[]
       ArchiveSha: string
       ManifestSha: string
       Revision: string
       Dto: CandidateDto
-      Projection: ProducerMetadataProjection }
+      Projection: ProducerMetadataProjection
+      Verified: VerifiedCandidate }
 
 type private ScriptedResponse =
     | TextResponse of int * string
@@ -118,35 +118,27 @@ let private createTransport (handler: HttpMessageHandler) : HttpTransport =
       CreateUploadClient = createUpload
       CreateRedirectClient = createRedirect }
 
-let private producers =
-    [ { ComponentId = "dotnet"
-        Version = "1.0.4"
-        ArchiveName = "v1.0.4.zip"
-        EntryDll = "Mcp.Dotnet.dll"
-        EntryAllowlist =
-            [ "FSharp.Core.dll"
-              "Mcp.Dotnet.deps.json"
-              "Mcp.Dotnet.dll"
-              "Mcp.Dotnet.runtimeconfig.json"
-              "NOTICE.txt"
-              "distribution.json" ]
-        Sdk = "11.0.100-rc.1.26425.128"
-        Runtime = "11.0.0-rc.1.26425.128"
-        Platform = "win-x64" }
-      { ComponentId = "workflow"
-        Version = "1.0.4"
-        ArchiveName = "v1.0.4.zip"
-        EntryDll = "Mcp.Workflow.dll"
-        EntryAllowlist =
-            [ "FSharp.Core.dll"
-              "Mcp.Workflow.deps.json"
-              "Mcp.Workflow.dll"
-              "Mcp.Workflow.runtimeconfig.json"
-              "NOTICE.txt"
-              "distribution.json" ]
-        Sdk = "11.0.100-rc.1.26425.128"
-        Runtime = "11.0.0-rc.1.26425.128"
-        Platform = "win-x64" } ]
+let private repositoryRoot = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "..", ".."))
+
+let private loadProducer componentId =
+    let configPath = Path.Combine(repositoryRoot, componentId, "release", "Config.fsx")
+    let bytes = File.ReadAllBytes configPath
+    let policy =
+        match ReleasePolicy.parseBytes configPath bytes with
+        | Ok projection -> projection
+        | Error error -> failwithf "%s canonical policy failed to parse: %s" componentId (ReleaseError.message error)
+
+    { ComponentId = policy.ComponentId
+      Version = policy.Version
+      ArchiveName = policy.ArchiveName
+      EntryDll = policy.EntryDll
+      EntryAllowlist = policy.PublishedFiles @ [ "NOTICE.txt"; "distribution.json" ]
+      Sdk = policy.SdkVersion
+      Runtime = policy.RuntimeVersion
+      Platform = policy.Platform
+      Policy = policy }
+
+let private producers = [ "dotnet"; "workflow" ] |> List.map loadProducer
 
 let private withUploadEnabled action =
     async {
@@ -156,87 +148,127 @@ let private withUploadEnabled action =
         finally Environment.SetEnvironmentVariable("MCP_RELEASE_DO_UPLOAD", previous)
     }
 
-let private writeCandidate (root: string) (producer: Producer) (revision: string) =
-    let archivePath = Path.Combine(root, $"{producer.ComponentId}-{revision}.zip")
-    let manifestPath = Path.Combine(root, $"{producer.ComponentId}-{revision}.json")
-    let producerName = if producer.ComponentId = "dotnet" then "Dotnet" else "Workflow"
-    let payloads =
-        [ "FSharp.Core.dll", Encoding.UTF8.GetBytes "shared-runtime-fixture"
-          $"Mcp.{producerName}.deps.json", Encoding.UTF8.GetBytes "{\"runtimeOptions\":{\"tfm\":\"net11.0\"}}"
-          producer.EntryDll, Encoding.UTF8.GetBytes $"{producer.ComponentId}-assembly-fixture"
-          $"Mcp.{producerName}.runtimeconfig.json", Encoding.UTF8.GetBytes "{\"runtimeOptions\":{\"tfm\":\"net11.0\"}}"
-          "NOTICE.txt", Encoding.UTF8.GetBytes "release integrity fixture" ]
-
-    let manifest = JsonObject()
-    manifest["schemaVersion"] <- JsonValue.Create 1
-    manifest["id"] <- JsonValue.Create producer.ComponentId
-    manifest["version"] <- JsonValue.Create producer.Version
-    manifest["revision"] <- JsonValue.Create revision
-    manifest["sdk"] <- JsonValue.Create producer.Sdk
-    manifest["entryDll"] <- JsonValue.Create producer.EntryDll
-    manifest["archive"] <- JsonValue.Create producer.ArchiveName
-
-    let files = JsonArray()
-    for name, bytes in payloads do
-        if name <> "NOTICE.txt" then
-            let entry = JsonObject()
-            entry["path"] <- JsonValue.Create name
-            entry["sha256"] <- JsonValue.Create(sha256 bytes)
-            files.Add entry
-    manifest["files"] <- files
-
-    let archiveFiles = JsonArray()
-    for name in producer.EntryAllowlist do archiveFiles.Add(JsonValue.Create name)
-    manifest["archiveFiles"] <- archiveFiles
-
-    let manifestText = manifest.ToJsonString(JsonSerializerOptions(WriteIndented = true))
-    let manifestBytes = Encoding.UTF8.GetBytes manifestText
-    File.WriteAllBytes(manifestPath, manifestBytes)
-
+let private zipBytes (entries: (string * byte[]) list) =
+    use output = new MemoryStream()
     do
-        use stream = File.Create archivePath
-        use archive = new ZipArchive(stream, ZipArchiveMode.Create)
-        for name, bytes in payloads @ [ "distribution.json", manifestBytes ] do
+        use archive = new ZipArchive(output, ZipArchiveMode.Create, true)
+        for name, bytes in entries do
             let entry = archive.CreateEntry(name, CompressionLevel.Optimal)
             entry.LastWriteTime <- DateTimeOffset(1980, 1, 1, 0, 0, 0, TimeSpan.Zero)
             use entryStream = entry.Open()
             entryStream.Write(bytes, 0, bytes.Length)
+    output.ToArray()
 
-    let archiveBytes = File.ReadAllBytes archivePath
-    let archiveSha = sha256 archiveBytes
-    let manifestSha = sha256 manifestBytes
-    let assetUri = $"https://github.com/masterlifting/mcp-store/releases/download/{producer.ComponentId}/{producer.ArchiveName}"
-    let contract =
-        { ComponentId = producer.ComponentId
-          Version = producer.Version
-          ArchiveName = producer.ArchiveName
-          EntryAllowlist = producer.EntryAllowlist }
-    let dto =
-        { Contract = contract
-          ManifestPath = manifestPath
-          ArchivePath = archivePath
-          EvaluatedHead = revision
-          AssetUri = assetUri
-          MetadataAssetName = metadataAssetName producer.ComponentId producer.Version
-          MetadataLocalPath = Path.Combine(root, $"{producer.ComponentId}-metadata-local.json")
-          ProducerSdk = Some producer.Sdk
-          ProducerRuntime = Some producer.Runtime
-          ProducerPlatform = Some producer.Platform
-          RepositoryOwner = "masterlifting"
-          RepositoryName = "mcp-store" }
-    let projection =
-        makeProjection producer.ComponentId producer.Version assetUri producer.ArchiveName archiveSha manifestSha revision
-            (Some producer.Sdk) (Some producer.Runtime) (Some producer.Platform)
+let private writeCandidate (root: string) (producer: Producer) (revision: string) : Async<Candidate> =
+    async {
+        let payloads =
+            producer.EntryAllowlist
+            |> List.filter (fun name -> name <> "NOTICE.txt" && name <> "distribution.json")
+            |> List.map (fun name -> name, Encoding.UTF8.GetBytes($"candidate:{producer.ComponentId}:{name}"))
+            |> fun files -> files @ [ "NOTICE.txt", Encoding.UTF8.GetBytes "release integrity fixture" ]
 
-    { Producer = producer
-      ArchivePath = archivePath
-      ManifestPath = manifestPath
-      ArchiveBytes = archiveBytes
-      ArchiveSha = archiveSha
-      ManifestSha = manifestSha
-      Revision = revision
-      Dto = dto
-      Projection = projection }
+        let manifest = JsonObject()
+        manifest["schemaVersion"] <- JsonValue.Create 1
+        manifest["id"] <- JsonValue.Create producer.ComponentId
+        manifest["version"] <- JsonValue.Create producer.Version
+        manifest["revision"] <- JsonValue.Create revision
+        manifest["sdk"] <- JsonValue.Create producer.Sdk
+        manifest["entryDll"] <- JsonValue.Create producer.EntryDll
+        manifest["archive"] <- JsonValue.Create producer.ArchiveName
+
+        let files = JsonArray()
+        for name, bytes in payloads do
+            if name <> "NOTICE.txt" then
+                let entry = JsonObject()
+                entry["path"] <- JsonValue.Create name
+                entry["sha256"] <- JsonValue.Create(sha256 bytes)
+                files.Add entry
+        manifest["files"] <- files
+
+        let archiveFiles = JsonArray()
+        for name in producer.EntryAllowlist do archiveFiles.Add(JsonValue.Create name)
+        manifest["archiveFiles"] <- archiveFiles
+
+        let manifestBytes = Encoding.UTF8.GetBytes(manifest.ToJsonString(JsonSerializerOptions(WriteIndented = true)))
+        let archiveBytes = zipBytes (payloads @ [ "distribution.json", manifestBytes ])
+        let archiveSha = sha256 archiveBytes
+        let manifestSha = sha256 manifestBytes
+        let outerBytes = zipBytes [ producer.ArchiveName, archiveBytes; "distribution.json", manifestBytes ]
+        let outerSha = sha256 outerBytes
+        let prepared = JsonObject()
+        prepared["schemaVersion"] <- JsonValue.Create 1
+        prepared["innerArchiveSha256"] <- JsonValue.Create archiveSha
+        prepared["innerArchiveSize"] <- JsonValue.Create(int64 archiveBytes.Length)
+        prepared["manifestSha256"] <- JsonValue.Create manifestSha
+        prepared["manifestSize"] <- JsonValue.Create(int64 manifestBytes.Length)
+        let preparation =
+            match ReleaseHandoff.parsePreparationReceipt (prepared.ToJsonString()) "preparation.json" with
+            | Ok receipt -> receipt
+            | Error error -> failwithf "preparation fixture failed: %s" (ReleaseError.message error)
+        let expected : ReleaseHandoff.ExpectedMetadata =
+            { ArtifactId = "controlled-artifact"
+              ArtifactName = producer.ComponentId + "-candidate"
+              Role = "candidate"
+              Component = producer.ComponentId
+              Repository = "masterlifting/mcp-store"
+              RunId = "controlled-run"
+              Attempt = "1"
+              Sha = revision }
+        let observed : ReleaseHandoff.ObservedPlatformMetadata =
+            { ArtifactId = expected.ArtifactId
+              ArtifactName = expected.ArtifactName
+              Role = expected.Role
+              Component = expected.Component
+              Repository = expected.Repository
+              RunId = expected.RunId
+              Attempt = expected.Attempt
+              Sha = expected.Sha }
+        let outerDigest =
+            match ReleaseHandoff.makeOuterDigest outerSha with
+            | Ok digest -> digest
+            | Error error -> failwithf "outer transport digest fixture failed: %s" (ReleaseError.message error)
+        let evidence : ReleaseHandoff.ArtifactEvidence =
+            { Expected = expected
+              Observed = observed
+              ActualOuterDigest = outerDigest
+              TransportSourcePath = "controlled-artifact.zip"
+              TransportLength = int64 outerBytes.Length
+              RawTransportBytes = outerBytes }
+        let snapshot =
+            match ReleaseHandoff.readRawTransport "controlled-artifact.zip" outerBytes evidence producer.Policy with
+            | Ok value -> value
+            | Error error -> failwithf "prepared candidate transport failed validation: %s" (ReleaseError.message error)
+
+        if preparation.InnerArchiveSha256.Value <> snapshot.InnerArchiveSha256.Value
+           || preparation.InnerArchiveSize <> snapshot.InnerArchiveSize
+           || preparation.ManifestSha256.Value <> (snapshot.ManifestSha256 |> Option.map (fun value -> value.Value) |> Option.defaultValue "")
+           || preparation.ManifestSize <> (snapshot.ManifestSize |> Option.defaultValue -1L) then
+            failwith "preparation receipt did not match the transport-verified snapshot"
+
+        let! verifiedResult =
+            VerifiedCandidate.createFromSnapshot
+                snapshot
+                producer.Policy
+                producer.ArchiveName
+                revision
+                (Path.Combine(root, $"{producer.ComponentId}-metadata-local.json"))
+                "masterlifting"
+                "mcp-store"
+        let verified =
+            match verifiedResult with
+            | Ok value -> value
+            | Error error -> failwithf "verified candidate factory rejected a valid preparation: %s" (ReleaseError.message error)
+
+        return
+            { Producer = producer
+              ArchiveBytes = archiveBytes
+              ArchiveSha = archiveSha
+              ManifestSha = manifestSha
+              Revision = revision
+              Dto = verified.Dto
+              Projection = verified.Projection
+              Verified = verified }
+    }
 
 let private releaseJson (assets: (string * string option * int64) list) =
     let root = JsonObject()
@@ -263,7 +295,7 @@ let private queueAsset (handler: IntegrityRecordingHandler) (bytes: byte[]) =
 let private locator producer =
     { Owner = "masterlifting"
       Repository = "mcp-store"
-      Tag = producer.ComponentId }
+      Tag = "v" + producer.Version }
 
 let private auth = Some { Token = "sentinel-test-token" }
 
@@ -274,9 +306,7 @@ let private runTransaction root handler candidate =
         true
         (Path.Combine(root, "downloads"))
         (locator candidate.Producer)
-        candidate.Dto
-        candidate.Projection
-        candidate.ArchivePath
+        candidate.Verified
 
 let private assertNoPublishedIdentity label (resolution: Resolution) =
     Expect.equal resolution.Status "failed" $"{label}: failed status"
@@ -291,7 +321,7 @@ let private makeMetadataBytes projection =
 
 let private testPreflightFailures root = async {
     for producer in producers do
-        let candidate = writeCandidate root producer "3612e8e6dd4655543e6d4b9dc0edee9c24b82bf1"
+        let! candidate = writeCandidate root producer "3612e8e6dd4655543e6d4b9dc0edee9c24b82bf1"
         let goodMeta = candidate.Projection
         let mismatch = { goodMeta with Version = "9.9.9" }
         let cases =
@@ -330,14 +360,76 @@ let private testPreflightFailures root = async {
                 Expect.isTrue (resolution.Reason.Length > 0) $"{producer.ComponentId}/{caseName} has actionable failure reason"
 }
 
+let private testInitialObservationDigestFailures root = async {
+    let digestCases =
+        [ "missing", None
+          "malformed", Some "sha256:NOT-A-DIGEST"
+          "mismatch", Some("sha256:" + String.replicate 64 "0") ]
+
+    for producer in producers do
+        let! candidate = writeCandidate root producer "3612e8e6dd4655543e6d4b9dc0edee9c24b82bf1"
+
+        for digestCase, claimedDigest in digestCases do
+            use archiveHandler = new IntegrityRecordingHandler()
+            queueRelease archiveHandler [ producer.ArchiveName, claimedDigest, 1L ]
+            queueAsset archiveHandler candidate.ArchiveBytes
+            queueRelease archiveHandler []
+
+            let! archiveOutcome = runTransaction root archiveHandler candidate
+
+            match archiveOutcome with
+            | Error error -> failtestf "%s/archive-observation/%s returned error: %s" producer.ComponentId digestCase (ReleaseError.message error)
+            | Ok (resolution, code) ->
+                assertNoPublishedIdentity $"{producer.ComponentId}/archive-observation/{digestCase}" resolution
+                Expect.equal code 1 $"{producer.ComponentId}/archive-observation/{digestCase} exits failed"
+                Expect.isTrue
+                    (resolution.Reason.Contains("digest", StringComparison.OrdinalIgnoreCase)
+                     || resolution.Reason.Contains("SHA-256", StringComparison.Ordinal))
+                    $"{producer.ComponentId}/archive-observation/{digestCase} reports the claimed digest failure: {resolution.Reason}"
+                Expect.equal
+                    (archiveHandler.Requests |> Array.filter (fun request -> request.Method = "POST") |> Array.length)
+                    0
+                    $"{producer.ComponentId}/archive-observation/{digestCase} issues no POST"
+                Expect.equal
+                    (archiveHandler.Requests |> Array.filter (fun request -> request.Method = "GET") |> Array.length)
+                    3
+                    $"{producer.ComponentId}/archive-observation/{digestCase} performs one release lookup, one asset download, and the metadata lookup"
+
+            use metadataHandler = new IntegrityRecordingHandler()
+            let metadataBytes = makeMetadataBytes candidate.Projection
+            queueRelease metadataHandler []
+            queueRelease metadataHandler [ candidate.Dto.MetadataAssetName, claimedDigest, 2L ]
+            queueAsset metadataHandler metadataBytes
+
+            let! metadataOutcome = runTransaction root metadataHandler candidate
+
+            match metadataOutcome with
+            | Error error -> failtestf "%s/metadata-observation/%s returned error: %s" producer.ComponentId digestCase (ReleaseError.message error)
+            | Ok (resolution, code) ->
+                assertNoPublishedIdentity $"{producer.ComponentId}/metadata-observation/{digestCase}" resolution
+                Expect.equal code 1 $"{producer.ComponentId}/metadata-observation/{digestCase} exits failed"
+                Expect.isTrue
+                    (resolution.Reason.Contains("digest", StringComparison.OrdinalIgnoreCase)
+                     || resolution.Reason.Contains("SHA-256", StringComparison.Ordinal))
+                    $"{producer.ComponentId}/metadata-observation/{digestCase} reports the claimed digest failure: {resolution.Reason}"
+                Expect.equal
+                    (metadataHandler.Requests |> Array.filter (fun request -> request.Method = "POST") |> Array.length)
+                    0
+                    $"{producer.ComponentId}/metadata-observation/{digestCase} issues no POST"
+                Expect.equal
+                    (metadataHandler.Requests |> Array.filter (fun request -> request.Method = "GET") |> Array.length)
+                    3
+                    $"{producer.ComponentId}/metadata-observation/{digestCase} performs one archive lookup, one metadata lookup, and one asset download"
+}
+
 let private testMetadataIdentityMutations root = async {
     let oldRevision = "fc0aefa9db0fb7262ee6ca1b54bd6bbb752b8b01"
 
     for producer in producers do
-        let candidate = writeCandidate root producer oldRevision
+        let! candidate = writeCandidate root producer oldRevision
         let mutations =
             [ "componentId", "componentId", { candidate.Projection with ComponentId = "other-producer" }
-              "version", "version", { candidate.Projection with Version = "1.0.5" }
+              "version", "version", { candidate.Projection with Version = "mismatch-" + producer.Version }
               "assetUri", "assetUri", { candidate.Projection with AssetUri = "https://github.com/other/repo/releases/download/wrong/v1.zip" }
               "archiveName", "archiveName", { candidate.Projection with ArchiveName = "different.zip" }
               "archiveSha256", "archiveSha256", { candidate.Projection with ArchiveSha256 = String.replicate 64 "a" }
@@ -412,11 +504,10 @@ let private testPublishedRevisionAndMetadataRecovery root = async {
     let candidateRevision = "3612e8e6dd4655543e6d4b9dc0edee9c24b82bf1"
 
     for producer in producers do
-        let candidate = writeCandidate root producer candidateRevision
-        let published = writeCandidate root producer publishedRevision
-        let! publishedObservationResult = ReleaseCompare.observe published.ArchivePath
+        let! candidate = writeCandidate root producer candidateRevision
+        let! published = writeCandidate root producer publishedRevision
         let publishedObservation =
-            match publishedObservationResult with
+            match ReleaseCompare.observeBytes "published-fixture" published.ArchiveBytes with
             | Ok observation -> observation
             | Error error -> failtestf "%s published fixture invalid: %s" producer.ComponentId (ReleaseError.message error)
         let projection =
@@ -471,7 +562,7 @@ let private testPublishedRevisionAndMetadataRecovery root = async {
 
 let private testValidNewPublication root = async {
     for producer in producers do
-        let candidate = writeCandidate root producer "3612e8e6dd4655543e6d4b9dc0edee9c24b82bf1"
+        let! candidate = writeCandidate root producer "3612e8e6dd4655543e6d4b9dc0edee9c24b82bf1"
         let archiveAsset = producer.ArchiveName, Some("sha256:" + candidate.ArchiveSha), 1L
         let metadataBytes = makeMetadataBytes candidate.Projection
         let metadataAsset = candidate.Dto.MetadataAssetName, Some("sha256:" + sha256 metadataBytes), 2L
@@ -508,7 +599,7 @@ let private testValidNewPublication root = async {
 
 let private testClaimedDigestFailures root = async {
     for producer in producers do
-        let candidate = writeCandidate root producer "3612e8e6dd4655543e6d4b9dc0edee9c24b82bf1"
+        let! candidate = writeCandidate root producer "3612e8e6dd4655543e6d4b9dc0edee9c24b82bf1"
         let digestCases =
             [ "missing", None
               "malformed", Some "sha256:NOT-A-DIGEST"
@@ -529,12 +620,12 @@ let private testClaimedDigestFailures root = async {
 
                 let! outcome =
                     withUploadEnabled (fun () ->
-                        ReleasePublish.uploadCandidate
+                        ReleasePublish.uploadCandidateBytes
                             { Token = "sentinel-test-token" }
                             (locator producer)
                             producer.ArchiveName
-                            candidate.ArchivePath
-                            candidate.ArchiveSha
+                            candidate.ArchiveBytes
+                            (Some candidate.ArchiveSha)
                             (createTransport handler))
 
                 match outcome with
@@ -559,7 +650,7 @@ let private testClaimedDigestFailures root = async {
 
 let private testTransactionReadbackDigestFailures root = async {
     for producer in producers do
-        let candidate = writeCandidate root producer "3612e8e6dd4655543e6d4b9dc0edee9c24b82bf1"
+        let! candidate = writeCandidate root producer "3612e8e6dd4655543e6d4b9dc0edee9c24b82bf1"
         for digestCase, claimedDigest in
             [ "missing", None
               "malformed", Some "sha256:NOT-A-DIGEST"
@@ -594,16 +685,67 @@ let private testTransactionReadbackDigestFailures root = async {
                     $"{producer.ComponentId}/post-upload/{digestCase} observes before/after upload and downloads readback"
 }
 
+let private testMetadataReadbackDigestFailures root = async {
+    let digestCases =
+        [ "missing", None
+          "malformed", Some "sha256:NOT-A-DIGEST"
+          "mismatch", Some("sha256:" + String.replicate 64 "0") ]
+
+    for producer in producers do
+        let! candidate = writeCandidate root producer "3612e8e6dd4655543e6d4b9dc0edee9c24b82bf1"
+
+        for digestCase, claimedDigest in digestCases do
+            use handler = new IntegrityRecordingHandler()
+            let archiveAsset = producer.ArchiveName, Some("sha256:" + candidate.ArchiveSha), 1L
+            let metadataAsset = candidate.Dto.MetadataAssetName, claimedDigest, 2L
+            let metadataBytes = makeMetadataBytes candidate.Projection
+
+            queueRelease handler []
+            queueRelease handler []
+            queueRelease handler []
+            handler.Queue(TextResponse(201, "{}"))
+            queueRelease handler [ archiveAsset ]
+            queueAsset handler candidate.ArchiveBytes
+            queueRelease handler [ archiveAsset ]
+            handler.Queue(TextResponse(201, "{}"))
+            queueRelease handler [ archiveAsset; metadataAsset ]
+            queueAsset handler metadataBytes
+
+            let! outcome = withUploadEnabled (fun () -> runTransaction root handler candidate)
+
+            match outcome with
+            | Error error -> failtestf "%s/metadata-readback/%s returned error: %s" producer.ComponentId digestCase (ReleaseError.message error)
+            | Ok (resolution, code) ->
+                assertNoPublishedIdentity $"{producer.ComponentId}/metadata-readback/{digestCase}" resolution
+                Expect.equal code 1 $"{producer.ComponentId}/metadata-readback/{digestCase} exits failed"
+                Expect.isTrue
+                    (resolution.Reason.Contains("digest", StringComparison.OrdinalIgnoreCase)
+                     || resolution.Reason.Contains("SHA-256", StringComparison.Ordinal))
+                    $"{producer.ComponentId}/metadata-readback/{digestCase} reports the readback digest failure: {resolution.Reason}"
+
+                let requests = handler.Requests
+                Expect.equal
+                    (requests |> Array.filter (fun request -> request.Method = "POST") |> Array.length)
+                    2
+                    $"{producer.ComponentId}/metadata-readback/{digestCase} posts archive and metadata once without retry"
+                Expect.equal
+                    (requests |> Array.filter (fun request -> request.Method = "GET") |> Array.length)
+                    8
+                    $"{producer.ComponentId}/metadata-readback/{digestCase} observes and reads back both assets"
+}
+
 let tests =
     testCaseAsync "W5 actual production transaction integrity regressions" <| async {
         let root = Fixture.newTempDir "mcp-release-integrity-tests"
         try
             do! testPreflightFailures root
+            do! testInitialObservationDigestFailures root
             do! testMetadataIdentityMutations root
             do! testPublishedRevisionAndMetadataRecovery root
             do! testValidNewPublication root
             do! testClaimedDigestFailures root
             do! testTransactionReadbackDigestFailures root
+            do! testMetadataReadbackDigestFailures root
         finally
             Fixture.safeDeleteDir root
     }

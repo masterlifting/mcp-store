@@ -21,6 +21,8 @@
     <Compile Include="Metadata.fs" />
     <Compile Include="Publish.fs" />
     <Compile Include="Integrity.fs" />
+    <Compile Include="Policy.fs" />
+    <Compile Include="Handoff.fs" />
     <Compile Include="Revision.fs" />
     <Compile Include="Runner.fs" />
     <Compile Include="Telegram.fs" />

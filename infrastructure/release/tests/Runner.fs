@@ -6,246 +6,210 @@ open Release.Tests
 open System
 open System.Diagnostics
 open System.IO
-open System.Text
-open System.Text.Json
 open System.Text.Json.Nodes
 open BuildProvenance
-open ReleaseCompare
-open ReleaseMetadata
 open ReleaseTestProcess
 
-let mutable passed = 0
-let mutable failed = 0
-let failures = ResizeArray<string>()
-
-let assertTrue name condition =
-    if condition then passed <- passed + 1
-    else
-        failed <- failed + 1
-        failures.Add(name)
-
-let assertEqual name expected actual =
-    if expected = actual then passed <- passed + 1
-    else
-        failed <- failed + 1
-        failures.Add(sprintf "%s: expected %A got %A" name expected actual)
-
-let private repoRootForRunner =
+let private repositoryRoot =
     Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "..", ".."))
 
 let private runnerPath =
-    Path.Combine(repoRootForRunner, "infrastructure", "release", "bin", "Release", "net11.0", "ReleaseRunner.exe")
+    Path.Combine(repositoryRoot, "infrastructure", "release", "bin", "Release", "net11.0", "ReleaseRunner.exe")
 
-let private contractJson () =
-    let node = JsonObject()
-    node.["componentId"] <- JsonValue.Create "dotnet"
-    node.["version"] <- JsonValue.Create "1.0.4"
-    node.["archiveName"] <- JsonValue.Create "v1.0.4.zip"
-    node.["assetUri"] <- JsonValue.Create "https://github.com/masterlifting/mcp-store/releases/download/dotnet/v1.0.4.zip"
-    let allowlist = JsonArray()
-    for f in [ "FSharp.Core.dll"; "Mcp.Dotnet.deps.json"; "Mcp.Dotnet.dll"; "Mcp.Dotnet.runtimeconfig.json"; "NOTICE.txt"; "distribution.json" ] do
-        allowlist.Add(JsonValue.Create f)
-    node.["entryAllowlist"] <- allowlist
-    node.ToJsonString(JsonSerializerOptions())
+let private readCanonicalPolicy componentId =
+    let path = Path.Combine(repositoryRoot, componentId, "release", "Config.fsx")
+    ReleasePolicy.parseBytes path (File.ReadAllBytes path)
+    |> function
+        | Ok policy -> policy
+        | Error error -> failwithf "%s canonical policy failed to parse: %s" componentId (ReleaseError.message error)
 
-let private contractJsonFor (componentId: string) =
-    let node = JsonNode.Parse(contractJson()).AsObject()
-    node["componentId"] <- JsonValue.Create componentId
-    node["assetUri"] <- JsonValue.Create $"https://github.com/masterlifting/mcp-store/releases/download/{componentId}/v1.0.4.zip"
-    node.ToJsonString(JsonSerializerOptions())
+let private runnerBinaryExists =
+    testCase "the compiled runner exists at the canonical output path" (fun () ->
+        Expect.isTrue (File.Exists runnerPath) $"runner binary exists at {runnerPath}")
 
-let runnerBinaryExists () =
-    assertTrue (sprintf "runner binary exists at %s" runnerPath) (File.Exists runnerPath)
-let contractJsonShape () =
-    let json = contractJson ()
-    let node = JsonNode.Parse json
-    let obj = node.AsObject()
-    assertEqual "componentId" "dotnet" (obj.["componentId"].GetValue<string>())
-    assertEqual "version" "1.0.4" (obj.["version"].GetValue<string>())
-    assertEqual "archiveName" "v1.0.4.zip" (obj.["archiveName"].GetValue<string>())
-    let allowlist =
-        obj.["entryAllowlist"].AsArray()
-        |> Seq.map (fun n -> n.GetValue<string>())
-        |> Seq.toList
-        |> List.sort
-    assertEqual
-        "entryAllowlist is the producer allowlist"
-        [ "FSharp.Core.dll"; "Mcp.Dotnet.deps.json"; "Mcp.Dotnet.dll"; "Mcp.Dotnet.runtimeconfig.json"; "NOTICE.txt"; "distribution.json" ]
-        allowlist
-let metadataAssetNameDeterministic () =
-    let asset = ReleaseMetadata.metadataAssetName "dotnet" "1.0.4"
-    assertEqual "metadata asset name encoding" "dotnet-1.0.4-metadata.json" asset
-    let alt = ReleaseMetadata.metadataAssetName "workflow" "1.0.4"
-    assertEqual "different component yields different asset name" "workflow-1.0.4-metadata.json" alt
-let cleanTreeGuardContract () = async {
-    let root = repoRootForRunner
-    match! BuildProvenance.assertCleanTree root with
-    | Ok () ->
-        passed <- passed + 1
-    | Error error ->
-        let message = BuildProvenance.ReleaseError.message error
-        assertTrue "clean-tree guard is fail-closed (typed ReleaseError)"
-            (message.Contains("dirty", StringComparison.Ordinal) || message.Contains("refusing", StringComparison.Ordinal))
-}
-let manifestRevisionGuardContract () = async {
-    let root = repoRootForRunner
-    match! BuildProvenance.committedHead root with
-    | Ok head ->
-        assertTrue "HEAD resolves to a 40-hex commit SHA"
-            (head.Length = 40 && head |> Seq.forall (fun c -> Uri.IsHexDigit c))
-    | Error error ->
-        failed <- failed + 1
-        failures.Add(sprintf "committedHead: %s" (BuildProvenance.ReleaseError.message error))
-}
+let private metadataAssetNameUsesCanonicalPolicy =
+    testCase "metadata asset names follow each canonical producer version" (fun () ->
+        for componentId in [ "dotnet"; "workflow" ] do
+            let policy = readCanonicalPolicy componentId
+            Expect.equal policy.ComponentId componentId $"{componentId} config identity"
+            Expect.equal
+                (ReleaseMetadata.metadataAssetName policy.ComponentId policy.Version)
+                $"{policy.ComponentId}-{policy.Version}-metadata.json"
+                $"{componentId} versioned metadata name")
 
-let runnerRejectsUnenrolledTransactionComponent () = async {
-    if not (File.Exists runnerPath) then
-        failed <- failed + 1
-        failures.Add(sprintf "runner-enrollment prerequisite missing: %s" runnerPath)
-    else
-        let fixtureRoot = Fixture.newTempDir "mcp-runner-enrollment-fixtures"
-        try
-            let info = ProcessStartInfo(runnerPath)
-            info.WorkingDirectory <- repoRootForRunner
-            info.UseShellExecute <- false
-            info.RedirectStandardOutput <- true
-            info.RedirectStandardError <- true
-            info.CreateNoWindow <- true
-            info.ArgumentList.Add(Path.Combine(fixtureRoot, "missing-manifest.json"))
-            info.ArgumentList.Add(Path.Combine(fixtureRoot, "missing-archive.zip"))
-            info.ArgumentList.Add(contractJsonFor "telegram")
-            [ "GITHUB_TOKEN"; "GITHUB_ENV"; "GITHUB_OUTPUT"; "MCP_RELEASE_DO_UPLOAD"
-              "MCP_RELEASE_GITHUB_OWNER"; "MCP_RELEASE_GITHUB_REPOSITORY" ]
-            |> List.iter (fun name -> info.EnvironmentVariables.Remove name |> ignore)
+let private cleanTreeGuardFailsClosed =
+    testCaseAsync "the committed-source guard never reports dirty source as clean" <| async {
+        match! BuildProvenance.assertCleanTree repositoryRoot with
+        | Ok () -> ()
+        | Error error ->
+            let message = ReleaseError.message error
+            Expect.isTrue
+                (message.Contains("dirty", StringComparison.OrdinalIgnoreCase)
+                 || message.Contains("refusing", StringComparison.OrdinalIgnoreCase))
+                "dirty-tree refusal is actionable"
+    }
 
-            match! capture 10000 info with
-            | Error error ->
-                failed <- failed + 1
-                failures.Add(sprintf "runner unenrolled component invocation failed: %s" error)
-            | Ok(exitCode, stdout, _) ->
-                assertEqual "unenrolled CLI component fails before transaction" 1 exitCode
-                match JsonNode.Parse(stdout.TrimEnd()).AsObject() with
-                | null ->
-                    failed <- failed + 1
-                    failures.Add("unenrolled CLI component did not return structured JSON")
-                | result ->
-                    assertEqual "unenrolled CLI status" "failed" (result["status"].GetValue<string>())
-                    let reason = result["reason"].GetValue<string>()
-                    assertTrue "unenrolled CLI reason names roster rejection" (reason.Contains("unsupported componentId 'telegram'", StringComparison.Ordinal))
-                    assertTrue "unenrolled CLI omits published archive evidence" (not (result.ContainsKey "publishedArchiveSha256"))
-        finally
-            Fixture.safeDeleteDir fixtureRoot
-}
-let runnerEmptyArgvExitsWithUsage () = async {
-    if not (File.Exists runnerPath) then
-        failed <- failed + 1
-        failures.Add(sprintf "runner-empty-argv prerequisite missing: %s" runnerPath)
-    else
+let private committedHeadIsResolved =
+    testCaseAsync "the repository HEAD resolves to a commit identifier" <| async {
+        match! BuildProvenance.committedHead repositoryRoot with
+        | Ok head ->
+            Expect.equal head.Length 40 "commit SHA length"
+            Expect.isTrue (head |> Seq.forall Uri.IsHexDigit) "commit SHA is hexadecimal"
+        | Error error -> failtestf "committedHead failed: %s" (ReleaseError.message error)
+    }
+
+let private runnerEmptyArgumentsReturnUsage =
+    testCaseAsync "empty runner arguments return the usage exit code" <| async {
+        Expect.isTrue (File.Exists runnerPath) $"runner binary exists at {runnerPath}"
         let info = ProcessStartInfo(runnerPath)
-        info.WorkingDirectory <- repoRootForRunner
+        info.WorkingDirectory <- repositoryRoot
         info.UseShellExecute <- false
         info.RedirectStandardOutput <- true
         info.RedirectStandardError <- true
         info.CreateNoWindow <- true
+
         match! capture 10000 info with
-        | Error error ->
-            failed <- failed + 1
-            failures.Add(sprintf "runner-empty-argv-times-out: %s" error)
-        | Ok(exitCode, _, stderr) ->
-            assertEqual "runner empty-argv exitcode is 2" 2 exitCode
-            let errText = stderr.TrimEnd()
-            assertTrue "runner empty-argv stderr starts with 'usage: ReleaseRunner'"
-                (errText.StartsWith("usage: ReleaseRunner", StringComparison.Ordinal))
-}
-let runnerDirtyTreeEmitsStructuredFailureJson () = async {
-    if not (File.Exists runnerPath) then
-        failed <- failed + 1
-        failures.Add(sprintf "runner-dirty-tree prerequisite missing: %s" runnerPath)
-    else
-        let fixtureRoot = Fixture.newTempDir "mcp-runner-dirty-fixtures"
-        let manifestPath = Path.Combine(fixtureRoot, "distribution.json")
-        let archivePath = Path.Combine(fixtureRoot, "v1.0.4.zip")
-        let manifestText =
-            "{\"schemaVersion\":1,\"id\":\"dotnet\",\"version\":\"1.0.4\","
-            + "\"revision\":\"3612e8e6dd4655543e6d4b9dc0edee9c24b82bf1\","
-            + "\"sdk\":\"11.0.100-rc.1.26425.128\",\"entryDll\":\"Mcp.Dotnet.dll\","
-            + "\"archive\":\"v1.0.4.zip\",\"files\":[],\"archiveFiles\":[]}"
-        File.WriteAllText(manifestPath, manifestText)
-        Fixture.writeRevisionVariantArchive archivePath (fixtureRoot + "/manifest-for-archive.json") Fixture.canonicalEvaluatedRevision
-        let markerName = sprintf "test-dirty-marker-%s" (Guid.NewGuid().ToString("N"))
-        let markerPath = Path.Combine(repoRootForRunner, markerName)
-        File.WriteAllText(markerPath, "owned-by-runner-fsx-test")
+        | Error error -> failtestf "empty-argv runner invocation failed: %s" error
+        | Ok (exitCode, _, stderr) ->
+            Expect.equal exitCode 2 "usage exit code"
+            Expect.isTrue (stderr.Contains("usage: ReleaseRunner prepare", StringComparison.Ordinal)) "prepare usage is shown"
+            Expect.isTrue (stderr.Contains("usage: ReleaseRunner publish", StringComparison.Ordinal)) "publish usage is shown"
+    }
+
+let private missingIndependentClosure =
+    testCaseAsync "missingIndependentClosure" <| async {
+        Expect.isTrue (File.Exists runnerPath) $"runner binary exists at {runnerPath}"
+        let fixtureRoot = Fixture.newTempDir "mcp-runner-publisher-closure"
+        let candidateRoot = Path.Combine(fixtureRoot, "candidate")
+        Directory.CreateDirectory candidateRoot |> ignore
+        let closurePath = Path.Combine(fixtureRoot, "missing-publisher.json")
+        let trustedReceiptPath = Path.Combine(fixtureRoot, "trusted-publisher-receipt.json")
+        let preparationReceiptPath = Path.Combine(fixtureRoot, "preparation-receipt.json")
+        let transportEvidencePath = Path.Combine(fixtureRoot, "fetch-candidate-bootstrap-receipt.json")
+        let transportSha256 = String.replicate 64 "a"
+        let eventSha = Fixture.canonicalEvaluatedRevision
+
+        let bootstrapReceipt = JsonObject()
+        bootstrapReceipt["schemaVersion"] <- JsonValue.Create 2
+        bootstrapReceipt["mode"] <- JsonValue.Create "FetchCandidate"
+        bootstrapReceipt["status"] <- JsonValue.Create "fetched"
+        bootstrapReceipt["repository"] <- JsonValue.Create "masterlifting/mcp-store"
+        bootstrapReceipt["repositoryId"] <- JsonValue.Create "123456789"
+        bootstrapReceipt["runId"] <- JsonValue.Create "controlled-run"
+        bootstrapReceipt["runAttempt"] <- JsonValue.Create "1"
+        bootstrapReceipt["eventSha"] <- JsonValue.Create eventSha
+        bootstrapReceipt["observedEvent"] <- JsonValue.Create "workflow_dispatch"
+        bootstrapReceipt["role"] <- JsonValue.Create "candidate"
+        bootstrapReceipt["component"] <- JsonValue.Create "dotnet"
+
+        let artifact = JsonObject()
+        artifact["id"] <- JsonValue.Create "controlled-artifact"
+        artifact["name"] <- JsonValue.Create "controlled-candidate"
+        artifact["role"] <- JsonValue.Create "candidate"
+        artifact["component"] <- JsonValue.Create "dotnet"
+        artifact["sizeInBytes"] <- JsonValue.Create 1
+        artifact["expired"] <- JsonValue.Create false
+        artifact["apiDigestRaw"] <- JsonValue.Create ($"sha256:{transportSha256}")
+        artifact["apiDigest"] <- JsonValue.Create transportSha256
+        artifact["platformDigest"] <- JsonValue.Create transportSha256
+        artifact["digestSource"] <- JsonValue.Create "controlled-fixture"
+        bootstrapReceipt["artifact"] <- artifact
+
+        let download = JsonObject()
+        download["redirectHost"] <- JsonValue.Create "objects.githubusercontent.com"
+        download["redirectCode"] <- JsonValue.Create 302
+        download["bytesRead"] <- JsonValue.Create 1
+        download["platformBytes"] <- JsonValue.Create 1
+        download["observedSha256"] <- JsonValue.Create transportSha256
+        bootstrapReceipt["download"] <- download
+
+        let uploaderJob = JsonObject()
+        uploaderJob["id"] <- JsonValue.Create "1234567890"
+        uploaderJob["name"] <- JsonValue.Create "prepare dotnet"
+        uploaderJob["runId"] <- JsonValue.Create "controlled-run"
+        uploaderJob["runAttempt"] <- JsonValue.Create "1"
+        uploaderJob["headSha"] <- JsonValue.Create eventSha
+        uploaderJob["status"] <- JsonValue.Create "completed"
+        uploaderJob["conclusion"] <- JsonValue.Create "success"
+        uploaderJob["listingUri"] <- JsonValue.Create "https://api.github.com/repos/masterlifting/mcp-store/actions/runs/controlled-run/attempts/1/jobs"
+        uploaderJob["artifactLinkLimit"] <- JsonValue.Create "platform does not expose artifact-to-job links"
+        bootstrapReceipt["uploaderJob"] <- uploaderJob
+
+        let runAttemptObservation = JsonObject()
+        runAttemptObservation["uri"] <- JsonValue.Create "https://api.github.com/repos/masterlifting/mcp-store/actions/runs/controlled-run/attempts/1"
+        runAttemptObservation["id"] <- JsonValue.Create "controlled-run"
+        runAttemptObservation["runAttempt"] <- JsonValue.Create "1"
+        runAttemptObservation["headSha"] <- JsonValue.Create eventSha
+        runAttemptObservation["event"] <- JsonValue.Create "workflow_dispatch"
+        runAttemptObservation["repositoryId"] <- JsonValue.Create "123456789"
+        runAttemptObservation["repositoryFullName"] <- JsonValue.Create "masterlifting/mcp-store"
+        bootstrapReceipt["runAttemptObservation"] <- runAttemptObservation
+
         try
+            // Valid evidence keeps this closure regression independent of later FetchCandidate validation.
+            let workspaceRoot = Path.GetFullPath repositoryRoot
+            let workspacePrefix =
+                workspaceRoot.TrimEnd([| Path.DirectorySeparatorChar; Path.AltDirectorySeparatorChar |])
+                + string Path.DirectorySeparatorChar
+            let fullFixtureRoot = Path.GetFullPath fixtureRoot
+            Expect.isFalse
+                (fullFixtureRoot.Equals(workspaceRoot, StringComparison.OrdinalIgnoreCase)
+                 || fullFixtureRoot.StartsWith(workspacePrefix, StringComparison.OrdinalIgnoreCase))
+                "receipt fixture paths are outside the publisher workspace"
+            File.WriteAllText(transportEvidencePath, bootstrapReceipt.ToJsonString())
+            let args =
+                [ "publish"
+                  closurePath
+                  candidateRoot
+                  "--repo=masterlifting/mcp-store"
+                  "--run-id=controlled-run"
+                  "--attempt=1"
+                  $"--event-sha={eventSha}"
+                  "--role=candidate"
+                  "--component=dotnet"
+                  "--artifact-id=controlled-artifact"
+                  "--artifact-name=controlled-candidate"
+                  $"--transport-sha256={transportSha256}"
+                  "--builder-sdk=controlled-sdk"
+                  "--builder-runtime=controlled-runtime"
+                  "--builder-platform=controlled-platform"
+                  $"--workspace-root={repositoryRoot}"
+                  $"--trusted-receipt={trustedReceiptPath}"
+                  $"--preparation-receipt={preparationReceiptPath}"
+                  $"--transport-evidence={transportEvidencePath}" ]
             let info = ProcessStartInfo(runnerPath)
-            info.WorkingDirectory <- repoRootForRunner
+            info.WorkingDirectory <- repositoryRoot
             info.UseShellExecute <- false
             info.RedirectStandardOutput <- true
             info.RedirectStandardError <- true
             info.CreateNoWindow <- true
-            info.ArgumentList.Add(manifestPath)
-            info.ArgumentList.Add(archivePath)
-            info.ArgumentList.Add(contractJson ())
-            info.EnvironmentVariables.Remove "GITHUB_TOKEN" |> ignore
-            info.EnvironmentVariables.Remove "GITHUB_ENV" |> ignore
-            info.EnvironmentVariables.Remove "GITHUB_OUTPUT" |> ignore
-            info.EnvironmentVariables.Remove "MCP_RELEASE_DO_UPLOAD" |> ignore
+            args |> List.iter info.ArgumentList.Add
+            [ "GITHUB_TOKEN"; "GH_TOKEN"; "MCP_RELEASE_DO_UPLOAD"; "MCP_RELEASE_GITHUB_OWNER"
+              "MCP_RELEASE_GITHUB_REPOSITORY"; "GITHUB_ENV"; "GITHUB_OUTPUT" ]
+            |> List.iter (fun name -> info.EnvironmentVariables.Remove name |> ignore)
+
             match! capture 15000 info with
-            | Error error ->
-                failed <- failed + 1
-                failures.Add(sprintf "runner-dirty-tree: invocation failed: %s" error)
-            | Ok(exitCode, stdout, _) ->
-                assertEqual "runner dirty-tree exitcode is 4" 4 exitCode
-                let outText = stdout.TrimEnd()
-                match JsonNode.Parse(outText).AsObject() with
-                | null ->
-                    failed <- failed + 1
-                    failures.Add(sprintf "runner-dirty-tree: stdout is not a JSON object (stdout=%s)" outText)
-                | obj ->
-                    let getStr key = if obj.ContainsKey key then obj.[key].GetValue<string>() else ""
-                    assertEqual "dirty-tree status is failed" "failed" (getStr "status")
-                    assertEqual "dirty-tree componentId is dotnet" "dotnet" (getStr "componentId")
-                    assertEqual "dirty-tree version is 1.0.4" "1.0.4" (getStr "version")
-                    assertEqual "dirty-tree archiveName is v1.0.4.zip" "v1.0.4.zip" (getStr "archiveName")
-                    let assetUriValue = getStr "assetUri"
-                    assertTrue "dirty-tree assetUri is populated" (assetUriValue.Contains("masterlifting/mcp-store", StringComparison.Ordinal))
-                    let reasonValue = getStr "reason"
-                    assertTrue "dirty-tree reason names the dirty guard"
-                        (reasonValue.Contains("dirty", StringComparison.Ordinal) || reasonValue.Contains("refusing", StringComparison.Ordinal) || reasonValue.Contains("clean", StringComparison.Ordinal))
-                    let assertNullOrMissing key =
-                        if obj.ContainsKey key then
-                            match obj.[key] with
-                            | null -> ()
-                            | node ->
-                                let kind = node.GetValueKind()
-                                assertTrue (sprintf "dirty-tree %s must be null or missing" key) (kind = JsonValueKind.Null)
-                        else ()
-                    assertNullOrMissing "publishedArchiveSha256"
-                    assertNullOrMissing "publishedManifestSha256"
-                    assertNullOrMissing "publishedRevision"
-                    assertNullOrMissing "publishedMetadataSha256"
-                    assertNullOrMissing "bumpedVersion"
+            | Error error -> failtestf "publish closure preflight failed to run: %s" error
+            | Ok (exitCode, stdout, _) ->
+                Expect.equal exitCode 4 "missing trusted closure blocks publication"
+                let result = JsonNode.Parse(stdout.TrimEnd()).AsObject()
+                Expect.equal (result["status"].GetValue<string>()) "failed" "structured failure status"
+                Expect.equal
+                    (result["reason"].GetValue<string>())
+                    $"required release artifact does not exist: {closurePath}"
+                    "typed missing publisher closure is the first verification failure"
+                for name in [ "publishedArchiveSha256"; "publishedManifestSha256"; "publishedRevision"; "publishedMetadataSha256" ] do
+                    Expect.isFalse (result.ContainsKey name) $"{name} is absent without a trusted closure"
         finally
-            try File.Delete markerPath with _ -> ()
-            try Directory.Delete(fixtureRoot, true) with _ -> ()
-
-}
-
-let runSuite () = async {
-    runnerBinaryExists ()
-    contractJsonShape ()
-    metadataAssetNameDeterministic ()
-    do! cleanTreeGuardContract ()
-    do! manifestRevisionGuardContract ()
-    do! runnerRejectsUnenrolledTransactionComponent ()
-    do! runnerEmptyArgvExitsWithUsage ()
-    do! runnerDirtyTreeEmitsStructuredFailureJson ()
-
-    printfn "runner-tests summary: passed=%d failed=%d" passed failed
-}
-
+            Fixture.safeDeleteDir fixtureRoot
+    }
 
 let tests =
-    testCaseAsync "Runner legacy regression assertions" <| async {
-        do! runSuite ()
-        Expect.equal 0 failed (String.concat Environment.NewLine failures)
-    }
+    testList
+        "runner publication boundary"
+        [ runnerBinaryExists
+          metadataAssetNameUsesCanonicalPolicy
+          cleanTreeGuardFailsClosed
+          committedHeadIsResolved
+          runnerEmptyArgumentsReturnUsage
+          missingIndependentClosure ]

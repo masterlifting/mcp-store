@@ -7,10 +7,10 @@ seam), **actual remote read** (none in this slice), and **unverified hosted**
 (GitHub Actions queue, real `api.github.com` uploads, immutable-release
 detection). The matrix is not retroactive; rows not touched remain
 `unverified`. Authority: the original issue body is preserved verbatim at
-`docs/GHI-24/original.md`. Requirement numbering below is the 1–72
-extraction of that body (`docs/GHI-24/research.md` records the baseline and
+`.tasks/GHI-24/docs/original.md`. Requirement numbering below is the 1–72
+extraction of that body (`.tasks/GHI-24/docs/research.md` records the baseline and
 open gaps). If this file and the issue conflict, the issue wins. Full
-evidence narrative at `docs/GHI-24/tests.md`.
+evidence narrative at `.tasks/GHI-24/docs/tests.md`.
 
 Evidence IDs: `EV-BUILD` producer build/package validation; `EV-TEST`
 deterministic tests; `EV-WF` static/config validation of the root workflow;

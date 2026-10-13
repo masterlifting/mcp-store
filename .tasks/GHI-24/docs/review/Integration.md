@@ -285,3 +285,143 @@ remain subject to the independent compiled-test and integrity stages. The former
 `Bootstrap.fsx` syntax defect is repaired and the roster-derived gates now pass.
 No commit, push, merge, thread resolution, runtime mutation, remote acquisition,
 upload, secret access, or production/test F# edit was made.
+
+## W5 new-thread remediation slice (`release.yml` / `Coherence.ps1`)
+
+Factual record of the bounded DevOps slice for the post-baseline
+`release.yml`-anchored review threads at local head
+`523f625014dbf81fb788fe5c11877fc7a9626382`. This is not acceptance evidence and
+claims no PASS.
+
+Threads addressed in this slice: `r4249874725` (P1, step-output isolation),
+`r4249894920` (P1, missing Workflow test gate), and the `release.yml` boundary of
+`r4249874746` (P2, publication credential isolation). The two
+`infrastructure/release/Orchestration.fs` threads (`r4249874735` authorization
+order, `r4249904018` comment policy) are F#-engineer-owned and untouched here.
+
+Changed paths: `.github/workflows/release.yml` and
+`infrastructure/release/Coherence.ps1` only. No F# source, test, other script,
+roster, task state or secret was edited.
+
+### Step-output isolation (`r4249874725`)
+
+The bootstrap coherence step no longer passes its own `$env:GITHUB_OUTPUT` to
+the guard (GitHub Actions allocates one output-command file per step, so that
+file never contained the project step's `components=` line).
+
+- `Coherence.ps1` now takes `-Components <json>` (the actual
+  `${{ steps.project.outputs.components }}` value) instead of
+  `-OutputFile <path>`, so the guard has one projection source and never reads a
+  step-local output-command file.
+- Fail-closed behaviour is retained and extended: an absent or empty
+  `-Components` throws, a value that disagrees with the roster throws, and two
+  new anchored markers fail the guard before the SDK install if the
+  `PROJECTED_COMPONENTS` input or the `Coherence.ps1 -Components` consumption is
+  renamed or reverted (a zero-count marker rejects a return to `-OutputFile`).
+- The stale `-OutputFile` descriptions earlier in this document (W4 table row
+  18, the guard signature at the "Cross-stage coherence guard" subsection, and
+  the "Public surface handed to the tester" bullet) describe the superseded
+  surface; this section supersedes them.
+
+### Workflow test gate (`r4249894920`)
+
+The read-only `tests` job now runs, after the producer Expecto gate and before
+the historical-fixture step, the ten non-packaging Workflow entrypoints as an
+explicit deterministic list: `AuthorityMetadataTests.fsx`,
+`EphemeralLockInvariantTests.fsx`, `SchemaParityGuardTests.fsx`,
+`TaskContractTests.fsx`, `TaskPathSafetyTests.fsx`, `TaskProfileTests.fsx`,
+`WorkflowMcpFindingTests.fsx`, `WorkflowMcpNativeCompatTests.fsx`,
+`WorkflowMcpTests.fsx`, `WorkflowTests.fsx`. Selection is never globbed, a
+missing entrypoint throws, each child's native exit code is read explicitly, and
+the step exits with the first failing child's code. The `release` job already
+depends on `tests`, so a failing Workflow suite now blocks every upload.
+
+The two package-dependent suites (`<component>/tests/DistributionTests.fsx` and
+`workflow/tests/PackagedRuntimeCoordinationTests.fsx`) need a clean tree and the
+built distribution, so they remain a pre-upload gate inside
+`ReleaseRunner.exe orchestrate` (F#-engineer-owned companion, below).
+
+### Publication credential boundary (`r4249874746`, coordination only)
+
+`release.yml` keeps `GITHUB_TOKEN`/`MCP_RELEASE_DO_UPLOAD` on the transaction
+step because the orchestration subprocess needs them for the publish transport;
+the isolation must therefore happen where the child environments are built
+(`ReleaseOrchestration.runProducerScript` / `ReleaseCapture.runProcessCapture`),
+which is F#-engineer-owned and was not edited here.
+
+### Validation executed locally (non-publishing, no network, no upload, no build)
+
+| # | Check | Command | Result |
+| --- | --- | --- | --- |
+| 20 | Coherence guard baseline | `pwsh -NoProfile -File infrastructure/release/Coherence.ps1 -Components '["dotnet","workflow"]'` | exit 0; `cross-stage coherence ok: 18 assertions; roster=[dotnet, workflow]` |
+| 21 | Guard fails closed on a roster-mismatched value | same with `-Components '["dotnet","telegram"]'` | exit 1; `[projection output]: projected participants [dotnet, telegram] do not equal the roster [dotnet, workflow]` |
+| 22 | Guard fails closed on an absent projection | `Coherence.ps1` with no `-Components` | exit 1; `[projected components]: -Components must carry the bootstrap projection value` |
+| 23 | Guard fails closed on a reverted wiring (temp root copy of the workflow) | workflow text edited back to `Coherence.ps1 -OutputFile $env:GITHUB_OUTPUT` | exit 1; `[coherence guard consumes the projected components]: expected 1 match(es) … found 0` |
+| 24 | Guard fails closed on a renamed projection input (temp root copy) | workflow text edited to `PROJECTED_OTHER` | exit 1; `[coherence guard projection input]: expected 1 match(es) …` |
+| 25 | Workflow YAML plus structural facts | PyYAML `safe_load` + structural asserts | parse OK; jobs `bootstrap`/`tests`/`release`; `release.needs=[bootstrap, tests]`; coherence step carries `PROJECTED_COMPONENTS: ${{ steps.project.outputs.components }}` and `-Components $env:PROJECTED_COMPONENTS` |
+| 26 | PowerShell parse | `[Parser]::ParseInput` over `Coherence.ps1` and all nine `run: \|` blocks (GitHub expressions substituted) | `run_blocks=9 bad=0` |
+| 27 | Workflow test-loop control flow (stubbed `dotnet`, no suite executed) | extracted step body with a shim returning exit 7 on the third entrypoint | step exits 7 with `::error::Workflow test entrypoints failed: workflow/tests/SchemaParityGuardTests.fsx (exit 7)`; all-zero shim exits 0 |
+
+Checks 20–24 read repository and fixture text only. Checks 25–27 touched no
+network, asset, secret, build output or publication path. The ten Workflow
+entrypoints were not executed by this slice; their credential-free exit-0 run is
+recorded in `Verification.md` and re-execution is tester-owned.
+
+### Required companion changes (not in this slice)
+
+1. **Tester-owned compiled tests** (`infrastructure/release/tests/`):
+   `Coherence.fs::runCoherence` still passes `-OutputFile <path>` and must pass
+   `-Components <json>` (including the `components=["dotnet","telegram"]`
+   negative case), and `Telegram.fs` line 106–108 still asserts the workflow text
+   contains `infrastructure/release/Coherence.ps1 -OutputFile` and must assert
+   the `-Components` consumption instead.
+2. **Tester-owned step-isolation regression:** run `Update.ps1 -Project` with one
+   `GITHUB_OUTPUT` path and `Coherence.ps1 -Components <the emitted value>` with a
+   distinct `GITHUB_OUTPUT` path, mirroring the per-step command files Actions
+   allocates, and assert pass; assert fail-closed with no `-Components`.
+3. **Tester-owned publication-block regression:** show that a failing Workflow
+   entrypoint blocks publication — e.g. assert the `tests` job names all ten
+   entrypoints and that `release.needs` includes `tests`.
+4. **Engineer-owned orchestration:** clear `GITHUB_TOKEN`,
+   `MCP_RELEASE_DO_UPLOAD`, `MCP_RELEASE_GITHUB_OWNER` and
+   `MCP_RELEASE_GITHUB_REPOSITORY` from the `build`/`pins`/`tests` child
+   environments and keep them only for the final transaction subprocess; run
+   `workflow/tests/PackagedRuntimeCoordinationTests.fsx` after the component
+   `DistributionTests.fsx` and before the transaction so both package-dependent
+   suites gate the upload against the clean built distribution, preserving the
+   native `childExitCode` and the structured `phase=tests` failure.
+5. **`Suite.ps1` / `infrastructure/release/README.md`:** assert the second
+   package-dependent entrypoint exists, and update the guard description (the
+   emitted `components=` projection paragraph and the `-OutputFile` surface) to
+   the `-Components` value input.
+
+### Limits
+
+Local-only source and configuration validation; no hosted Actions run, no
+upload, no network, no credentials, no build and no suite execution were
+performed by this slice. The Workflow test-gate and credential-isolation changes
+require the compiled suite rebuild plus the companion changes above before any
+criterion can be re-evaluated.
+
+### Fail-fast amendment (coordinator decision)
+
+The Workflow test step now stops at the first failing entrypoint and exits with
+that child's native code, so the native first-failed exit is preserved and no
+later entrypoint runs. The explicit ten-entrypoint selection, the
+missing-entrypoint guard, the step name and `release.needs = [bootstrap, tests]`
+are unchanged, and no tester assertion is relaxed.
+
+Superseded entries above, retained unmodified as history: the "Workflow test
+gate" paragraph phrase *"each child's native exit code is read explicitly, and
+the step exits with the first failing child's code"* and validation row 27
+(which recorded the earlier collect-and-continue body, where the step continued
+past the third entrypoint before exiting). The current behaviour is fail-fast.
+
+| # | Check | Result |
+| --- | --- | --- |
+| 28 | `[Parser]::ParseInput` over all `run: \|` blocks (GitHub expressions substituted) | `run_blocks=9 parse_failures=0` |
+| 29 | YAML structural check of the reworked step | exactly 10 entrypoints; no `failed.Add`/`failCode`/`failed.Count` remnant; missing-entrypoint guard present; `exit $code` present and `exit $failCode` absent; `release_needs=[bootstrap, tests]` |
+| 30 | Extracted step body run with a stubbed `dotnet` (no suite executed) | first entrypoint exit 7 → step exit 7, 1 stub call; third entrypoint exit 7 → step exit 7, 3 stub calls (`::error::Workflow test entrypoint failed: workflow/tests/SchemaParityGuardTests.fsx (exit 7)`); all-zero stub → step exit 0, 10 stub calls |
+
+The stub-driven native-return assertions against the real compiled suite remain
+tester-owned; these checks execute no Workflow suite.

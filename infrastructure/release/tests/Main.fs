@@ -16,10 +16,21 @@ let private suites =
               Metadata.tests
               Publish.tests
               Integrity.tests
+              Policy.tests
+              Handoff.tests
               Revision.tests
               Runner.tests
               Telegram.tests
               Orchestration.tests ])
 
+let private runPrepareAuthorityProbe (argv: string array) =
+    if argv.Length = 3 && argv[0] = "--prepare-authority-probe" then
+        Some(ReleaseRunner.main [| "prepare"; argv.[1]; argv.[2] |])
+    else
+        None
+
 [<EntryPoint>]
-let main argv = runTestsWithCLIArgs [] argv suites
+let main argv =
+    match runPrepareAuthorityProbe argv with
+    | Some exitCode -> exitCode
+    | None -> runTestsWithCLIArgs [] argv suites

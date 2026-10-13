@@ -276,7 +276,7 @@ let private uploadMetadataUsesProducerOwnedToolchains () = async {
             withEnv "RELEASE_EXPECTED_SDK" None (fun _ ->
                 withEnv "RELEASE_EXPECTED_RUNTIME" None (fun _ ->
                     withEnv "RELEASE_EXPECTED_PLATFORM" None (fun _ ->
-                        uploadMetadata auth locator projection transport)))
+                        uploadMetadataBytes auth locator projection transport)))
 
         let! outcome = withUploadFlag (Some "true") (fun _ -> uploadWithoutAmbientIdentity ())
 
@@ -371,7 +371,7 @@ let uploadCandidateIdempotentNoPost () = async {
         let auth = { Token = "sentinel" }
         let locator = { Owner = "x"; Repository = "y"; Tag = "dotnet" }
         match! classify "uploadCandidateIdempotentNoPost" (fun _ ->
-            uploadCandidate auth locator "v1.0.4.zip" archivePath candidateSha transport) with
+            uploadCandidateBytes auth locator "v1.0.4.zip" archiveBytes (Some candidateSha) transport) with
         | Ok (Ok digest) -> assertEqual "idempotent returns the existing digest" candidateSha digest
         | Ok (Error error) -> failed <- failed + 1; failures.Add(sprintf "idempotent upload: %s" (ReleaseError.message error))
         | _ -> ()
@@ -392,7 +392,7 @@ let uploadCandidateRefusesOverwrite () = async {
         let auth = { Token = "sentinel" }
         let locator = { Owner = "x"; Repository = "y"; Tag = "dotnet" }
         match! classify "uploadCandidateRefusesOverwrite" (fun _ ->
-            uploadCandidate auth locator "v1.0.4.zip" archivePath candidateSha transport) with
+            uploadCandidateBytes auth locator "v1.0.4.zip" (File.ReadAllBytes archivePath) (Some candidateSha) transport) with
         | Ok (Error error) -> assertTrue "overwrite refusal is typed" ((ReleaseError.message error).Contains("refusing to overwrite", StringComparison.Ordinal))
         | Ok (Ok value) -> failed <- failed + 1; failures.Add(sprintf "overwrite: expected Error got %s" value)
         | _ -> ()
@@ -417,7 +417,7 @@ let uploadCandidateSuccessPath () = async {
         let auth = { Token = "sentinel" }
         let locator = { Owner = "x"; Repository = "y"; Tag = "dotnet" }
         match! classify "uploadCandidateSuccessPath" (fun _ ->
-            uploadCandidate auth locator "v1.0.4.zip" archivePath candidateSha transport) with
+            uploadCandidateBytes auth locator "v1.0.4.zip" archiveBytes (Some candidateSha) transport) with
         | Ok (Ok digest) -> assertEqual "success returns the verified digest" candidateSha digest
         | Ok (Error error) -> failed <- failed + 1; failures.Add(sprintf "success upload: %s" (ReleaseError.message error))
         | _ -> ()
@@ -443,7 +443,7 @@ let uploadCandidatePostServerErrorNoRetry () = async {
         let auth = { Token = "sentinel" }
         let locator = { Owner = "x"; Repository = "y"; Tag = "dotnet" }
         match! classify "uploadCandidatePostServerErrorNoRetry" (fun _ ->
-            uploadCandidate auth locator "v1.0.4.zip" archivePath candidateSha transport) with
+            uploadCandidateBytes auth locator "v1.0.4.zip" (File.ReadAllBytes archivePath) (Some candidateSha) transport) with
         | Ok (Error error) -> assertTrue "503 error references 503" ((ReleaseError.message error).Contains("503", StringComparison.Ordinal))
         | Ok (Ok value) -> failed <- failed + 1; failures.Add(sprintf "503 upload: expected Error got %s" value)
         | _ -> ()
@@ -600,7 +600,7 @@ let uploadCandidatePostTimeoutReadsBackVerifiedBytes () = async {
         let auth = { Token = "sentinel" }
         let locator = { Owner = "x"; Repository = "y"; Tag = "dotnet" }
         match! classify "uploadCandidatePostTimeoutReadsBackVerifiedBytes" (fun _ ->
-            uploadCandidate auth locator "v1.0.4.zip" archivePath candidateSha transport) with
+            uploadCandidateBytes auth locator "v1.0.4.zip" archiveBytes (Some candidateSha) transport) with
         | Ok (Ok digest) -> assertEqual "post-timeout verified digest matches candidate" candidateSha digest
         | Ok (Error error) -> failed <- failed + 1; failures.Add(sprintf "post-timeout readback: %s" (ReleaseError.message error))
         | _ -> ()
@@ -623,7 +623,7 @@ let uploadCandidateAmbiguousPostMustObserveRemote () = async {
     do! withUploadFlag (Some "true") (fun _ -> async {
         let auth = { Token = "sentinel" }
         let locator = { Owner = "x"; Repository = "y"; Tag = "dotnet" }
-        let! _ = uploadCandidate auth locator "v1.0.4.zip" archivePath candidateSha transport
+        let! _ = uploadCandidateBytes auth locator "v1.0.4.zip" archiveBytes (Some candidateSha) transport
         return ()
     })
     let captured = handler.Captured
@@ -641,7 +641,7 @@ let uploadCandidateSnapshotMismatchZeroRequests () = async {
         let auth = { Token = "sentinel" }
         let locator = { Owner = "x"; Repository = "y"; Tag = "dotnet" }
         match! classify "uploadCandidateSnapshotMismatch" (fun _ ->
-            uploadCandidate auth locator "v1.0.4.zip" archivePath wrongDigest transport) with
+            uploadCandidateBytes auth locator "v1.0.4.zip" (File.ReadAllBytes archivePath) (Some wrongDigest) transport) with
         | Ok (Error error) -> assertTrue "snapshot mismatch is fail-closed" ((ReleaseError.message error).Contains("digest", StringComparison.Ordinal))
         | Ok (Ok value) -> failed <- failed + 1; failures.Add(sprintf "snapshot mismatch: expected Error got %s" value)
         | _ -> ()
@@ -662,7 +662,7 @@ let uploadMetadataTargetsMetadataAssetName () = async {
         let auth = { Token = "sentinel" }
         let locator = { Owner = "x"; Repository = "y"; Tag = "dotnet" }
         match! classify "uploadMetadataTargetsMetadataAssetName" (fun _ ->
-            uploadMetadata auth locator projection transport) with
+            uploadMetadataBytes auth locator projection transport) with
         | Ok (Ok digest) -> assertEqual "metadata upload returns verified digest" renderedSha digest
         | Ok (Error error) -> failed <- failed + 1; failures.Add(sprintf "metadata success: %s" (ReleaseError.message error))
         | _ -> ()
@@ -698,8 +698,8 @@ let archiveSuccessThenMetadataFailure () = async {
     do! withUploadFlag (Some "true") (fun _ -> async {
         let auth = { Token = "sentinel" }
         let locator = { Owner = "x"; Repository = "y"; Tag = "dotnet" }
-        let! archiveClassified = classify "twostep/archive" (fun _ -> uploadCandidate auth locator "v1.0.4.zip" archivePath candidateSha transport)
-        let! metadataClassified = classify "twostep/metadata" (fun _ -> uploadMetadata auth locator projection transport)
+        let! archiveClassified = classify "twostep/archive" (fun _ -> uploadCandidateBytes auth locator "v1.0.4.zip" archiveBytes (Some candidateSha) transport)
+        let! metadataClassified = classify "twostep/metadata" (fun _ -> uploadMetadataBytes auth locator projection transport)
         match archiveClassified, metadataClassified with
         | Ok (Ok aDigest), Ok (Error mError) ->
             assertEqual "archive step returns verified digest" candidateSha aDigest

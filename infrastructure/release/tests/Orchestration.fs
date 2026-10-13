@@ -1,170 +1,290 @@
 module Release.Tests.Orchestration
 
 open System
+open System.Diagnostics
 open System.IO
+open System.IO.Compression
+open System.Reflection
+open System.Security.Cryptography
+open System.Text
+open System.Text.Json
 open System.Text.Json.Nodes
 open Expecto
-open BuildProvenance
+open ReleaseTestProcess
 
-let private producers =
-    [ "dotnet", "1.2.3", "Mcp.Dotnet.dll", "dotnet-test-sdk", "dotnet-test-runtime", "win-x64"
-      "workflow", "4.5.6", "Mcp.Workflow.dll", "workflow-test-sdk", "workflow-test-runtime", "linux-x64" ]
+type private StageFailure =
+    | BuildFailure
+    | PinsFailure
+    | DotnetDistributionFailure
+    | WorkflowDistributionFailure
+    | WorkflowPackagedFailure
 
-let private writeRoster root =
-    let path = ReleaseEnrollment.rosterPath root
-    Directory.CreateDirectory(Path.GetDirectoryName path) |> ignore
-    let participants = JsonArray()
-    for producerId, _, _, _, _, _ in producers do
-        let entry = JsonObject()
-        entry["componentId"] <- JsonValue.Create producerId
-        entry["configPath"] <- JsonValue.Create(Path.Combine(producerId, "release", "Config.fsx").Replace('\\', '/'))
-        participants.Add entry
-    let document = JsonObject()
-    document["participants"] <- participants
-    File.WriteAllText(path, document.ToJsonString())
+let private componentIds = [ "dotnet"; "workflow" ]
 
-let private writeConfig root producerId version entryDll sdk runtime platform =
-    let componentRoot = Path.Combine(root, producerId)
-    let releaseDir = Path.Combine(componentRoot, "release")
-    Directory.CreateDirectory releaseDir |> ignore
-    Directory.CreateDirectory(Path.Combine(componentRoot, "tests")) |> ignore
+let private sha256 (bytes: byte[]) =
+    SHA256.HashData bytes |> Convert.ToHexString |> fun value -> value.ToLowerInvariant()
 
-    let archiveName = $"v{version}.zip"
-    let assetUri = $"https://github.com/masterlifting/mcp-store/releases/download/{producerId}/{archiveName}"
-    let configPath = Path.Combine(releaseDir, "Config.fsx")
-    let config =
-        String.concat
-            Environment.NewLine
-            [ "module ReleaseConfig"
-              $"let componentId = \"{producerId}\""
-              $"let version = \"{version}\""
-              $"let entryDll = \"{entryDll}\""
-              $"let sdkVersion = \"{sdk}\""
-              $"let runtimeVersion = \"{runtime}\""
-              $"let platform = \"{platform}\""
-              $"let archiveName = \"{archiveName}\""
-              $"let assetUri = \"{assetUri}\""
-              $"let publishedFiles = [ \"{entryDll}\" ]" ]
-    File.WriteAllText(configPath, config)
-    Path.GetRelativePath(root, configPath).Replace('\\', '/')
+let private clearReadOnlyGitObjects (root: string) =
+    let objectDirectory = Path.Combine(root, ".git", "objects")
 
-let private writeStepScript scriptPath marker stage shouldFail =
-    let source =
-        $"open System.IO{Environment.NewLine}"
-        + $"File.AppendAllText(@\"{marker}\", \"{stage};\"){Environment.NewLine}"
-        + if shouldFail then "failwith \"controlled validation failure\" |> ignore" + Environment.NewLine else ""
-    File.WriteAllText(scriptPath, source)
+    if Directory.Exists objectDirectory then
+        for path in Directory.EnumerateFiles(objectDirectory, "*", SearchOption.AllDirectories) do
+            let file = FileInfo path
 
-let private parseDiagnostic (text: string) =
-    JsonNode.Parse(text).AsObject()
+            if file.IsReadOnly then
+                file.IsReadOnly <- false
 
-let private propertyNames (node: JsonObject) =
-    node |> Seq.map (fun pair -> pair.Key) |> Set.ofSeq
-
-let private requiredString (node: JsonObject) (key: string) : string =
-    node[key].GetValue<string>()
-
-let private runValidationFailure (producerId, version, entryDll, sdk, runtime, platform) =
+let private withTemporaryRoot (action: string -> Async<unit>) =
     async {
-        let root = Path.Combine(Path.GetTempPath(), "mcp-release-orchestration-" + Guid.NewGuid().ToString("N"))
+        let root = Path.Combine(Path.GetTempPath(), "mcp-release-prepare-" + Guid.NewGuid().ToString("N"))
+        Directory.CreateDirectory root |> ignore
+        try
+            do! action root
+        finally
+            if Directory.Exists root then
+                // Windows Git marks loose objects read-only, which blocks recursive deletion of this fixture.
+                clearReadOnlyGitObjects root
+                Directory.Delete(root, true)
+    }
+
+let private write (root: string) (relativePath: string) (contents: string) =
+    let path = Path.Combine(root, relativePath)
+    Directory.CreateDirectory(Path.GetDirectoryName path) |> ignore
+    File.WriteAllText(path, contents)
+    path
+
+let private policySource componentId =
+    let productName = if componentId = "dotnet" then "Dotnet" else "Workflow"
+    let entryDll = $"Mcp.{productName}.dll"
+    String.concat
+        Environment.NewLine
+        [ "module ReleaseConfig"
+          $"let componentId = \"{componentId}\""
+          "let version = \"7.8.9\""
+          $"let entryDll = \"{entryDll}\""
+          "let sdkVersion = \"fixture-sdk\""
+          "let runtimeVersion = \"fixture-runtime\""
+          "let platform = \"fixture-platform\""
+          "let archiveName = $\"v{version}.zip\""
+          "let assetUri = $\"https://github.com/masterlifting/mcp-store/releases/download/{componentId}/{archiveName}\""
+          $"let publishedFiles = [ \"FSharp.Core.dll\"; \"Mcp.{productName}.deps.json\"; \"{entryDll}\"; \"Mcp.{productName}.runtimeconfig.json\" ]" ]
+
+let private parsePolicy configPath =
+    ReleasePolicy.parseBytes configPath (File.ReadAllBytes configPath)
+    |> function
+        | Ok policy -> policy
+        | Error error -> failwithf "fixture policy failed to parse: %s" (BuildProvenance.ReleaseError.message error)
+
+let private writeProducerArchive (root: string) (policy: ReleasePolicy.PolicyProjection) =
+    let payloads =
+        policy.PublishedFiles
+        |> List.map (fun name -> name, Encoding.UTF8.GetBytes($"fixture:{policy.ComponentId}:{name}"))
+        |> fun files -> files @ [ "NOTICE.txt", Encoding.UTF8.GetBytes "release preparation fixture" ]
+
+    let manifest = JsonObject()
+    manifest["schemaVersion"] <- JsonValue.Create 1
+    manifest["id"] <- JsonValue.Create policy.ComponentId
+    manifest["version"] <- JsonValue.Create policy.Version
+    manifest["revision"] <- JsonValue.Create("0123456789abcdef0123456789abcdef01234567")
+    manifest["sdk"] <- JsonValue.Create policy.SdkVersion
+    manifest["entryDll"] <- JsonValue.Create policy.EntryDll
+    manifest["archive"] <- JsonValue.Create policy.ArchiveName
+
+    let files = JsonArray()
+    for name, bytes in payloads do
+        if name <> "NOTICE.txt" then
+            let entry = JsonObject()
+            entry["path"] <- JsonValue.Create name
+            entry["sha256"] <- JsonValue.Create(sha256 bytes)
+            files.Add entry
+    manifest["files"] <- files
+
+    let archiveFiles = JsonArray()
+    for name in policy.PublishedFiles @ [ "NOTICE.txt"; "distribution.json" ] do
+        archiveFiles.Add(JsonValue.Create name)
+    manifest["archiveFiles"] <- archiveFiles
+    let manifestBytes = Encoding.UTF8.GetBytes(manifest.ToJsonString(JsonSerializerOptions(WriteIndented = true)))
+    let archivePath = Path.Combine(root, policy.ComponentId, "dist", policy.ArchiveName)
+    let manifestPath = Path.Combine(root, policy.ComponentId, "dist", policy.ComponentId, "distribution.json")
+    Directory.CreateDirectory(Path.GetDirectoryName archivePath) |> ignore
+    Directory.CreateDirectory(Path.GetDirectoryName manifestPath) |> ignore
+    File.WriteAllBytes(manifestPath, manifestBytes)
+
+    use stream = File.Create archivePath
+    use archive = new ZipArchive(stream, ZipArchiveMode.Create)
+    for name, bytes in payloads @ [ "distribution.json", manifestBytes ] do
+        let entry = archive.CreateEntry(name, CompressionLevel.Optimal)
+        entry.LastWriteTime <- DateTimeOffset(1980, 1, 1, 0, 0, 0, TimeSpan.Zero)
+        use entryStream = entry.Open()
+        entryStream.Write(bytes, 0, bytes.Length)
+
+let private stageScript (stage: string) (fails: bool) =
+    let marker = "File.AppendAllText(\"prepare-stages.log\", \"" + stage + ";\")"
+    let failure = if fails then "failwith \"controlled stage failure\" |> ignore" else "()"
+    "open System.IO" + Environment.NewLine + marker + Environment.NewLine + failure + Environment.NewLine
+
+let private stageFailure (producer: string) (stage: StageFailure) : string * string =
+    match stage with
+    | BuildFailure -> producer, "build"
+    | PinsFailure -> producer, "pins"
+    | DotnetDistributionFailure -> "dotnet", "distribution"
+    | WorkflowDistributionFailure -> "workflow", "distribution"
+    | WorkflowPackagedFailure -> "workflow", "packaged"
+
+let private scriptFails selectedProducer selectedStage producer stage =
+    selectedProducer = producer && selectedStage = stage
+
+let private runGit root arguments =
+    async {
+        let info = ProcessStartInfo("git")
+        info.WorkingDirectory <- root
+        info.UseShellExecute <- false
+        info.RedirectStandardOutput <- true
+        info.RedirectStandardError <- true
+        arguments |> List.iter info.ArgumentList.Add
+        match! capture 30000 info with
+        | Ok (0, _, _) -> return ()
+        | Ok (code, stdout, stderr) -> return failwithf "git %A failed (%d): %s %s" arguments code stdout stderr
+        | Error error -> return failwithf "git %A could not run: %s" arguments error
+    }
+
+let private writeFixture (root: string) (failure: StageFailure option) =
+    async {
+        let roster = JsonObject()
+        let participants = JsonArray()
+        for componentId in componentIds do
+            let item = JsonObject()
+            item["componentId"] <- JsonValue.Create componentId
+            item["configPath"] <- JsonValue.Create $"{componentId}/release/Config.fsx"
+            participants.Add item
+        roster["participants"] <- participants
+        write root "infrastructure/release/Participants.json" (roster.ToJsonString()) |> ignore
+
+        for componentId in componentIds do
+            let selectedProducer, selectedStage =
+                failure
+                |> Option.map (stageFailure componentId)
+                |> Option.defaultValue ("", "")
+
+            let configPath = write root $"{componentId}/release/Config.fsx" (policySource componentId)
+            let policy = parsePolicy configPath
+            writeProducerArchive root policy
+            write root $"{componentId}/release/Build.fsx" (stageScript "build" (scriptFails selectedProducer selectedStage componentId "build")) |> ignore
+            write root $"{componentId}/release/Pins.fsx" (stageScript "pins" (scriptFails selectedProducer selectedStage componentId "pins")) |> ignore
+            write root $"{componentId}/tests/DistributionTests.fsx" (stageScript "distribution" (scriptFails selectedProducer selectedStage componentId "distribution")) |> ignore
+
+            if componentId = "workflow" then
+                write root "workflow/tests/PackagedRuntimeCoordinationTests.fsx" (stageScript "packaged" (scriptFails selectedProducer selectedStage componentId "packaged"))
+                |> ignore
+
+        do! runGit root [ "init"; "--quiet" ]
+        do! runGit root [ "add"; "-A" ]
+        do!
+            runGit
+                root
+                [ "-c"; "user.name=ReleaseTests"; "-c"; "user.email=release-tests@example.invalid"; "commit"; "--quiet"; "-m"; "fixture"; "--allow-empty" ]
+    }
+
+let private runPrepare root configPath outputPath =
+    async {
+        let previous = Console.Out
+        use output = new StringWriter()
+        try
+            Console.SetOut output
+            let! exitCode = ReleaseOrchestration.prepare root configPath outputPath
+            return exitCode, output.ToString()
+        finally
+            Console.SetOut previous
+    }
+
+let private prepareWritesPortableCandidateAndUsesExplicitProducerGates =
+    testCaseAsync "prepare writes portable candidates after each enrolled producer's explicit test gates" <| async {
+        for componentId in componentIds do
+            do!
+                withTemporaryRoot (fun root ->
+                    async {
+                        do! writeFixture root None
+                        let outputPath = Path.Combine(root, "candidate-output")
+                        let! exitCode, output = runPrepare root $"{componentId}/release/Config.fsx" outputPath
+                        Expect.equal exitCode 0 $"{componentId} preparation succeeds: {output}"
+                        let summary = JsonNode.Parse(output.Trim()).AsObject()
+                        Expect.equal (summary["status"].GetValue<string>()) "prepared" $"{componentId} reports preparation only"
+                        Expect.isTrue (File.Exists(Path.Combine(outputPath, "preparation.json"))) $"{componentId} emits the preparation receipt"
+                        Expect.isTrue (File.Exists(Path.Combine(outputPath, "distribution.json"))) $"{componentId} emits its standalone manifest"
+                        Expect.isTrue (File.Exists(Path.Combine(outputPath, "v7.8.9.zip"))) $"{componentId} emits the producer archive"
+                        let stages = File.ReadAllText(Path.Combine(root, "prepare-stages.log"))
+                        let expected = if componentId = "workflow" then "build;pins;distribution;packaged;" else "build;pins;distribution;"
+                        Expect.equal stages expected $"{componentId} runs only its ordered producer gates"
+                        Expect.isFalse (File.Exists(Path.Combine(root, "transaction-started"))) "preparation never starts publication"
+                    })
+    }
+
+let private preparationFailureStopsBeforeLaterStages =
+    testCaseAsync "build, pins, and both Workflow package-test failures block candidate output" <| async {
+        let scenarios =
+            [ BuildFailure, "dotnet", "build", "build;"
+              PinsFailure, "dotnet", "pins", "build;pins;"
+              WorkflowDistributionFailure, "workflow", "tests", "build;pins;distribution;"
+              WorkflowPackagedFailure, "workflow", "tests[2]", "build;pins;distribution;packaged;" ]
+
+        for failure, componentId, expectedPhase, expectedStages in scenarios do
+            do!
+                withTemporaryRoot (fun root ->
+                    async {
+                        do! writeFixture root (Some failure)
+                        let outputPath = Path.Combine(root, "candidate-output")
+                        let! exitCode, output = runPrepare root $"{componentId}/release/Config.fsx" outputPath
+                        Expect.equal exitCode 4 $"{componentId}/{expectedPhase} returns the structured preparation failure"
+                        let diagnostic = JsonNode.Parse(output.Trim()).AsObject()
+                        Expect.equal (diagnostic["status"].GetValue<string>()) "failed" $"{componentId}/{expectedPhase} status"
+                        Expect.equal (diagnostic["phase"].GetValue<string>()) expectedPhase $"{componentId}/{expectedPhase} phase"
+                        Expect.isTrue
+                            (diagnostic["reason"].GetValue<string>().Contains("failed (1)", StringComparison.Ordinal))
+                            $"{componentId}/{expectedPhase} preserves the child failure code"
+                        Expect.equal (File.ReadAllText(Path.Combine(root, "prepare-stages.log"))) expectedStages $"{componentId}/{expectedPhase} stops subsequent stages"
+                        Expect.isFalse (Directory.Exists outputPath) $"{componentId}/{expectedPhase} writes no candidate output"
+                        Expect.isFalse (File.Exists(Path.Combine(root, "transaction-started"))) $"{componentId}/{expectedPhase} reaches no publisher"
+                    })
+    }
+
+let private prepareRefusesPublicationAuthority =
+    testCaseAsync "the prepare CLI refuses to run when publication authority is present" <| async {
+        let runnerAssembly = Assembly.GetEntryAssembly().Location
+        let root = Path.Combine(Path.GetTempPath(), "mcp-release-prepare-authority-" + Guid.NewGuid().ToString("N"))
+        let candidatePath = Path.Combine(root, "candidate")
         Directory.CreateDirectory root |> ignore
 
         try
-            let configPath = writeConfig root producerId version entryDll sdk runtime platform
-            writeRoster root
-            let releaseDir = Path.Combine(root, producerId, "release")
-            let testsDir = Path.Combine(root, producerId, "tests")
-            let marker = Path.Combine(root, "sequence.txt")
-            writeStepScript (Path.Combine(releaseDir, "Build.fsx")) marker "build" false
-            writeStepScript (Path.Combine(releaseDir, "Pins.fsx")) marker "pins" false
-            writeStepScript (Path.Combine(testsDir, "DistributionTests.fsx")) marker "tests" true
+            let info = ProcessStartInfo("dotnet")
+            info.WorkingDirectory <- root
+            info.UseShellExecute <- false
+            info.RedirectStandardOutput <- true
+            info.RedirectStandardError <- true
+            [ runnerAssembly; "--prepare-authority-probe"; "dotnet/release/Config.fsx"; candidatePath ]
+            |> List.iter info.ArgumentList.Add
+            [ "GITHUB_TOKEN"; "GH_TOKEN"; "MCP_RELEASE_DO_UPLOAD"; "MCP_RELEASE_GITHUB_OWNER"
+              "MCP_RELEASE_GITHUB_REPOSITORY"; "GITHUB_ENV"; "GITHUB_OUTPUT" ]
+            |> List.iter (fun name -> info.EnvironmentVariables.Remove name |> ignore)
+            info.EnvironmentVariables["GITHUB_TOKEN"] <- "controlled-test-sentinel"
+            info.EnvironmentVariables["MCP_RELEASE_DO_UPLOAD"] <- "true"
 
-            let previousOutput = Console.Out
-            use output = new StringWriter()
-
-            let! exitCode =
-                async {
-                    try
-                        Console.SetOut output
-                        return! ReleaseOrchestration.orchestrate root configPath
-                    finally
-                        Console.SetOut previousOutput
-                }
-
-            let diagnostic = parseDiagnostic (output.ToString())
-            return exitCode, File.ReadAllText marker, diagnostic
+            match! capture 15000 info with
+            | Error error -> failtestf "prepare authority probe failed to run: %s" error
+            | Ok (exitCode, stdout, _) ->
+                Expect.equal exitCode 4 "prepare refuses publication authority"
+                let diagnostic = JsonNode.Parse(stdout.Trim()).AsObject()
+                Expect.equal (diagnostic["status"].GetValue<string>()) "failed" "authority rejection is structured"
+                Expect.isTrue
+                    (diagnostic["reason"].GetValue<string>().Contains("GITHUB_TOKEN", StringComparison.Ordinal))
+                    "the refusing input name is identified without exposing its value"
+                Expect.isFalse (Directory.Exists candidatePath) "refusal occurs before any preparation output"
         finally
             if Directory.Exists root then Directory.Delete(root, true)
     }
 
-let private producerValidationFailureStopsBeforeTransaction () =
-    async {
-        let diagnostics = ResizeArray<string * string * string * JsonObject>()
-
-        for producer in producers do
-            let! exitCode, steps, diagnostic = runValidationFailure producer
-            let producerId, version, entryDll, sdk, runtime, platform = producer
-            let archiveName = $"v{version}.zip"
-            let assetUri = $"https://github.com/masterlifting/mcp-store/releases/download/{producerId}/{archiveName}"
-
-            Expect.equal exitCode 1 $"{producerId} validation failure exit code"
-            Expect.equal
-                steps
-                "build;pins;tests;"
-                $"{producerId} child steps run in order; diagnostic: {diagnostic.ToJsonString()}"
-            Expect.equal (requiredString diagnostic "status") "failed" $"{producerId} structured status"
-            Expect.equal (requiredString diagnostic "phase") "tests" $"{producerId} failure phase"
-            Expect.equal (diagnostic["childExitCode"].GetValue<int>()) 1 $"{producerId} child exit code"
-            Expect.isTrue
-                ((requiredString diagnostic "childStderr").Contains("controlled validation failure", StringComparison.Ordinal))
-                $"{producerId} child stderr"
-            Expect.equal (requiredString diagnostic "componentId") producerId $"{producerId} context id"
-            Expect.equal (requiredString diagnostic "version") version $"{producerId} context version"
-            Expect.equal (requiredString diagnostic "archiveName") archiveName $"{producerId} context archive"
-            Expect.equal (requiredString diagnostic "assetUri") assetUri $"{producerId} context URI"
-            Expect.equal
-                (propertyNames diagnostic)
-                (Set.ofList [ "status"; "reason"; "phase"; "childExitCode"; "childStderr"; "componentId"; "version"; "archiveName"; "assetUri" ])
-                $"{producerId} failure keeps the shared diagnostic shape"
-
-            diagnostics.Add(producerId, requiredString diagnostic "reason", requiredString diagnostic "phase", diagnostic)
-
-        let dotnet = diagnostics |> Seq.find (fun (producerId, _, _, _) -> producerId = "dotnet")
-        let workflow = diagnostics |> Seq.find (fun (producerId, _, _, _) -> producerId = "workflow")
-        let _, dotnetReason, dotnetPhase, dotnetDiagnostic = dotnet
-        let _, workflowReason, workflowPhase, workflowDiagnostic = workflow
-        Expect.equal dotnetReason workflowReason "the shared failure path emits equivalent reasons"
-        Expect.equal dotnetPhase workflowPhase "the shared failure path names the same phase"
-        Expect.equal (propertyNames dotnetDiagnostic) (propertyNames workflowDiagnostic) "the producers share a diagnostic schema"
-    }
-
-let private missingCredentialsCannotReachNetworkObserver () =
-    async {
-        let locator: ReleasePublish.ReleaseLocator =
-            { Owner = "owner"
-              Repository = "repo"
-              Tag = "dotnet" }
-        let observer = ReleaseTransaction.buildRemoteObserver locator true None (Path.GetTempPath())
-
-        match! observer.ObserveArchive("dotnet", "v1.2.3.zip") with
-        | Ok _ -> Expect.isFalse true "archive observation without auth cannot succeed"
-        | Error error ->
-            Expect.isTrue
-                ((ReleaseError.message error).Contains("GITHUB_TOKEN", StringComparison.Ordinal))
-                "archive observation fails before transport"
-
-        match! observer.ObserveMetadata("dotnet", "dotnet-1.2.3-metadata.json") with
-        | Ok _ -> Expect.isFalse true "metadata observation without auth cannot succeed"
-        | Error error ->
-            Expect.isTrue
-                ((ReleaseError.message error).Contains("GITHUB_TOKEN", StringComparison.Ordinal))
-                "metadata observation fails before transport"
-    }
-
 let tests =
     testList
-        "shared orchestration"
-        [ testCaseAsync
-              "both producer validation failures are structured and block transaction"
-              (producerValidationFailureStopsBeforeTransaction ())
-          testCaseAsync "missing credentials stop before any network observer" (missingCredentialsCannotReachNetworkObserver ()) ]
+        "modern preparation boundary"
+        [ prepareWritesPortableCandidateAndUsesExplicitProducerGates
+          preparationFailureStopsBeforeLaterStages
+          prepareRefusesPublicationAuthority ]

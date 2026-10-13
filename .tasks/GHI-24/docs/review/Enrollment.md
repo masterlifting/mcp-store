@@ -711,3 +711,38 @@ baseline and deliberate matrix, renamed-output, projected-output, CLI-path,
 roster policy, duplicate, unsupported/omitted participant and config-path drift
 cases. No actual network request or upload occurred. This records Stage 3 tester
 verification only; it does not mark any acceptance criterion PASS.
+
+## Supersession — `Coherence.ps1` projection interface (W5)
+
+This note supersedes only the handoff *interface* recorded above; every execution
+record earlier in this document is preserved as history and is not rewritten.
+
+The `-OutputFile <path>` parameter of `infrastructure/release/Coherence.ps1` is
+removed. The bootstrap step must not hand the guard its own step-local
+`$GITHUB_OUTPUT` file (Actions allocates one output-command file per step, so it
+never contains the project step's `components=` line). The guard now takes the
+projected value directly:
+
+```powershell
+pwsh -NoProfile -File infrastructure/release/Coherence.ps1 -Components '["dotnet","workflow"]'
+  exit 0; cross-stage coherence ok: 18 assertions; roster=[dotnet, workflow]
+```
+
+- Absent or empty `-Components` fails closed
+  (`cross-stage coherence failed [projected components]: -Components must carry
+  the bootstrap projection value`); a value that disagrees with the roster still
+  fails with `[projection output]: projected participants …`.
+- `release.yml` passes `env: PROJECTED_COMPONENTS: ${{ steps.project.outputs.components }}`
+  and invokes `-Components $env:PROJECTED_COMPONENTS`; the guard asserts that
+  wiring, and a zero-count marker rejects any return to `-OutputFile`.
+- Assertion count changes from 15 to 18 for the real workflow (three anchored
+  marker checks added).
+
+Historical blocks that still show the superseded form and are deliberately left
+unmodified: the "Commands and results (local, non-publishing)" block
+(`-OutputFile $env:GITHUB_OUTPUT`, 15 assertions) and the "Tester W4 enrollment
+regression slice" bullet describing `Coherence.ps1 -Root -Workflow -OutputFile`.
+Any current handoff execution must use `-Components` instead.
+
+This supersession is factual status only; it makes no acceptance claim and does
+not close AC-06 or AC-11.

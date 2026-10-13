@@ -1,17 +1,12 @@
 // role: reusable module/helper
-// Transaction execution: drives a `Resolution` through the publish / metadata-recovery / failure branches via injected transport.
-// Pure of CLI/JSON concerns so tests and the compiled entrypoint share one execution path.
-// Capture/policy/HTTP/process live here as the imperative boundary; classification is in `ReleaseEvaluate`.
 module ReleaseTransaction
 
 open System
 open System.IO
 open System.Text
-open System.Text.Json
 open System.Text.Json.Nodes
 open BuildProvenance
 
-// Writes the verified/observed immutable metadata projection; candidate values are never persisted on the success path.
 let persistVerifiedProjection
     (metadataLocalPath: string)
     (componentId: string)
@@ -44,40 +39,6 @@ let persistVerifiedProjection
         | Error error -> return Error error
     }
 
-let private uploadArchiveAndMetadata
-    (auth: ReleasePublish.AuthToken)
-    (locator: ReleasePublish.ReleaseLocator)
-    (candidateProjection: ReleaseMetadata.ProducerMetadataProjection)
-    (archivePath: string option)
-    (candidateArchiveSha: string option)
-    (transport: ReleasePublish.HttpTransport)
-    : Async<Result<string * string, ReleaseError>> =
-    async {
-        match archivePath, candidateArchiveSha with
-        | Some path, Some archiveSha ->
-            let! archiveDigest =
-                ReleasePublish.uploadCandidate auth locator candidateProjection.ArchiveName path archiveSha transport
-
-            match archiveDigest with
-            | Error error -> return Error error
-            | Ok verifiedArchiveSha ->
-                let! metadataDigest = ReleasePublish.uploadMetadata auth locator candidateProjection transport
-
-                match metadataDigest with
-                | Error error -> return Error error
-                | Ok verifiedMetadataSha ->
-                    return Ok(verifiedArchiveSha, verifiedMetadataSha)
-        | _ ->
-            let! metadataDigest = ReleasePublish.uploadMetadata auth locator candidateProjection transport
-
-            match metadataDigest with
-            | Error error -> return Error error
-            | Ok verifiedMetadataSha ->
-                return Ok("", verifiedMetadataSha)
-    }
-
-// Adapter from `ReleasePublish` (transport-owned state) to `ReleaseEvaluate` (decision-owned state).
-// The transport is supplied so the same single instance drives observation, evaluate, and execute in one seam.
 let private buildRemoteObserverWith
     (transport: ReleasePublish.HttpTransport)
     (locator: ReleasePublish.ReleaseLocator)
@@ -136,25 +97,22 @@ let private buildRemoteObserverWith
                                 Ok(ReleaseEvaluate.MetadataCorrupt error)
                     | None ->
                         return
-                            Error(
-                                BuildProvenance.FileFailure(
-                                    "metadata",
-                                    assetName,
-                                    "GITHUB_TOKEN is not set; the metadata observation cannot run"))
+                            Ok(
+                                ReleaseEvaluate.MetadataCorrupt(
+                                    BuildProvenance.FileFailure(
+                                        "metadata",
+                                        tag,
+                                        "GITHUB_TOKEN is not set; the metadata observation cannot run")))
                 else
-                    // Local-mirror metadata failures must fail closed; the GitHub transport is required for recovery.
                     return
                         Ok(
                             ReleaseEvaluate.MetadataCorrupt(
                                 BuildProvenance.FileFailure(
                                     "metadata",
-                                    assetName,
+                                    tag,
                                     "the local mirror cannot satisfy the metadata probe; the GitHub transport is required for recovery")))
             } }
 
-// Convenience composition: builds the observer with the default production transport so existing callers
-// (notably the missing-credentials test) retain their original signature. The canonical, transport-injected
-// path is `Transaction.run` and `Transaction.execute` below.
 let buildRemoteObserver
     (locator: ReleasePublish.ReleaseLocator)
     (useGitHub: bool)
@@ -175,147 +133,124 @@ let private requireObserved
             return Error 1
     }
 
-// Drive a classified Resolution through the publish / metadata-recovery / failure branches
-// using the supplied transport. Returns the final Resolution; exit-code mapping is the
-// caller's responsibility.
-let execute
+let private execute
     (transport: ReleasePublish.HttpTransport)
     (resolution: ReleaseEvaluate.Resolution)
     (auth: ReleasePublish.AuthToken option)
     (locator: ReleasePublish.ReleaseLocator)
-    (candidateProjection: ReleaseMetadata.ProducerMetadataProjection)
-    (archivePath: string)
-    (useGitHub: bool)
+    (candidate: ReleaseEvaluate.VerifiedCandidate)
     : Async<ReleaseEvaluate.Resolution * int> =
     async {
         match resolution.Status with
         | "published" ->
             match auth with
             | Some authValue ->
-                let! uploadResult =
-                    uploadArchiveAndMetadata authValue locator candidateProjection (Some archivePath) (Some resolution.Render.CandidateArchiveSha256) transport
+                let! archiveUpload =
+                    ReleasePublish.uploadCandidateBytes
+                        authValue
+                        locator
+                        resolution.Render.ArchiveName
+                        (candidate.ArchiveBytesCopy ())
+                        (Some candidate.ArchiveSha256)
+                        transport
 
-                match uploadResult with
+                match archiveUpload with
                 | Error error ->
-                    return ReleaseEvaluate.finalizeFailure resolution.Render (BuildProvenance.ReleaseError.message error), 1
-                | Ok (verifiedArchiveSha, verifiedMetadataSha) ->
-                    let verifiedManifestSha =
-                        match resolution.PublishedManifestSha256 with
-                        | Some v -> v
-                        | None -> resolution.Render.CandidateManifestSha256
+                    return ReleaseEvaluate.finalizeFailure resolution.Render (ReleaseError.message error), 1
+                | Ok verifiedArchiveSha ->
+                    let! metadataUpload =
+                        ReleasePublish.uploadMetadataBytes authValue locator candidate.Projection transport
 
-                    let verifiedRevision =
-                        match resolution.PublishedRevision with
-                        | Some v -> v
-                        | None -> resolution.Render.CandidateRevision
-
-                    let! persistResult =
-                        persistVerifiedProjection
-                            resolution.Render.MetadataLocalPath
-                            resolution.Render.ComponentId
-                            resolution.Render.Version
-                            resolution.Render.AssetUri
-                            resolution.Render.ArchiveName
-                            verifiedArchiveSha
-                            verifiedManifestSha
-                            verifiedRevision
-                            resolution.Render.ProducerSdk
-                            resolution.Render.ProducerRuntime
-                            resolution.Render.ProducerPlatform
-
-                    match persistResult with
+                    match metadataUpload with
                     | Error error ->
-                        return ReleaseEvaluate.finalizeFailure resolution.Render (BuildProvenance.ReleaseError.message error), 1
-                    | Ok () ->
-                        // Pure completion: read verified digests from transport, set manifest sha + revision from the same verified snapshot.
-                        let published =
-                            ReleaseEvaluate.finalizeVerifiedPublication
-                                resolution
+                        return ReleaseEvaluate.finalizeFailure resolution.Render (ReleaseError.message error), 1
+                    | Ok verifiedMetadataSha ->
+                        let verifiedManifestSha =
+                            match resolution.PublishedManifestSha256 with
+                            | Some v -> v
+                            | None -> candidate.ManifestSha256
+
+                        let verifiedRevision =
+                            match resolution.PublishedRevision with
+                            | Some v -> v
+                            | None -> candidate.EmbeddedRevision
+
+                        let! persistResult =
+                            persistVerifiedProjection
+                                resolution.Render.MetadataLocalPath
+                                resolution.Render.ComponentId
+                                resolution.Render.Version
+                                resolution.Render.AssetUri
+                                resolution.Render.ArchiveName
                                 verifiedArchiveSha
-                                verifiedMetadataSha
-                        return published, 0
+                                verifiedManifestSha
+                                verifiedRevision
+                                resolution.Render.ProducerSdk
+                                resolution.Render.ProducerRuntime
+                                resolution.Render.ProducerPlatform
+
+                        match persistResult with
+                        | Error error ->
+                            return ReleaseEvaluate.finalizeFailure resolution.Render (ReleaseError.message error), 1
+                        | Ok () ->
+                            let published =
+                                ReleaseEvaluate.finalizeVerifiedPublication resolution verifiedArchiveSha verifiedMetadataSha
+                            return published, 0
             | None ->
-                if useGitHub then
-                    return ReleaseEvaluate.finalizeFailure resolution.Render "publish-required but GITHUB_TOKEN is missing", 1
-                else
-                    return ReleaseEvaluate.finalizeFailure resolution.Render "publish-required but no production transport is configured", 1
+                return ReleaseEvaluate.finalizeFailure resolution.Render "publish-required but GITHUB_TOKEN is missing", 1
         | "unchanged" ->
             if resolution.MetadataRecoveryNeeded then
                 match auth with
                 | Some authValue ->
-                    let! verifiedArchiveShaResult =
-                        requireObserved
-                            resolution.Render
-                            "metadata recovery requires the observed published archive sha256, which was not captured"
-                            resolution.PublishedArchiveSha256
+                    match resolution.PublishedArchiveSha256, resolution.PublishedManifestSha256, resolution.PublishedRevision with
+                    | Some verifiedArchiveSha, Some verifiedManifestSha, Some verifiedRevision ->
+                        let recoveryProjection =
+                            ReleaseMetadata.makeProjection
+                                resolution.Render.ComponentId
+                                resolution.Render.Version
+                                resolution.Render.AssetUri
+                                resolution.Render.ArchiveName
+                                verifiedArchiveSha
+                                verifiedManifestSha
+                                verifiedRevision
+                                resolution.Render.ProducerSdk
+                                resolution.Render.ProducerRuntime
+                                resolution.Render.ProducerPlatform
 
-                    match verifiedArchiveShaResult with
-                    | Error code -> return resolution, code
-                    | Ok verifiedArchiveSha ->
-                        let! verifiedManifestShaResult =
-                            requireObserved
-                                resolution.Render
-                                "metadata recovery requires the observed published manifest sha256, which was not captured"
-                                resolution.PublishedManifestSha256
+                        let! uploadResult =
+                            ReleasePublish.uploadMetadataBytes authValue locator recoveryProjection transport
 
-                        match verifiedManifestShaResult with
-                        | Error code -> return resolution, code
-                        | Ok verifiedManifestSha ->
-                            let! verifiedRevisionResult =
-                                requireObserved
-                                    resolution.Render
-                                    "metadata recovery requires the observed published revision, which was not captured"
-                                    resolution.PublishedRevision
+                        match uploadResult with
+                        | Error error ->
+                            return ReleaseEvaluate.finalizeFailure resolution.Render (ReleaseError.message error), 1
+                        | Ok verifiedMetadataSha ->
+                            let! persistResult =
+                                ReleaseMetadata.writeToFileAsync resolution.Render.MetadataLocalPath recoveryProjection
 
-                            match verifiedRevisionResult with
-                            | Error code -> return resolution, code
-                            | Ok verifiedRevision ->
-                                let recoveryProjection =
-                                    ReleaseMetadata.makeProjection
-                                        resolution.Render.ComponentId
-                                        resolution.Render.Version
-                                        resolution.Render.AssetUri
-                                        resolution.Render.ArchiveName
-                                        verifiedArchiveSha
-                                        verifiedManifestSha
-                                        verifiedRevision
-                                        resolution.Render.ProducerSdk
-                                        resolution.Render.ProducerRuntime
-                                        resolution.Render.ProducerPlatform
-
-                                let! uploadResult = ReleasePublish.uploadMetadata authValue locator recoveryProjection transport
-
-                                match uploadResult with
-                                | Error error ->
-                                    return ReleaseEvaluate.finalizeFailure resolution.Render (BuildProvenance.ReleaseError.message error), 1
-                                | Ok verifiedMetadataSha ->
-                                    let! persistResult = ReleaseMetadata.writeToFileAsync resolution.Render.MetadataLocalPath recoveryProjection
-
-                                    match persistResult with
-                                    | Error error ->
-                                        return ReleaseEvaluate.finalizeFailure resolution.Render (BuildProvenance.ReleaseError.message error), 1
-                                    | Ok _digest ->
-                                        return ReleaseEvaluate.finalizeRecovery resolution verifiedMetadataSha, 0
+                            match persistResult with
+                            | Error error ->
+                                return ReleaseEvaluate.finalizeFailure resolution.Render (ReleaseError.message error), 1
+                            | Ok _digest ->
+                                return ReleaseEvaluate.finalizeRecovery resolution verifiedMetadataSha, 0
+                    | _ ->
+                        return resolution, 1
                 | None ->
-                    if useGitHub then
-                        return ReleaseEvaluate.finalizeFailure resolution.Render "metadata-recovery-required but GITHUB_TOKEN is missing", 1
-                    else
-                        return ReleaseEvaluate.finalizeFailure resolution.Render "metadata-recovery-required but no production transport is configured", 1
+                    return ReleaseEvaluate.finalizeFailure resolution.Render "metadata-recovery-required but GITHUB_TOKEN is missing", 1
             else
                 let verifiedArchiveSha =
                     match resolution.PublishedArchiveSha256 with
                     | Some v -> v
-                    | None -> resolution.Render.CandidateArchiveSha256
+                    | None -> candidate.ArchiveSha256
 
                 let verifiedManifestSha =
                     match resolution.PublishedManifestSha256 with
                     | Some v -> v
-                    | None -> resolution.Render.CandidateManifestSha256
+                    | None -> candidate.ManifestSha256
 
                 let verifiedRevision =
                     match resolution.PublishedRevision with
                     | Some v -> v
-                    | None -> resolution.Render.CandidateRevision
+                    | None -> candidate.EmbeddedRevision
 
                 let! persistResult =
                     persistVerifiedProjection
@@ -332,10 +267,8 @@ let execute
                         resolution.Render.ProducerPlatform
 
                 match persistResult with
-                | Error error ->
-                    return ReleaseEvaluate.finalizeFailure resolution.Render (BuildProvenance.ReleaseError.message error), 1
-                | Ok () ->
-                    return { resolution with UploadCompleted = false }, 0
+                | Error error -> return ReleaseEvaluate.finalizeFailure resolution.Render (ReleaseError.message error), 1
+                | Ok () -> return { resolution with UploadCompleted = false }, 0
         | _ ->
             let exitCode =
                 match resolution.Render.BumpedVersion with
@@ -344,31 +277,24 @@ let execute
             return { resolution with UploadCompleted = false }, exitCode
     }
 
-// The single canonical transaction path: builds the observer with the supplied transport, drives
-// `ReleaseEvaluate.evaluate`, then dispatches the resolution through the same transport.
-// Default production composition happens once at the CLI boundary; tests bind a recording transport
-// here for the full observe/evaluate/execute pipeline.
 let run
     (transport: ReleasePublish.HttpTransport)
     (auth: ReleasePublish.AuthToken option)
     (useGitHub: bool)
     (downloadDir: string)
     (locator: ReleasePublish.ReleaseLocator)
-    (dto: ReleaseEvaluate.CandidateDto)
-    (candidateProjection: ReleaseMetadata.ProducerMetadataProjection)
-    (archivePath: string)
+    (candidate: ReleaseEvaluate.VerifiedCandidate)
     : Async<Result<ReleaseEvaluate.Resolution * int, ReleaseError>> =
     async {
         let observer = buildRemoteObserverWith transport locator useGitHub auth downloadDir
-        match! ReleaseEvaluate.evaluate observer dto with
+
+        match! ReleaseEvaluate.evaluate observer candidate with
         | Ok resolution ->
-            let! final = execute transport resolution auth locator candidateProjection archivePath useGitHub
+            let! final = execute transport resolution auth locator candidate
             return Ok final
         | Error error -> return Error error
     }
 
-// Parses the JSON contract DTO and returns either the structured contract + the canonical assetUri
-// it carried, or a typed failure. The runner must never reconstruct the assetUri from environment.
 let parseContractJson (contractJson: string) : Result<ReleaseCompare.ComponentContract * string, ReleaseError> =
     try
         let doc = System.Text.Json.Nodes.JsonNode.Parse(contractJson)

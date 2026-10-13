@@ -6,6 +6,7 @@ open Release.Tests
 open System
 open System.IO
 open System.Text.Json
+open System.Text.RegularExpressions
 
 let mutable passed = 0
 let mutable failed = 0
@@ -42,6 +43,12 @@ let private isExecutableFsLine (line: string) =
 
 let private containsIgnoreCase (haystack: string) (needle: string) =
     haystack.IndexOf(needle, StringComparison.OrdinalIgnoreCase) >= 0
+
+let private workflowJobBody (workflow: string) (jobName: string) =
+    let pattern = "(?ms)^  " + Regex.Escape(jobName) + ":\\r?\\n(?<body>.*?)(?=^  [A-Za-z0-9_-]+:\\r?\\n|\\z)"
+    let matched = Regex.Match(workflow, pattern)
+    if matched.Success then matched.Groups.["body"].Value else ""
+
 let releaseWorkflowExcludesTelegram () =
     let path = Path.Combine(repoRoot, ".github", "workflows", "release.yml")
     let source = readIfExists path
@@ -84,6 +91,9 @@ let releaseWorkflowAndRosterUseDynamicParticipants () =
     let workflowPath = Path.Combine(repoRoot, ".github", "workflows", "release.yml")
     let source = readIfExists workflowPath
     let lines = source.Split([| '\n' |], StringSplitOptions.RemoveEmptyEntries)
+    let prepareJob = workflowJobBody source "prepare"
+    let builderJob = workflowJobBody source "builder"
+    let publishJob = workflowJobBody source "publish"
     assertTrue
         "release matrix uses the roster-projected component list"
         (containsIgnoreCase source "component: ${{ fromJSON(needs.bootstrap.outputs.components) }}")
@@ -96,16 +106,36 @@ let releaseWorkflowAndRosterUseDynamicParticipants () =
 
     assertTrue "release workflow has no hardcoded participant list" (not hardcodedParticipantList)
 
-    let hardcodedCliPath =
+    assertTrue
+        "the fresh read-only prepare job derives its CLI path from the matrix participant"
+        (Regex.IsMatch(prepareJob, "(?i)runs-on:\\s*windows-latest")
+         && Regex.IsMatch(prepareJob, "(?i)contents:\\s*read")
+         && containsIgnoreCase prepareJob "ReleaseRunner.exe prepare \"${{ matrix.component }}/release/Config.fsx\"")
+    assertTrue
+        "an independent trusted-builder job builds the Publisher.json closure"
+        (Regex.IsMatch(builderJob, "(?i)runs-on:\\s*windows-latest")
+         && Regex.IsMatch(builderJob, "(?i)contents:\\s*read")
+         && containsIgnoreCase builderJob "Publisher.json"
+         && Regex.IsMatch(builderJob, "(?i)dotnet\\s+publish\\b"))
+    assertTrue
+        "the isolated publication job alone owns write authority after prepare and builder"
+        (Regex.IsMatch(publishJob, "(?i)contents:\\s*write")
+         && Regex.IsMatch(publishJob, "(?m)^\\s*actions:\\s*read\\s*$")
+         && containsIgnoreCase publishJob "- prepare"
+         && containsIgnoreCase publishJob "- builder"
+         && not (Regex.IsMatch(prepareJob, "(?i)contents:\\s*write"))
+         && not (Regex.IsMatch(builderJob, "(?i)contents:\\s*write")))
+
+    let hardcodedPreparePath =
         lines
         |> Array.exists (fun line ->
-            containsIgnoreCase line "orchestrate \"dotnet/release/Config.fsx\""
-            || containsIgnoreCase line "orchestrate \"workflow/release/Config.fsx\"")
+            containsIgnoreCase line "prepare \"dotnet/release/Config.fsx\""
+            || containsIgnoreCase line "prepare \"workflow/release/Config.fsx\"")
 
-    assertTrue "release CLI path is not hardcoded to a participant" (not hardcodedCliPath)
+    assertTrue "release prepare path is not hardcoded to a participant" (not hardcodedPreparePath)
     assertTrue
         "bootstrap invokes the production cross-stage coherence guard"
-        (containsIgnoreCase source "infrastructure/release/Coherence.ps1 -OutputFile")
+        (containsIgnoreCase source "Coherence.ps1 -Components $env:PROJECTED_COMPONENTS")
 let noUvPytestInReleaseWorkflows () =
     let workflowsDir = Path.Combine(repoRoot, ".github", "workflows")
     let uvHits = ResizeArray<string * string>()

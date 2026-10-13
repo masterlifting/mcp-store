@@ -573,12 +573,17 @@ let private uploadBytes
                 | Error error -> return Error error
     }
 
-let uploadCandidate
+// Byte-safe adapter for the SEC1 publisher: the candidate bytes are read and
+// verified BEFORE this function is called. The function never opens the file
+// again, never compares against a candidate path that may have been mutated,
+// and never trusts the caller-supplied expectedDigest for re-verification
+// beyond the in-process snapshot the existing `uploadBytes` performs.
+let uploadCandidateBytes
     (auth: AuthToken)
     (locator: ReleaseLocator)
     (assetName: string)
-    (candidatePath: string)
-    (expectedDigest: string)
+    (candidateBytes: byte[])
+    (expectedDigest: string option)
     (transport: HttpTransport)
     : Async<Result<string, ReleaseError>> =
     async {
@@ -588,27 +593,31 @@ let uploadCandidate
                     FileFailure(
                         "upload",
                         assetName,
-                        $"W3 dev mode: refusing to upload {candidatePath}; set MCP_RELEASE_DO_UPLOAD=true for the production release path"))
+                        "W3 dev mode: refusing to upload a pre-verified candidate byte set; set MCP_RELEASE_DO_UPLOAD=true for the production release path"))
         elif String.IsNullOrEmpty auth.Token then
             return Error(FileFailure("upload", assetName, "the auth token is empty"))
-        elif not (File.Exists candidatePath) then
-            return Error(MissingArtifact candidatePath)
         else
-            let bytes = File.ReadAllBytes candidatePath
+            let verifiedDigest =
+                match expectedDigest with
+                | Some v when not (String.IsNullOrEmpty v) -> v
+                | _ -> sha256Hex candidateBytes
+
             return!
                 uploadBytes
                     auth
                     locator
                     assetName
                     "application/octet-stream"
-                    bytes
-                    expectedDigest
+                    candidateBytes
+                    verifiedDigest
                     ReleaseArchive.maxArchiveBytes
                     verifyArchiveBytes
                     transport
     }
 
-let uploadMetadata
+// Byte-safe adapter for the SEC1 publisher: the projection bytes are built
+// from the verified trusted values; this function only serializes + uploads.
+let uploadMetadataBytes
     (auth: AuthToken)
     (locator: ReleaseLocator)
     (projection: ReleaseMetadata.ProducerMetadataProjection)
@@ -621,11 +630,10 @@ let uploadMetadata
                     FileFailure(
                         "upload-metadata",
                         projection.ComponentId,
-                        $"W3 dev mode: refusing to upload metadata for {projection.ComponentId} {projection.Version}; set MCP_RELEASE_DO_UPLOAD=true for the production release path"))
+                        $"W3 dev mode: refusing to upload a pre-verified metadata projection for {projection.ComponentId} {projection.Version}; set MCP_RELEASE_DO_UPLOAD=true for the production release path"))
         elif String.IsNullOrEmpty auth.Token then
             return Error(FileFailure("upload-metadata", projection.ArchiveName, "the auth token is empty"))
         else
-            // The metadata asset name is versioned, never the archive (zip) name the projection also carries.
             let assetName = ReleaseMetadata.metadataAssetName projection.ComponentId projection.Version
             let bytes = Encoding.UTF8.GetBytes(ReleaseMetadata.render projection)
             let expectedDigest = sha256Hex bytes
