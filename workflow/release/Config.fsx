@@ -6,7 +6,7 @@
 module ReleaseConfig
 
 let componentId = "workflow"
-let version = "1.0.3"
+let version = "1.0.4"
 let entryDll = "Mcp.Workflow.dll"
 let sdkVersion = "11.0.100-rc.1.26425.128"
 
