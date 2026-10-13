@@ -162,6 +162,188 @@ let verifyCancelledWaiterReleasesMutex root id : Async<unit> =
         | Choice2Of2 error -> return raise error
     }
 
+let coordinationMutexName (path: string) =
+    let canonical = Path.GetFullPath path
+    let canonical = if OperatingSystem.IsWindows() then canonical.ToUpperInvariant() else canonical
+    let digest = SHA256.HashData(Encoding.UTF8.GetBytes canonical) |> Convert.ToHexString
+    if OperatingSystem.IsWindows() then $"Local\\Mcp.Workflow.Runtime.{digest}" else $"Mcp.Workflow.Runtime.{digest}"
+
+let createAbandonedMutexHandle (path: string) : Async<Mutex> =
+    async {
+        let acquired = TaskCompletionSource<Result<Mutex, exn>>(TaskCreationOptions.RunContinuationsAsynchronously)
+        let name = coordinationMutexName path
+        let owner =
+            Thread(ThreadStart(fun () ->
+                try
+                    let mutex = new Mutex(false, name)
+                    if mutex.WaitOne(TimeSpan.FromSeconds 5.0) then
+                        acquired.TrySetResult(Ok mutex) |> ignore
+                    else
+                        acquired.TrySetResult(Error(TimeoutException "abandonment owner did not acquire the named mutex")) |> ignore
+                with error ->
+                    acquired.TrySetResult(Error error) |> ignore))
+
+        owner.IsBackground <- true
+        owner.Start()
+
+        let! ownership = acquired.Task.WaitAsync(TimeSpan.FromSeconds 5.0) |> Async.AwaitTask
+        assertTrue "abandonment owner thread exits while retaining its open mutex handle" (owner.Join(TimeSpan.FromSeconds 5.0))
+
+        match ownership with
+        | Ok mutex -> return mutex
+        | Error error -> return raise error
+    }
+
+let verifyUnixCancellationAfterNativeAcquire root id abandoned : Async<unit> =
+    async {
+        if OperatingSystem.IsWindows() then
+            printfn "SKIP Unix native-acquisition cancellation (%s): Windows uses the atomic WaitAny path" id
+        else
+            let taskDir = taskDirectory root id
+            Directory.CreateDirectory taskDir |> ignore
+            let sidecar = Path.Combine(taskDir, SidecarFileName)
+            let originalBytes = Encoding.UTF8.GetBytes $"preserved-{id}"
+            File.WriteAllBytes(sidecar, originalBytes)
+
+            use gate = new ManualResetEvent(false)
+            use cancellation = new CancellationTokenSource()
+            let beforeGuard = TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously)
+            let acquisitionPublished = TaskCompletionSource<Result<unit, exn>>(TaskCreationOptions.RunContinuationsAsynchronously)
+            let releaseAttempted = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+            let releaseSucceeded = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+            let observations = ConcurrentQueue<LockObservation * int>()
+            let observerFailures = ConcurrentQueue<string>()
+            let actionCalls = ConcurrentQueue<unit>()
+            let mutable ownerThread: Thread option = None
+            let mutable abandonedHandle: Mutex = null
+            let mutable operation: Task<Result<unit, RuntimeError>> option = None
+
+            let observe observation =
+                try
+                    let thread = Thread.CurrentThread
+                    observations.Enqueue((observation, thread.ManagedThreadId))
+
+                    match observation with
+                    | BeforeUnixGuard wasAbandoned ->
+                        ownerThread <- Some thread
+                        beforeGuard.TrySetResult wasAbandoned |> ignore
+                        if not (gate.WaitOne(TimeSpan.FromSeconds 10.0)) then
+                            observerFailures.Enqueue "owner did not leave the pre-publication gate within 10 seconds"
+                    | AcquisitionPublished result -> acquisitionPublished.TrySetResult result |> ignore
+                    | ReleaseAttempt -> releaseAttempted.TrySetResult() |> ignore
+                    | ReleaseSucceeded -> releaseSucceeded.TrySetResult() |> ignore
+                with error ->
+                    observerFailures.Enqueue error.Message
+
+            let! outcome =
+                async {
+                    try
+                        if abandoned then
+                            let! retained = createAbandonedMutexHandle sidecar
+                            abandonedHandle <- retained
+
+                        let running =
+                            Async.StartAsTask(
+                                withLockCore
+                                    observe
+                                    sidecar
+                                    (fun () ->
+                                        async {
+                                            actionCalls.Enqueue(())
+                                            return Ok ()
+                                        }),
+                                cancellationToken = cancellation.Token
+                            )
+
+                        operation <- Some running
+
+                        let! actualAbandonment = beforeGuard.Task.WaitAsync(TimeSpan.FromSeconds 5.0) |> Async.AwaitTask
+                        assertEqual "native owner reached the Unix post-acquisition gate" abandoned actualAbandonment
+
+                        cancellation.Cancel()
+                        assertTrue "caller cancellation completed before releasing the native owner gate" cancellation.IsCancellationRequested
+                        gate.Set() |> ignore
+
+                        let! published = acquisitionPublished.Task.WaitAsync(TimeSpan.FromSeconds 5.0) |> Async.AwaitTask
+
+                        match published with
+                        | Error (:? OperationCanceledException) -> ()
+                        | Error error -> return failwithf "native acquisition published an unexpected error: %s" error.Message
+                        | Ok () ->
+                            return failwith "native acquisition published Ok after cancellation completed while its Unix owner was gated"
+
+                        let! callerResult =
+                            Async.Catch(running.WaitAsync(TimeSpan.FromSeconds 5.0) |> Async.AwaitTask)
+
+                        let rec isCancellation (error: exn) =
+                            match error with
+                            | :? OperationCanceledException -> true
+                            | :? AggregateException as aggregate when aggregate.InnerExceptions.Count = 1 ->
+                                isCancellation aggregate.InnerExceptions.[0]
+                            | _ -> false
+
+                        match callerResult with
+                        | Choice2Of2 error when isCancellation error -> ()
+                        | Choice2Of2 error -> return failwithf "cancelled acquisition raised an unexpected error: %s" error.Message
+                        | Choice1Of2 value -> return failwithf "cancelled acquisition unexpectedly returned %A" value
+
+                        return ()
+                    with error ->
+                        return raise error
+                }
+                |> Async.Catch
+
+            gate.Set() |> ignore
+
+            match operation with
+            | Some running ->
+                let! _ = Async.Catch(running.WaitAsync(TimeSpan.FromSeconds 5.0) |> Async.AwaitTask)
+                ()
+            | None -> ()
+
+            match ownerThread with
+            | Some owner -> assertTrue "native mutex owner thread terminates" (owner.Join(TimeSpan.FromSeconds 5.0))
+            | None -> ()
+
+            if not (isNull abandonedHandle) then abandonedHandle.Dispose()
+
+            match outcome with
+            | Choice2Of2 error -> return raise error
+            | Choice1Of2 () -> ()
+
+            assertTrue "observation callback completed without fixture errors" observerFailures.IsEmpty
+            do! releaseAttempted.Task.WaitAsync(TimeSpan.FromSeconds 5.0) |> Async.AwaitTask
+            do! releaseSucceeded.Task.WaitAsync(TimeSpan.FromSeconds 5.0) |> Async.AwaitTask
+
+            let observed = observations.ToArray() |> Array.toList
+            let events = observed |> List.map fst
+            let releaseAttempts = events |> List.filter ((=) ReleaseAttempt)
+            let releaseSuccesses = events |> List.filter ((=) ReleaseSucceeded)
+            let publications = events |> List.choose (function AcquisitionPublished result -> Some result | _ -> None)
+            let preGuards = events |> List.choose (function BeforeUnixGuard value -> Some value | _ -> None)
+            let owner = ownerThread |> Option.defaultWith (fun () -> failwith "native owner thread was not captured")
+
+            assertEqual "one native acquisition publication" 1 publications.Length
+            assertEqual "one successful or abandoned native acquisition" [ abandoned ] preGuards
+            assertEqual "one native mutex release attempt" 1 releaseAttempts.Length
+            assertEqual "one successful native mutex release" 1 releaseSuccesses.Length
+            assertTrue
+                "publication and release observations stay on the native owner thread"
+                (observed |> List.forall (fun (_, threadId) -> threadId = owner.ManagedThreadId))
+            assertTrue "cancelled protected action is never invoked" actionCalls.IsEmpty
+            assertEqual "cancelled operation leaves protected sidecar bytes unchanged" originalBytes (File.ReadAllBytes sidecar)
+            assertTrue "cancelled operation leaves no runtime.lock" (not (File.Exists(lockPath root id)))
+
+            let! next =
+                expectOk
+                    "normal acquisition after cancelled native acquisition"
+                    (withLock sidecar (fun () -> async { return Ok "next" }))
+
+            assertEqual "next normal acquisition executes" "next" next
+            assertTrue "subsequent acquisition leaves no runtime.lock" (not (File.Exists(lockPath root id)))
+            printfn "OK Unix cancelled native acquisition: abandoned=%b, one same-thread release, next acquisition succeeds" abandoned
+    }
+
 let verifyPostAcquisitionCancellationKeepsMutexLeased root id : Async<unit> =
     async {
         let sidecar = Path.Combine(taskDirectory root id, SidecarFileName)
@@ -334,6 +516,8 @@ async {
         let! _ = expectOk "valid read after failed read releases mutex lease" (getTask tempRoot taskId)
         assertOnlyRuntimeJson "after failed read" tempRoot taskId
         do! verifyCancelledWaiterReleasesMutex tempRoot taskId
+        do! verifyUnixCancellationAfterNativeAcquire tempRoot "EPH-2" false
+        do! verifyUnixCancellationAfterNativeAcquire tempRoot "EPH-3" true
         do! verifyPostAcquisitionCancellationKeepsMutexLeased tempRoot taskId
 
         let! _ = expectOk "get" (getTask tempRoot taskId)

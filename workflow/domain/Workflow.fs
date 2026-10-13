@@ -6097,12 +6097,25 @@ let mutable private lockOwnerThreads = 0
 let internal activeLockOwnerThreads () = lockOwnerThreads
 let private adjustLockOwnerThreads delta = lock lockOwnerGate (fun () -> lockOwnerThreads <- lockOwnerThreads + delta)
 
-// Named OS mutexes are thread-affine, so a dedicated background owner thread
-// acquires and releases while the async transaction runs on the thread pool.
-let internal withLock
+// Named OS mutexes are thread-affine, so a dedicated background owner
+// thread acquires and releases while the async transaction runs on the
+// thread pool.
+type internal LockObservation =
+    | BeforeUnixGuard of abandoned: bool
+    | AcquisitionPublished of Result<unit, exn>
+    | ReleaseAttempt
+    | ReleaseSucceeded
+
+let internal withLockCore
+    (observe: LockObservation -> unit)
     (path: string)
     (action: unit -> Async<Result<'a, RuntimeError>>)
     : Async<Result<'a, RuntimeError>> =
+    let safeObserve observation =
+        try
+            observe observation
+        with _ ->
+            ()
     async {
         let! cancellationToken = Async.CancellationToken
         let name = coordinationName path
@@ -6134,32 +6147,26 @@ let internal withLock
                 ThreadStart(fun () ->
                     let mutable mutex: Mutex = null
                     let mutable held = false
+                    // Set on Unix when the acquire came from an AbandonedMutexException
+                    // (the prior holder terminated without releasing), so the
+                    // BeforeUnixGuard observation mirrors the actual native outcome.
+                    let mutable acquiredThroughAbandonment = false
                     adjustLockOwnerThreads 1
+
+                    let publishAcquire (result: Result<unit, exn>) =
+                        if acquired.TrySetResult result then
+                            safeObserve (AcquisitionPublished result)
 
                     try
                         try
                             mutex <- new Mutex(false, name)
 
-                            // Wait on the acquisition-cancel signal and the mutex
-                            // together; the cancel handle is first so a canceled
-                            // caller lets this thread exit while an external holder
-                            // still owns the mutex. After acquisition only
-                            // releaseRequested (set post-action) releases it. On
-                            // Windows `WaitHandle.WaitAny` combines the named mutex
-                            // with the cancellation event atomically. On Unix a
-                            // named OS mutex cannot participate in any multi-handle
-                            // wait at all — the runtime rejects the array with
-                            // `PlatformNotSupportedException` (see .NET runtime
-                            // release/11.0/src/libraries/System.Private.CoreLib/src/System/Threading/Mutex.Unix.cs;
-                            // the named path is what distinguishes it from the
-                            // unnamed cases where WaitAny(anon+anon) and
-                            // WaitAny(anon+event) both succeed). The Unix branch
-                            // therefore alternates between a short `Mutex.WaitOne`
-                            // and a non-blocking cancellation check on this same
-                            // dedicated owner thread until either fires; same-thread
-                            // ownership, abandonment semantics, and the existing
-                            // `releaseRequested`/acquired-publication glue are
-                            // preserved.
+                            // Windows WaitAny combines the cancel handle and the named
+                            // mutex atomically; the Unix branch polls Mutex.WaitOne(50ms)
+                            // because a named OS mutex cannot participate in any
+                            // multi-handle wait. The owner thread holds the entire
+                            // acquire/release cycle; abandonment occurs when a prior
+                            // holder terminates without releasing.
                             let mutable signalled = -1
 
                             if OperatingSystem.IsWindows() then
@@ -6189,38 +6196,53 @@ let internal withLock
                                                 signalled <- 1
                                         with
                                         | :? AbandonedMutexException ->
-                                            // `Mutex.WaitOne` raises
-                                            // `AbandonedMutexException` without a
-                                            // meaningful `MutexIndex` (single-handle
-                                            // wait), so the abandoned-vs-cancel
-                                            // distinction that the Windows branch
-                                            // reads from `MutexIndex` is not
-                                            // available here. Treat it as a
-                                            // successful acquire: ownership
-                                            // transfers to this waiter, matching
-                                            // the Windows ownership path.
+                                            // Mutex.WaitOne raises AbandonedMutexException
+                                            // without a MutexIndex (single-handle wait).
+                                            acquiredThroughAbandonment <- true
                                             held <- true
                                             signalled <- 1
 
                             if signalled = 1 then
                                 held <- true
 
-                            if held then
-                                acquired.TrySetResult(Ok()) |> ignore
+                            // On Unix the polling cancel check runs before each WaitOne(50ms),
+                            // so a cancel arriving during the wait itself is missed by that
+                            // check. Recheck once on this owner thread so an interleaved
+                            // successful or abandoned acquire still publishes CancellationError
+                            // instead of Ok; held stays true so the existing finally releases
+                            // the named mutex exactly once.
+
+                            // BeforeUnixGuard fires between held-from-Unix and the
+                            // cancelAfterAcquire recheck for deterministic test gating:
+                            // a cancellation signaled inside the gate must be observed by
+                            // the recheck that follows, never cached before the gate.
+                            if held && not (OperatingSystem.IsWindows()) then
+                                safeObserve (BeforeUnixGuard acquiredThroughAbandonment)
+
+                            let cancelAfterAcquire =
+                                held
+                                && not (OperatingSystem.IsWindows())
+                                && acquisitionCancelled.WaitOne 0
+
+                            if cancelAfterAcquire then
+                                publishAcquire (Error (OperationCanceledException "workflow lock acquisition was cancelled"))
+                            elif held then
+                                publishAcquire (Ok ())
                                 releaseRequested.WaitOne() |> ignore
                             else
                                 // Cancelled before acquisition: nothing is held, so
                                 // the owner exits without a release.
-                                acquired.TrySetResult(Error(OperationCanceledException "workflow lock acquisition was cancelled"))
-                                |> ignore
+                                publishAcquire (Error (OperationCanceledException "workflow lock acquisition was cancelled"))
                         with error ->
                             // Any failure must still complete the await so the caller
                             // never waits on a dead owner thread.
-                            acquired.TrySetResult(Error error) |> ignore
+                            publishAcquire (Error error)
                     finally
                         if held && not (isNull mutex) then
                             try
+                                safeObserve ReleaseAttempt
                                 mutex.ReleaseMutex()
+                                safeObserve ReleaseSucceeded
                             with
                             | :? ApplicationException -> ()
                             | :? ObjectDisposedException -> ()
@@ -6286,6 +6308,12 @@ let internal withLock
         finally
             signalRelease ()
     }
+
+let internal withLock
+    (path: string)
+    (action: unit -> Async<Result<'a, RuntimeError>>)
+    : Async<Result<'a, RuntimeError>> =
+    withLockCore ignore path action
 
 let private withWindowsDirectoryBoundaries
     root
