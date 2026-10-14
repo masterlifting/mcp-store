@@ -279,3 +279,63 @@ publisher) already matches this workflow and reports no gaps.
    strongest available binding.
 
 No engineering APPROVE is asserted by this document.
+
+## Batch: post-integration gate reconciliation (main `ed59d7cfe5360dbbeb3fd14dd7a0321b83c2ca1b`)
+
+- Read-only `tests` job takes the non-packaging Workflow list from ten to twelve by
+  adding `workflow/tests/TaskScratchCompatibilityTests.fsx` and
+  `workflow/tests/TaskSupportingArtifactTests.fsx`, both of which exist at that main
+  SHA and run from source with no built distribution; the frozen count of 12 is the
+  integration assertion, so a missing path still fails closed at the loop's
+  `Test-Path` check.
+- `Coherence.ps1` exact-count gate moves from `-Expected 10` to `-Expected 12`
+  ("twelve non-packaging Workflow entrypoints"); action-reference, pinned-commit, and
+  SDK-projection assertions are untouched because this batch adds no `uses:` line and
+  no version value.
+- Append-only: the earlier "Integration gaps" bullet is superseded by this batch, and
+  the two expected entrypoints land exactly as it predicted. `tests/Coherence.fs`
+  fixture migration to the twelve-entrypoint list stays with the tester channel, and
+  publication stays `if: false` with the `publisher-wiring-not-enabled` guard.
+
+## Batch: historical fixture provisioning repair
+
+- Blocker resolved: the retired step ran `gh release download` per roster participant
+  with one shared `fixtureVersion = "v1.0.3"`, so the `workflow` leg requested the
+  absent `workflow/v1.0.3.zip`; the pinned historical workflow archive is
+  `workflow/v1.0.4.zip` (`65d274…`, 1,514,420 bytes).
+- `.github/workflows/release.yml`, `tests` job, provisioning step only: the
+  `fixtureVersion` loop is replaced by a bounded read of the REPO-authored descriptor
+  `infrastructure/release/tests/Fixtures.json` (843 bytes,
+  `0f32e8c1cc1c1adde4ae4e804f4f0529f49b6d8c151dfa9079cf9f9ff5e6762a`). The step now
+  requires `schemaVersion == 1`, exactly two entries, a descriptor `componentId` set
+  equal to the roster projection, a contained-basename `archiveFile`, and an `assetUri`
+  equal to the fixed `https://github.com/masterlifting/mcp-store/releases/download/<componentId>/<assetName>`.
+  No version, SDK or archive-name literal is authored in YAML; the step consumes the
+  roster projection marker `RELEASE_COMPONENTS` exactly as before.
+- Fetch and accept: each entry is fetched anonymously (`Invoke-WebRequest`, no
+  credential, cookie or header) to `<archiveFile>.staged`, then its size and SHA-256 are
+  compared against the descriptor before the staged file is moved to the final
+  `<archiveFile>` path. Any missing, unroutable or mismatched fixture throws and fails
+  the step; no bypass, skip or fallback exists.
+- `GH_TOKEN` is removed from the step environment, so the step no longer binds the
+  platform token; the `tests` job header no longer claims the fixture step uses it.
+- `infrastructure/release/Coherence.ps1`: the only guard edit is the
+  "platform workflow token is the only credential value" marker count `10` → `9`, which
+  the removed `GH_TOKEN` binding requires. The `RELEASE_COMPONENTS` fixture marker, the
+  zero-match `*.zip` wildcard rule, the 12 pinned action references and every per-job
+  assertion are unchanged.
+- Root: `$RUNNER_TEMP/mcp-historical-fixtures` carries `Dotnet.zip` and `Workflow.zip`
+  and `MCP_RELEASE_HISTORICAL_ROOT` is exported to `GITHUB_ENV`. The descriptor is read
+  from the checkout because `Historical.fs` resolves it from `__SOURCE_DIRECTORY__`;
+  `Published.md`'s "CI copies the REPO descriptor into the caller-supplied HistoricalRoot"
+  sentence is imprecise on that point.
+- Source-level validation only: YAML `safe_load` (fixture step env is `RELEASE_COMPONENTS`
+  alone; no `gh release download`, no `fixtureVersion`); 20/20 `run:` blocks parse after
+  GitHub-expression substitution; `Coherence.ps1` parses with 0 errors and reports
+  `cross-stage coherence ok: 88 assertions; roster=[dotnet, workflow]` exit 0; and a
+  controlled extracted-step stub run over 8 cases in a runner-temp directory accepted the
+  matched pair (exit 0, no `.staged` remainder) and exited 1 for a size mismatch, a hash
+  mismatch at the real pinned dotnet size, a non-canonical URI, a roster mismatch, a
+  missing descriptor, an absent published asset and an escaping `archiveFile`.
+- Not executed: no live fetch, no hosted Actions run, no build and no compiled Expecto
+  run; the engineer rebuild and tester execution of the historical gate remain separate.

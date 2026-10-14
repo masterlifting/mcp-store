@@ -3,8 +3,8 @@
 module ReleaseConfig
 
 let componentId = "workflow"
-// Bumped because the post-refactor `Mcp.Workflow.dll` binary differs from the published v1.0.3 bytes; the strict revision-only exception cannot apply.
-let version = "1.0.4"
+// The published v1.0.4 ZIP is immutable, so this policy identifies the next release.
+let version = "1.0.5"
 let entryDll = "Mcp.Workflow.dll"
 let sdkVersion = "11.0.100-rc.1.26425.128"
 // Exact shared-framework build the distribution runs on; the workflow cross-checks this against the executing toolchain.

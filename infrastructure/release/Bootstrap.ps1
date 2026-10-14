@@ -1,8 +1,7 @@
 #requires -Version 7.0
-# role: transport-only bootstrap
-# Never parses Config.fsx, never derives policy, never invokes the SDK or runs the transaction.
+# Transport-only bootstrap: InstallRuntime installs the independently built runtime from a three-member platform artifact and seals the trusted receipt to its own protected path; FetchCandidate retains the exact candidate transport bytes.
+# It never parses Config.fsx or a publisher receipt, never derives policy, never invokes the SDK or the transaction, and never follows a platform redirect while holding the bearer credential.
 # The attempt is observed via the attempt-specific run endpoint and uploader-job listing, never via a latest-attempt response.
-# Platform metadata is fetched with redirects disabled so a redirecting endpoint cannot inherit the bearer credential.
 
 [CmdletBinding()]
 param(
@@ -75,6 +74,14 @@ param(
 
     [string]$CandidateRoot = "",
 
+    # FetchCandidate-only: the fresh isolated leaf that retains the exact streamed outer ZIP bytes after every platform check passes; InstallRuntime installs and keeps no raw transport.
+    [string]$RawTransportPath = "",
+
+    # InstallRuntime-only: the trusted receipt member name, the receipt SHA-256 independently emitted by the trusted builder, and the fresh protected leaf the bootstrap alone creates outside the checkout, install root, candidate data and its own receipt.
+    [string]$TrustedReceiptName = "",
+    [string]$TrustedReceiptSha256 = "",
+    [string]$TrustedReceiptPath = "",
+
     [string]$ApiBase = "https://api.github.com",
     [string]$TokenEnvironmentVariable = "GITHUB_TOKEN",
     [string[]]$AllowedRedirectHosts = @("*.blob.core.windows.net"),
@@ -136,6 +143,77 @@ function Test-PathOverlap {
     if ($a -eq $b) { return $true }
     $comparison = [System.StringComparison]::OrdinalIgnoreCase
     return ($a.StartsWith($b + $script:Separator, $comparison) -or $b.StartsWith($a + $script:Separator, $comparison))
+}
+
+
+
+# A fresh leaf under an existing, non-redirected parent outside every protected root: the run never overwrites owned data and never writes into the checkout, install, candidate, transport or receipt tree. One implementation serves both destinations so the raw transport and the trusted receipt cannot drift apart.
+function Assert-FreshProtectedDestination {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string[]]$ProtectedRoots,
+        [Parameter(Mandatory = $true)][string]$ParameterName,
+        [Parameter(Mandatory = $true)][string]$Subject,
+        [Parameter(Mandatory = $true)][string]$AncestorSubject,
+        [Parameter(Mandatory = $true)][string]$CodePrefix
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path)) { Fail "missing-input" ("-{0} must be a non-empty file path" -f $ParameterName) }
+    $full = Get-CanonicalPath $Path
+
+    if (Test-Path -LiteralPath $full) {
+        Fail ("{0}-exists" -f $CodePrefix) ("{0} '{1}' already exists; the bootstrap never overwrites a file it did not create" -f $Subject, $full)
+    }
+
+    $parent = [System.IO.Path]::GetDirectoryName($full)
+    if ([string]::IsNullOrEmpty($parent)) { Fail ("{0}-parent-unsafe" -f $CodePrefix) ("{0} has no bounded parent directory" -f $Subject) }
+    if (-not (Test-Path -LiteralPath $parent -PathType Container)) {
+        Fail ("{0}-parent-missing" -f $CodePrefix) ("{0} '{1}' does not exist; the bootstrap never creates an unaudited parent" -f $Subject, $parent)
+    }
+
+    foreach ($root in $ProtectedRoots) {
+        if ([string]::IsNullOrWhiteSpace($root)) { continue }
+        if (Test-PathOverlap $full $root) {
+            Fail ("{0}-overlap" -f $CodePrefix) ("{0} '{1}' overlaps the protected path '{2}'" -f $Subject, $full, $root)
+        }
+    }
+
+    $ancestor = $parent
+    while (-not [string]::IsNullOrEmpty($ancestor)) {
+        if (Test-Path -LiteralPath $ancestor) {
+            $attributes = (Get-Item -LiteralPath $ancestor -Force -ErrorAction Stop).Attributes
+            if (($attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                Fail ("{0}-reparse-ancestor" -f $CodePrefix) ("{0} '{1}' is a reparse point; a redirected directory could retarget the retained write" -f $AncestorSubject, $ancestor)
+            }
+        }
+        $next = [System.IO.Path]::GetDirectoryName($ancestor)
+        if ($next -eq $ancestor) { break }
+        $ancestor = $next
+    }
+
+    return $full
+}
+
+function Assert-RawTransportDestination {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string[]]$ProtectedRoots
+    )
+
+    return Assert-FreshProtectedDestination -Path $Path -ProtectedRoots $ProtectedRoots -ParameterName "RawTransportPath" -Subject "the retained raw transport destination" -AncestorSubject "the retained raw transport ancestor" -CodePrefix "raw-transport"
+}
+
+# The sealed trusted receipt gets its own fresh leaf: it must stay disjoint from the install root, candidate data, retained transport and the bootstrap receipt, because it is the external file the publisher later names explicitly.
+function Assert-TrustedReceiptDestination {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string[]]$ProtectedRoots
+    )
+
+    return Assert-FreshProtectedDestination -Path $Path -ProtectedRoots $ProtectedRoots -ParameterName "TrustedReceiptPath" -Subject "the trusted receipt destination" -AncestorSubject "the trusted receipt ancestor" -CodePrefix "trusted-receipt"
 }
 
 
@@ -847,6 +925,13 @@ $receipt = [ordered]@{
 }
 
 $createdInstallRoot = $false
+$createdRawTransport = $false
+$rawTransportFull = $null
+$rawTransportTempPath = $null
+# The sealed receipt destination has its own flags so a failure removes only the file and temp this run created, never a pre-existing user file.
+$createdTrustedReceipt = $false
+$trustedReceiptFull = $null
+$trustedReceiptTempPath = $null
 # Stays false until every receipt-destination guard passes, so a rejected or overlapping receipt target is never created by the run that rejected it.
 $receiptDestinationValidated = $false
 try {
@@ -871,13 +956,39 @@ try {
     if ($Mode -eq "FetchCandidate" -and [string]::IsNullOrWhiteSpace($Component)) {
         Fail "missing-input" "-Component is required for the FetchCandidate mode"
     }
+    # The retention destination is an explicit FetchCandidate input, never defaulted or silently ignored in the InstallRuntime operation.
+    if ($Mode -eq "FetchCandidate" -and [string]::IsNullOrWhiteSpace($RawTransportPath)) {
+        Fail "missing-input" "-RawTransportPath is required for the FetchCandidate mode so the original streamed raw ZIP is retained"
+    }
+    if ($Mode -eq "InstallRuntime" -and -not [string]::IsNullOrWhiteSpace($RawTransportPath)) {
+        Fail "malformed-input" "-RawTransportPath is only valid in the FetchCandidate mode; the InstallRuntime operation retains no raw transport"
+    }
+    # Unsupported mode fields are rejected rather than ignored, so a superseded or mismatched invocation cannot silently change what the transport proves.
+    if ($Mode -eq "FetchCandidate" -and (-not [string]::IsNullOrWhiteSpace($TrustedReceiptName) -or -not [string]::IsNullOrWhiteSpace($TrustedReceiptSha256) -or -not [string]::IsNullOrWhiteSpace($TrustedReceiptPath))) {
+        Fail "malformed-input" "-TrustedReceiptName, -TrustedReceiptSha256 and -TrustedReceiptPath are only valid in the InstallRuntime mode; the candidate transport carries no trusted publisher receipt"
+    }
+    # Both transports are exactly three direct members: a superseded two-member set or a nested wrapper is rejected here instead of being reinterpreted.
+    $outerEntryCount = @($ExpectedOuterEntries).Count
+    if ($outerEntryCount -ne 3) {
+        Fail "malformed-input" ("-ExpectedOuterEntries must declare exactly the three outer transport members; received {0}" -f $outerEntryCount)
+    }
     if ($Mode -eq "InstallRuntime") {
         if ([string]::IsNullOrWhiteSpace($EnvelopeSha256)) { Fail "missing-input" "-EnvelopeSha256 is required for the InstallRuntime mode" }
         if ($EnvelopeSha256 -cnotmatch '^[0-9a-f]{64}$') { Fail "malformed-input" "-EnvelopeSha256 is not a lowercase SHA-256" }
         if ($ManifestSha256 -cnotmatch '^[0-9a-f]{64}$') { Fail "malformed-input" "-ManifestSha256 is not a lowercase SHA-256" }
         if ([string]::IsNullOrWhiteSpace($ExpectedEnvelopeName)) { Fail "missing-input" "-ExpectedEnvelopeName is required for the InstallRuntime mode" }
-        if ($ExpectedOuterEntries -notcontains $ExpectedEnvelopeName) { Fail "malformed-input" "-ExpectedEnvelopeName must be one of the exact outer entries" }
-        if ($ExpectedOuterEntries -notcontains $ExpectedManifestName) { Fail "malformed-input" "-ExpectedManifestName must be one of the exact outer entries" }
+        if ([string]::IsNullOrWhiteSpace($TrustedReceiptName)) { Fail "missing-input" "-TrustedReceiptName is required for the InstallRuntime mode" }
+        if ($TrustedReceiptName.Contains("/") -or $TrustedReceiptName.Contains("\")) { Fail "malformed-input" "-TrustedReceiptName must be a single relative member name" }
+        if ([string]::IsNullOrWhiteSpace($TrustedReceiptSha256)) { Fail "missing-input" "-TrustedReceiptSha256 is required for the InstallRuntime mode so the receipt bytes are authenticated against the trusted builder output" }
+        if ($TrustedReceiptSha256 -cnotmatch '^[0-9a-f]{64}$') { Fail "malformed-input" "-TrustedReceiptSha256 is not a bare lowercase SHA-256" }
+        if ([string]::IsNullOrWhiteSpace($TrustedReceiptPath)) { Fail "missing-input" "-TrustedReceiptPath is required for the InstallRuntime mode" }
+        if ($ExpectedOuterEntries -cnotcontains $ExpectedEnvelopeName) { Fail "malformed-input" "-ExpectedEnvelopeName must be one of the exact outer entries" }
+        if ($ExpectedOuterEntries -cnotcontains $ExpectedManifestName) { Fail "malformed-input" "-ExpectedManifestName must be one of the exact outer entries" }
+        if ($ExpectedOuterEntries -cnotcontains $TrustedReceiptName) { Fail "malformed-input" "-TrustedReceiptName must be one of the exact outer entries" }
+        # Three flat siblings: equal or case-colliding names would make one member stand in for another.
+        if (@(@($ExpectedEnvelopeName, $ExpectedManifestName, $TrustedReceiptName) | Sort-Object -Unique).Count -ne 3) {
+            Fail "malformed-input" "the expected envelope, manifest and trusted receipt names must be distinct"
+        }
     }
 
     # The normalized platform digest is decoded once here and is what every later comparison uses; inner builder hashes never enter this value.
@@ -886,6 +997,15 @@ try {
     if (Test-PathOverlap $InstallRoot $CheckoutRoot) { Fail "install-overlaps-checkout" "the install root must not overlap the checkout" }
     if (-not [string]::IsNullOrWhiteSpace($CandidateRoot) -and (Test-PathOverlap $InstallRoot $CandidateRoot)) { Fail "install-overlaps-candidate" "the install root must not overlap the candidate root" }
     if (Test-Path -LiteralPath $InstallRoot) { Fail "install-root-exists" ("the install root already exists; the bootstrap never overwrites a user directory: {0}" -f $InstallRoot) }
+
+    # Destination safety is decided before the install root is created and before any platform call, so an unsafe retention or receipt target has no write or network effect.
+    if ($Mode -eq "FetchCandidate") {
+        # The optional -CandidateRoot is omitted by a genuine FetchCandidate, so it is filtered out of the protected-root set here; PowerShell rejects an empty-string element bound to the Mandatory [string[]] before any typed check. The three required roots are validated non-null inputs and are never dropped.
+        $rawTransportFull = Assert-RawTransportDestination -Path $RawTransportPath -ProtectedRoots @(@($InstallRoot, $ReceiptPath, $CheckoutRoot, $CandidateRoot) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    } else {
+        # The sealed receipt is the external file the publisher names explicitly, so its leaf must stay pairwise disjoint from the install root, the bootstrap receipt, the checkout, candidate data and any retained transport.
+        $trustedReceiptFull = Assert-TrustedReceiptDestination -Path $TrustedReceiptPath -ProtectedRoots @(@($InstallRoot, $ReceiptPath, $CheckoutRoot, $CandidateRoot, $RawTransportPath) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    }
 
     [System.IO.Directory]::CreateDirectory($InstallRoot) | Out-Null
     $createdInstallRoot = $true
@@ -1057,6 +1177,23 @@ try {
         entries                = @($outer.Names)
     }
 
+    # The original outer ZIP is retained only after the outer entry validation, through a same-directory temp and a same-volume rename, so the destination is either absent or the exact verified bytes and an existing file is never replaced.
+    if ($Mode -eq "FetchCandidate") {
+        $rawTransportTempPath = "{0}.tmp-{1}" -f $rawTransportFull, ([Guid]::NewGuid().ToString("N"))
+        [System.IO.File]::Copy($rawPath, $rawTransportTempPath, $false)
+        $retainedSha = Get-FileSha256Hex $rawTransportTempPath
+        $retainedBytes = [long]([System.IO.FileInfo]::new($rawTransportTempPath).Length)
+        if ($retainedSha -cne $download.Sha256 -or $retainedSha -cne $platformDigestExpected) {
+            Fail "raw-transport-copy-mismatch" ("the retained raw transport copy hashed to '{0}' but the streamed download observed '{1}'" -f $retainedSha, $download.Sha256)
+        }
+        if ($retainedBytes -ne $download.Bytes) {
+            Fail "raw-transport-copy-size-mismatch" ("the retained raw transport copy is {0} bytes but the streamed download observed {1} bytes" -f $retainedBytes, $download.Bytes)
+        }
+        [System.IO.File]::Move($rawTransportTempPath, $rawTransportFull)
+        $rawTransportTempPath = $null
+        $createdRawTransport = $true
+    }
+
     if ($Mode -eq "FetchCandidate") {
         $candidateDirectory = Join-Path $InstallRoot "candidate"
         $null = Expand-SafeArchive -ArchivePath $rawPath -Destination $candidateDirectory -MaxTotal $MaxTotalUncompressedBytes
@@ -1078,8 +1215,20 @@ try {
             if ($manifestSha -cne $ManifestSha256) { Fail "manifest-digest-mismatch" ("the extracted builder manifest hashed to '{0}' but the trusted builder reported '{1}'" -f $manifestSha, $ManifestSha256) }
         }
 
+        # The trusted receipt is authenticated against the independently built SHA-256 before it is copied anywhere; the bootstrap transports the bytes and never parses publisher policy out of them.
+        $trustedReceiptStagePath = Join-Path $stageDirectory $TrustedReceiptName
+        $trustedReceiptObservedSha = Get-FileSha256Hex $trustedReceiptStagePath
+        if ($trustedReceiptObservedSha -cne $TrustedReceiptSha256) {
+            Fail "trusted-receipt-digest-mismatch" ("the extracted trusted receipt hashed to '{0}' but the trusted builder reported '{1}'" -f $trustedReceiptObservedSha, $TrustedReceiptSha256)
+        }
+
         $manifestEntries = @(Read-RuntimeManifest -Path $manifestPath)
         $innerNames = @($manifestEntries | ForEach-Object { $_.Path })
+
+        # The receipt is a sibling outer member, never an entry of the runtime envelope or its manifest, so the installed runtime can never authenticate itself.
+        if ($innerNames -ccontains $TrustedReceiptName) {
+            Fail "trusted-receipt-in-runtime-manifest" ("the builder runtime manifest declares the trusted receipt member '{0}' as a runtime file" -f $TrustedReceiptName)
+        }
 
         $inner = Assert-ZipArchiveSafety `
             -ArchivePath $envelopePath `
@@ -1090,13 +1239,17 @@ try {
             -MaxRatio $MaxCompressionRatio
 
         $receipt.envelope = [ordered]@{
-            name           = $ExpectedEnvelopeName
-            builderSha256  = $EnvelopeSha256
-            observedSha256 = $envelopeSha
-            manifestName   = $ExpectedManifestName
-            manifestSha256 = $ManifestSha256
-            entryCount     = $inner.EntryCount
-            digestSource   = "builder-reported inner envelope/manifest hashes; never conflated with the outer platform digest"
+            name                         = $ExpectedEnvelopeName
+            builderSha256                = $EnvelopeSha256
+            observedSha256               = $envelopeSha
+            manifestName                 = $ExpectedManifestName
+            manifestSha256               = $ManifestSha256
+            trustedReceiptName           = $TrustedReceiptName
+            trustedReceiptSha256         = $TrustedReceiptSha256
+            trustedReceiptObservedSha256 = $trustedReceiptObservedSha
+            trustedReceiptPath           = $trustedReceiptFull
+            entryCount                   = $inner.EntryCount
+            digestSource                 = "builder-reported inner envelope/manifest hashes; never conflated with the outer platform digest"
         }
 
         if (-not [string]::IsNullOrWhiteSpace($RequiredRuntimeFile) -and -not ($innerNames -contains $RequiredRuntimeFile)) {
@@ -1109,13 +1262,24 @@ try {
         Assert-ManifestMatchesDirectory -ManifestEntries $manifestEntries -Root $runtimePartial
         Move-Item -LiteralPath $runtimePartial -Destination $runtimeFinal
 
+        # The sealed receipt is copied last, to its own fresh leaf through a same-directory temp and a same-volume rename, so an existing file is never replaced and an unverified receipt never reaches a publisher invocation.
+        $trustedReceiptTempPath = "{0}.tmp-{1}" -f $trustedReceiptFull, ([Guid]::NewGuid().ToString("N"))
+        [System.IO.File]::Copy($trustedReceiptStagePath, $trustedReceiptTempPath, $false)
+        $copiedReceiptSha = Get-FileSha256Hex $trustedReceiptTempPath
+        if ($copiedReceiptSha -cne $TrustedReceiptSha256) {
+            Fail "trusted-receipt-copy-mismatch" ("the sealed trusted receipt copy hashed to '{0}' but the trusted builder reported '{1}'" -f $copiedReceiptSha, $TrustedReceiptSha256)
+        }
+        [System.IO.File]::Move($trustedReceiptTempPath, $trustedReceiptFull)
+        $trustedReceiptTempPath = $null
+        $createdTrustedReceipt = $true
+
         $receipt.runtime = [ordered]@{
             installRoot   = $runtimeFinal
             fileCount     = $manifestEntries.Count
             requiredEntry = $RequiredRuntimeFile
         }
         $receipt.status = "installed"
-        Write-Host ("bootstrap installed {0} verified runtime file(s) into an isolated directory" -f $manifestEntries.Count)
+        Write-Host ("bootstrap installed {0} verified runtime file(s) into an isolated directory and sealed the trusted receipt separately" -f $manifestEntries.Count)
     }
 } catch {
     $message = $_.Exception.Message
@@ -1125,6 +1289,20 @@ try {
     $receipt.failures = @([ordered]@{ code = $code; detail = $detail })
     if ($createdInstallRoot -and (Test-Path -LiteralPath $InstallRoot)) {
         try { Remove-Item -LiteralPath $InstallRoot -Recurse -Force -ErrorAction Stop } catch { }
+    }
+    # Only the retained file and temp this run itself created are removed, so a rejected destination that already existed is never deleted.
+    if ($null -ne $rawTransportTempPath -and (Test-Path -LiteralPath $rawTransportTempPath -PathType Leaf)) {
+        try { Remove-Item -LiteralPath $rawTransportTempPath -Force -ErrorAction Stop } catch { }
+    }
+    if ($createdRawTransport -and (Test-Path -LiteralPath $rawTransportFull -PathType Leaf)) {
+        try { Remove-Item -LiteralPath $rawTransportFull -Force -ErrorAction Stop } catch { }
+    }
+    # The sealed receipt has its own flags: only the temp and file this run created are removed, so a pre-existing user file at that destination survives a rejected run.
+    if ($null -ne $trustedReceiptTempPath -and (Test-Path -LiteralPath $trustedReceiptTempPath -PathType Leaf)) {
+        try { Remove-Item -LiteralPath $trustedReceiptTempPath -Force -ErrorAction Stop } catch { }
+    }
+    if ($createdTrustedReceipt -and (Test-Path -LiteralPath $trustedReceiptFull -PathType Leaf)) {
+        try { Remove-Item -LiteralPath $trustedReceiptFull -Force -ErrorAction Stop } catch { }
     }
     Write-Error -Message ("bootstrap failed [{0}] {1}" -f $code, $detail) -ErrorAction Continue
     if ($receiptDestinationValidated) {

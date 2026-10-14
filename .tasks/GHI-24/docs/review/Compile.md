@@ -1,80 +1,19 @@
-# Test-project compile correction
+# GHI-24 compile evidence
 
-The test-project build `OvQXB8YAJq3-JHSQvKJZzYgPqxZb56veuEhME7ulFjk` failed
-with two identical FS3373 error entries and zero warnings.
-`infrastructure/release/tests/Runner.fs` line 100 triggered the error because
-its interpolated argument contained a nested string literal in
-`String.replicate 64 "a"`.
+The focused test-host fix edits `Authority.fs` (helper takes a `CompressionLevel` argument; inner archive uses `Optimal`, outer keeps `NoCompression`; `authorizedFixedTag` now expects the transaction-FAILED exit code `1` instead of the pre-contract guard exit `4` because the scripted transport returns HTTP 500 inside `ReleaseTransaction.run`, matching the canonical Runner/Integrity transaction FAILED contract — unauthorized guard exit `4` and all other factory/URL/method/no-POST assertions are preserved verbatim) and `Main.fs` (`--prepare-authority-probe` returns the native int from the real `ReleaseRunner.main` and skips the Expecto wrapper). No production source, no `OrchestrationAssertions` cases, and no test-list registration count are touched. A fresh `infrastructure/release/tests/Tests.fsproj` Release build is the only remaining step before the prepared probe can be re-asserted; this record makes no build or PASS claim and waits for the engineer build.
 
-The test now computes the same 64-character hash value in a local binding and
-interpolates that binding, preserving the exact CLI argument and existing
-assertions. No test expectations or release matrix entries changed. The source
-fix is pending the engineer-owned rebuild; no build or test was run here.
+## Focused Release build evidence
 
-| Build | runId | Status | exitCode | errors | warnings | snapshot |
-| --- | --- | --- | --- | --- | --- | --- |
-| post-fix `Tests.fsproj` Release, dedicated Dotnet MCP, exactly one invocation | `4KJ8u0iHMnDubYI26QNv6VAryndp17nHvSCDi_5bw7w` | failed | 1 | 6 (FS0003 `Policy.fs(120,7)`, FS0039 `Orchestration.fs(63,74)` "ReleaseError is not defined", FS0001 `Orchestration.fs(150,69)` StageFailure string-mismatch — each emitted twice; `Runner.fs` line 100 no longer reported) | 0 | unchanged during run (git status --porcelain before/after equal) |
+The above pending-build note is superseded by this result: the dedicated Dotnet MCP built only `infrastructure/release/tests/Tests.fsproj` in `Release` (`runId=0MF_CAZZNouzGii3Gluz69bNb7We7JmT5dk9xSmbylY`). Result: succeeded, exit 0, 0 errors, 0 warnings. SHA-256 checks before and after the build found no drift in `Tests.fsproj` (both `0AB21C9D7F0A88D5B43AB4BB7408D7FE1FD1A771F2E8C4348496A8C9441F445E`) or the test-source inputs. This is compile evidence only: no test execution, executed-case count, fixture execution, or approval is claimed; the current registered/executed count remains unverified and must be confirmed by the authorized later execution.
 
-The test sources now separate the policy test-list cases explicitly, qualify the
-release error formatter through `BuildProvenance`, and apply the stage-failure
-helper with the current fixture component. Existing test cases and assertions
-are unchanged. This source correction is pending the engineer-owned rebuild; no
-build or test was run here.
+## Historical descriptor build evidence
 
-The pending status above records the earlier handoff state; the current build
-confirmation below supersedes it.
+The dedicated Dotnet MCP built only `infrastructure/release/tests/Tests.fsproj` in `Release` (`runId=4GalYdXRum1_TzcF6ZRkMJ-R1o46c7NFy9pkMWWCuHs`). Result: failed, exit 1, 2 errors, 0 warnings. First bounded diagnostic: `infrastructure/release/tests/Historical.fs(128,120): FS0597 This argument expression needs parentheses.` No source files were changed by this assignment. Historical fixture root presence was observed at `C:/Users/andre/AppData/Local/Temp/opencode/ghi24-current-fixtures`, with `Dotnet.zip` (1,289,835 bytes) and `Workflow.zip` (1,514,420 bytes); no fixture test was executed. This is compile evidence only, not a test PASS.
 
-## Current Release test-project build
+## Workflow Release build evidence
 
-The coordinator supplied the current Release build evidence for
-`infrastructure/release/tests/Tests.fsproj`; Dotnet MCP details confirmed zero
-errors and zero warnings. The tester consumed the already-built assembly and did
-not build.
+The dedicated Dotnet MCP built `workflow/Mcp.Workflow.fsproj` in `Release` (`runId=ANnfsl0wAHQzEaPrzwsJEh1rzxBcan7_iUbmVR3iL88`). Result: succeeded, exit 0, 0 errors, 0 warnings. The retained build output confirms the canonical project and actual output line: `Mcp.Workflow -> D:\repos\private\mcp-store\workflow\bin\Release\net11.0\Mcp.Workflow.dll`. The artifact is in this workspace at `D:\repos\private\mcp-store\workflow\bin\Release\net11.0\Mcp.Workflow.dll`, size 890,368 bytes, `LastWriteTimeUtc=2026-10-14T09:34:28.2199145Z`, SHA-256 `5A946464EDB5E8FB4FBC6F7C3EC186CC91FE496E096E93EF1F50450BFA8D54F5`. Its pre-build observation was 872,448 bytes, `LastWriteTimeUtc=2026-10-11T14:43:28Z`, SHA-256 `3025123592DA37146BDB71E07BFE79C1C3EC6C065356E23EF7FF8ABD2BFAAEE1`; the post-build artifact is therefore refreshed. Compile evidence only: no tests or packaging were run, and no version/metadata claim is made.
 
-| Build | runId | Status | exitCode | errors | warnings | snapshot |
-| --- | --- | --- | ---: | ---: | ---: | --- |
-| current `Tests.fsproj` Release build, coordinator-supplied Dotnet MCP | `pQPcot3En7JLL-xoYYygsvdwatgGqXPCBIPp1ve46r8` | succeeded | 0 | 0 | 0 | compiled assembly SHA-256 recorded in `Execution.md` |
+## Historical descriptor syntax fix (pending build)
 
-## Pending runner-test build
-
-`infrastructure/release/tests/Runner.fs` now passes the three mandatory external
-receipt paths and writes a valid FetchCandidate v2 fixture (`mode=FetchCandidate`,
-`role=candidate`, non-null `component=dotnet`). The regression requires the exact
-typed missing-closure diagnostic, so a generic exit code 4 or a CLI-guard failure
-cannot satisfy it. The source update has not been built or tested in this handoff.
-
-| Build target | Status | Evidence |
-| --- | --- | --- |
-| `infrastructure/release/tests/Tests.fsproj` Release | pending engineer-owned build | edited test source is not yet compiled |
-
-## Engineer-owned Release test-project build
-
-The engineer ran the build through the dedicated Dotnet MCP exactly once on
-`infrastructure/release/tests/Tests.fsproj` in `Release` configuration. No F#
-project files, producer code, Build.ps1 serialization, or test sources were
-edited; `mayEdit=false`/`mayTest=false`/`mayDelegate=false` held. Pre-build and
-post-build SHA-256 snapshots of the 20 test-project source files match
-(`.tasks/GHI-24/docs/review/Compile-snap-pre.txt` vs `Compile-snap-post.txt`),
-so no external change landed during the run; the pre-existing
-`git status --porcelain` set (10 modified + 3 untracked) is unchanged before
-and after, confirming zero stale evidence and zero source drift introduced by
-the MCP invocation. Receipt flags: Release, 0 errors / 0 warnings. No separate
-producer build, raw `dotnet` fallback, test execution, live API call,
-environment-secret read, network call, state mutation, commit, or foreign
-checkout was performed.
-
-| Build | runId | Status | exitCode | errors | warnings | snapshot |
-| --- | --- | --- | ---: | ---: | ---: | --- |
-| `Tests.fsproj` Release, dedicated Dotnet MCP, exactly one invocation | `fNOlcu9nPW0PAgxSYBs8Jz_FgdW7l5ugpH9cc4wOLf4` | succeeded | 0 | 0 | 0 | pre/post SHA-256 equal across all 20 test-project files; `git status --porcelain` unchanged before vs after the run |
-
-Known CI READINESS red signal: the engineer-owned build itself is green (0
-errors, 0 warnings, 0 source drift) and the produced assembly is ready for the
-tester. The pre-existing READINESS red surfaces (modern checked-in
-workflow/drift/readiness with publish disabled; production `Receipts.md` empty;
-runner-test fixture readiness) are owned by their respective test source
-owners (Coherence, Receipts, Runner) and are out of scope for the build
-contract. The test sources covering Handoff missing-entry assertion,
-Orchestration Git-readonly cleanup, Runner new receipt flags + fixtures,
-Coherence modern checked-in workflow/drift/readiness (must RED with publish
-disabled), and Telegram modern markers are all compiled clean by this build
-and are not ignored.
+Tester-scoped single-line edit at `infrastructure/release/tests/Historical.fs:128`: the trailing format argument `fixtures.GetArrayLength()` is now parenthesized inside the `sprintf` call, so F# no longer parses it as a method call on the partial application of `sprintf`. Exact replacement: `expectedEntryCount fixtures.GetArrayLength()` → `expectedEntryCount (fixtures.GetArrayLength())`. No semantic change; no other source, fixture, descriptor, or review file is touched by this edit. This is a syntax correction only and makes no build or PASS claim; a fresh `infrastructure/release/tests/Tests.fsproj` Release build is required to confirm the FS0597 is gone.

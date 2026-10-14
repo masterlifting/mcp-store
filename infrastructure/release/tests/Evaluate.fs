@@ -95,13 +95,29 @@ let private dtoFrom (archivePath: string) (manifestPath: string) =
         RepositoryName = "mcp-store"
     }
 
+let private preparationReceiptBytes archiveBytes manifestBytes =
+    let node = JsonObject()
+    node["schemaVersion"] <- JsonValue.Create 1
+    node["innerArchiveSha256"] <- JsonValue.Create(sha256HexBytes archiveBytes)
+    node["innerArchiveSize"] <- JsonValue.Create(int64 archiveBytes.Length)
+    node["manifestSha256"] <- JsonValue.Create(sha256HexBytes manifestBytes)
+    node["manifestSize"] <- JsonValue.Create(int64 manifestBytes.Length)
+    Encoding.UTF8.GetBytes(node.ToJsonString())
+
 let private outerTransport archiveName archiveBytes manifestBytes =
+    // Inner archive and manifest bytes precede the receipt so its hashes reflect known bytes;
+    // the outer ZIP that encloses the three entries is assembled last.
+    let preparationBytes = preparationReceiptBytes archiveBytes manifestBytes
+
     use output = new MemoryStream()
 
     do
         use archive = new ZipArchive(output, ZipArchiveMode.Create, true)
 
-        for name, bytes in [ archiveName, archiveBytes; "distribution.json", manifestBytes ] do
+        for name, bytes in
+            [ archiveName, archiveBytes
+              "distribution.json", manifestBytes
+              "preparation.json", preparationBytes ] do
             let entry = archive.CreateEntry(name, CompressionLevel.Optimal)
             use stream = entry.Open()
             stream.Write(bytes, 0, bytes.Length)

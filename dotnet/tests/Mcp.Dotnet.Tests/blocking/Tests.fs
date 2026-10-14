@@ -175,6 +175,11 @@ let literalCalls = @"pendingTask.Result pendingTask.Wait()"
             let source = File.ReadAllText(Path.Combine(root, "infrastructure", "release", "Runner.fs"))
             Expect.isEmpty (violations (checkText relative source)) "the two documented host-boundary branches are allowed"
 
+            let withoutDoc = source.Replace("the compiled CLI must finish", "no compiled-CLI doc")
+            Expect.isTrue ((violations (checkText relative withoutDoc) |> List.length) >= 2) "bridges without the compiled-CLI WHY comment are blocked"
+
+            Expect.isTrue ((violations (checkText "other.fs" source) |> List.length) >= 1) "the exact bridge is not allowlisted at another path"
+
             let extraBridge = source + Environment.NewLine + "let unexpected () = Async.RunSynchronously(work)"
             let blocked = checkText relative extraBridge |> violations
             Expect.equal (blocked |> List.map _.Pattern) [ "Async.RunSynchronously"; "Async.RunSynchronously"; "Async.RunSynchronously" ] "an extra bridge invalidates the exact allowlist"

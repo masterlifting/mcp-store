@@ -629,20 +629,18 @@ let parsePreparationReceipt (text: string) (sourcePath: string) : Result<Prepara
                           SourcePath = sourcePath
                           SourceSha256 = "" }
 
-let readPreparationReceiptFromFile (path: string) : Result<PreparationReceipt, ReleaseError> =
-    try
-        if not (File.Exists path) then
-            Error(MissingArtifact path)
-        else
-            let bytes = File.ReadAllBytes path
-            let sha = sha256Hex bytes
-            let text = Encoding.UTF8.GetString bytes
-            match parsePreparationReceipt text path with
+let private parsePreparationReceiptBytes (bytes: byte[]) (sourcePath: string) : Result<PreparationReceipt, ReleaseError> =
+    if int64 bytes.Length > 4L * 1024L * 1024L then
+        Error(MalformedArtifact(sourcePath, "the preparation receipt exceeds the 4194304-byte bounded read"))
+    else
+        try
+            let text = UTF8Encoding(false, true).GetString bytes
+            match parsePreparationReceipt text sourcePath with
             | Error error -> Error error
-            | Ok receipt -> Ok { receipt with SourceSha256 = sha }
-    with
-    | :? IOException as error -> Error(FileFailure("read", path, error.Message))
-    | :? UnauthorizedAccessException as error -> Error(FileFailure("read", path, error.Message))
+            | Ok receipt -> Ok { receipt with SourceSha256 = sha256Hex bytes }
+        with
+        | :? DecoderFallbackException as error ->
+            Error(MalformedArtifact(sourcePath, $"the preparation receipt is not strict UTF-8: {error.Message}"))
 
 
 type ExpectedMetadata =
@@ -736,6 +734,7 @@ type CandidateArchiveSnapshot internal
         embeddedManifestBytes: byte[] option,
         embeddedRevision: string option,
         entries: VerifiedEntry list,
+        preparation: PreparationReceipt,
         sourcePath: string,
         sourceSha256: string
     ) =
@@ -748,6 +747,7 @@ type CandidateArchiveSnapshot internal
     member _.ManifestSize = manifestSize
     member _.EmbeddedRevision = embeddedRevision
     member _.Entries = entries
+    member _.Preparation = preparation
     member _.SourcePath = sourcePath
     member _.SourceSha256 = sourceSha256
     member _.HasManifest = manifestEntryName.IsSome
@@ -796,7 +796,7 @@ let private readBoundedBytes (source: Stream) (cap: int64) (label: string) : Res
     | :? UnauthorizedAccessException as error -> Error(FileFailure("read", label, error.Message))
 
 let private canonicalEntrySet (policy: ReleasePolicy.PolicyProjection) : Set<string> =
-    Set.ofList [ policy.ArchiveName; manifestEntryName ]
+    Set.ofList [ policy.ArchiveName; manifestEntryName; "preparation.json" ]
 
 
 let readRawTransport
@@ -841,6 +841,9 @@ let readRawTransport
                             if failure.IsNone then
                                 let name = entry.FullName
                                 let nameBytes = Encoding.ASCII.GetBytes name
+                                let payloadCap =
+                                    if name = "preparation.json" then 4L * 1024L * 1024L
+                                    else outerEntryUncompressedMax
 
                                 if not (pathLengthOk name) then
                                     failure <- Some(MalformedArtifact(rawOuter, $"entry name '{name}' exceeds the 256-character path cap"))
@@ -853,8 +856,8 @@ let readRawTransport
                                 elif entry.Length < 0L || entry.CompressedLength < 0L then
                                     failure <- Some(MalformedArtifact(rawOuter, $"entry '{name}' declares a negative size"))
                                 else
-                                    if entry.Length > outerEntryUncompressedMax then
-                                        failure <- Some(MalformedArtifact(rawOuter, $"entry '{name}' exceeds the {outerEntryUncompressedMax}-byte uncompressed cap"))
+                                    if entry.Length > payloadCap then
+                                        failure <- Some(MalformedArtifact(rawOuter, $"entry '{name}' exceeds the {payloadCap}-byte uncompressed cap"))
                                     elif entry.CompressedLength > 0L && entry.Length > entry.CompressedLength * outerEntryCompressionRatioMax then
                                         failure <- Some(MalformedArtifact(rawOuter, $"entry '{name}' exceeds the {outerEntryCompressionRatioMax}:1 compression ratio cap"))
                                     else
@@ -874,7 +877,7 @@ let readRawTransport
                                             let forbiddenFileTypeDetail =
                                                 match unixFileType with
                                                 | 0xA000 -> Some $"the central directory marks '{name}' as a Unix symbolic link (file type 0xA000); refusing to follow a symlink entry"
-                                                | 0x4000 -> Some $"the central directory marks '{name}' as a directory (file type 0x4000); the outer transport allows exactly two file entries and forbids directories"
+                                                | 0x4000 -> Some $"the central directory marks '{name}' as a directory (file type 0x4000); the outer transport allows exactly three file entries and forbids directories"
                                                 | 0x1000 -> Some $"the central directory marks '{name}' as a Unix FIFO / named pipe (file type 0x1000)"
                                                 | 0x2000 -> Some $"the central directory marks '{name}' as a Unix character device (file type 0x2000)"
                                                 | 0x3000 -> Some $"the central directory marks '{name}' as a Unix block device (file type 0x3000)"
@@ -888,7 +891,7 @@ let readRawTransport
                                                 failure <- Some(MalformedArtifact(name, $"the central directory marks '{name}' with a DOS reparse-point attribute (0x400); refusing to follow a symlink / reparse entry"))
                                             | None, false ->
                                                 use entryStream = entry.Open()
-                                                let payloadResult = readBoundedBytes entryStream outerEntryUncompressedMax name
+                                                let payloadResult = readBoundedBytes entryStream payloadCap name
                                                 match payloadResult with
                                                 | Error e -> failure <- Some e
                                                 | Ok payload ->
@@ -914,78 +917,68 @@ let readRawTransport
                             else
                                 match manifestEntry with
                                 | None ->
-                                    let entries = List.ofSeq entryAcc
-                                    // The transport digest identifies the wrapper, not the inner archive.
-                                    match entries |> List.tryFind (fun verified -> verified.Name.Value = trustedPolicy.ArchiveName) with
-                                    | None ->
-                                        Error(MalformedArtifact(rawOuter, $"the verified outer entry set is missing the canonical inner archive entry '{trustedPolicy.ArchiveName}'"))
-                                    | Some innerEntry ->
-                                        let innerBytes = innerEntry.PayloadBytesCopy()
-                                        let innerSha = InnerArchiveSha256 (sha256Hex innerBytes)
-                                        let innerSize = int64 innerBytes.Length
-                                        let outerDigestTyped = OuterDigest observedOuterDigestValue
-                                        Ok(
-                                            CandidateArchiveSnapshot(
-                                                outerDigestTyped,
-                                                int64 boundedBytes.Length,
-                                                innerBytes,
-                                                innerSha,
-                                                innerSize,
-                                                None,
-                                                None,
-                                                None,
-                                                None,
-                                                None,
-                                                None,
-                                                entries,
-                                                rawOuter,
-                                                sha256Hex innerBytes))
+                                    Error(MalformedArtifact(rawOuter, $"the verified candidate transport is missing the canonical standalone '{manifestEntryName}' entry"))
                                 | Some entry ->
-                                    match readBoundedBytes (entry.Open()) outerEntryUncompressedMax (sprintf "%s/%s" rawOuter manifestEntryName) with
-                                    | Error e -> Error e
-                                    | Ok manifestPayload ->
-                                        let manifestSha = sha256Hex manifestPayload
-                                        let manifestName = VerifiedEntryName manifestEntryName
-                                        let entries = List.ofSeq entryAcc
-                                        // The embedded manifest, rather than the outer copy, identifies the inner archive contents.
-                                        match entries |> List.tryFind (fun verified -> verified.Name.Value = trustedPolicy.ArchiveName) with
-                                        | None ->
-                                            Error(MalformedArtifact(rawOuter, $"the verified outer entry set is missing the canonical inner archive entry '{trustedPolicy.ArchiveName}'"))
-                                        | Some innerEntry ->
-                                            let innerBytes = innerEntry.PayloadBytesCopy()
-                                            let innerSha = InnerArchiveSha256 (sha256Hex innerBytes)
-                                            let innerSize = int64 innerBytes.Length
-                                            match ReleaseCompare.observeBytes trustedPolicy.ArchiveName innerBytes with
+                                    let prepPath = sprintf "%s/%s" rawOuter "preparation.json"
+                                    match entryAcc |> Seq.tryFind (fun verified -> verified.Name.Value = "preparation.json") with
+                                    | None -> Error(MalformedArtifact(rawOuter, "the verified candidate transport is missing 'preparation.json'"))
+                                    | Some prepEntry ->
+                                        match parsePreparationReceiptBytes (prepEntry.PayloadBytesCopy()) prepPath with
+                                        | Error error -> Error error
+                                        | Ok preparation ->
+                                            match readBoundedBytes (entry.Open()) outerEntryUncompressedMax (sprintf "%s/%s" rawOuter manifestEntryName) with
                                             | Error e -> Error e
-                                            | Ok observation ->
-                                                match observation.ManifestBody with
+                                            | Ok manifestPayload ->
+                                                let manifestSha = sha256Hex manifestPayload
+                                                let manifestName = VerifiedEntryName manifestEntryName
+                                                let entries = List.ofSeq entryAcc
+                                                match entries |> List.tryFind (fun verified -> verified.Name.Value = trustedPolicy.ArchiveName) with
                                                 | None ->
-                                                    Error(MalformedArtifact(trustedPolicy.ArchiveName, $"the verified inner archive contains no embedded manifest; canonical publish must embed a '{manifestEntryName}' entry inside the inner archive"))
-                                                | Some embeddedManifestText ->
-                                                    let embeddedManifestBytes = Encoding.UTF8.GetBytes embeddedManifestText
-                                                    // Byte equality is required because whitespace or key ordering changes the published digest.
-                                                    if manifestPayload <> embeddedManifestBytes then
-                                                        let standaloneSha = sha256Hex manifestPayload
-                                                        let embeddedSha = sha256Hex embeddedManifestBytes
-                                                        Error(IdentityMismatch("standaloneEmbeddedManifestBytes", embeddedSha, standaloneSha))
-                                                    else
-                                                        let outerDigestTyped = OuterDigest observedOuterDigestValue
-                                                        Ok(
-                                                            CandidateArchiveSnapshot(
-                                                                outerDigestTyped,
-                                                                int64 boundedBytes.Length,
-                                                                innerBytes,
-                                                                innerSha,
-                                                                innerSize,
-                                                                Some manifestName,
-                                                                Some (Array.copy manifestPayload),
-                                                                Some (OuterDigest manifestSha),
-                                                                Some (int64 manifestPayload.Length),
-                                                                Some (Array.copy embeddedManifestBytes),
-                                                                Some embeddedManifestText,
-                                                                entries,
-                                                                rawOuter,
-                                                                sha256Hex innerBytes))
+                                                    Error(MalformedArtifact(rawOuter, $"the verified outer entry set is missing the canonical inner archive entry '{trustedPolicy.ArchiveName}'"))
+                                                | Some innerEntry ->
+                                                    let innerBytes = innerEntry.PayloadBytesCopy()
+                                                    let innerSha = InnerArchiveSha256 (sha256Hex innerBytes)
+                                                    let innerSize = int64 innerBytes.Length
+                                                    match ReleaseCompare.observeBytes trustedPolicy.ArchiveName innerBytes with
+                                                    | Error e -> Error e
+                                                    | Ok observation ->
+                                                        match observation.ManifestBody with
+                                                        | None ->
+                                                            Error(MalformedArtifact(trustedPolicy.ArchiveName, $"the verified inner archive contains no embedded manifest; canonical publish must embed a '{manifestEntryName}' entry inside the inner archive"))
+                                                        | Some embeddedManifestText ->
+                                                            let embeddedManifestBytes = Encoding.UTF8.GetBytes embeddedManifestText
+                                                            let actualArchiveSha = sha256Hex innerBytes
+                                                            let actualArchiveSize = int64 innerBytes.Length
+                                                            let actualManifestSha = sha256Hex manifestPayload
+                                                            let actualManifestSize = int64 manifestPayload.Length
+                                                            if preparation.InnerArchiveSha256.Value <> actualArchiveSha
+                                                               || preparation.InnerArchiveSize <> actualArchiveSize
+                                                               || preparation.ManifestSha256.Value <> actualManifestSha
+                                                               || preparation.ManifestSize <> actualManifestSize then
+                                                                Error(MalformedArtifact(prepPath, "the preparation receipt's inner archive and standalone manifest hashes or sizes do not match the verified transport member bytes"))
+                                                            elif manifestPayload <> embeddedManifestBytes then
+                                                                let standaloneSha = sha256Hex manifestPayload
+                                                                let embeddedSha = sha256Hex embeddedManifestBytes
+                                                                Error(IdentityMismatch("standaloneEmbeddedManifestBytes", embeddedSha, standaloneSha))
+                                                            else
+                                                                let outerDigestTyped = OuterDigest observedOuterDigestValue
+                                                                Ok(
+                                                                    CandidateArchiveSnapshot(
+                                                                        outerDigestTyped,
+                                                                        int64 boundedBytes.Length,
+                                                                        innerBytes,
+                                                                        innerSha,
+                                                                        innerSize,
+                                                                        Some manifestName,
+                                                                        Some(Array.copy manifestPayload),
+                                                                        Some(OuterDigest manifestSha),
+                                                                        Some(int64 manifestPayload.Length),
+                                                                        Some(Array.copy embeddedManifestBytes),
+                                                                        Some embeddedManifestText,
+                                                                        entries,
+                                                                        preparation,
+                                                                        rawOuter,
+                                                                        sha256Hex innerBytes))
                 with
                 | :? InvalidDataException as ex ->
                     Error(MalformedArtifact(rawOuter, $"the bounded transport bytes are not a valid standard-platform ZIP: {ex.Message}"))

@@ -99,6 +99,20 @@ let private preparationReceipt producerArchive manifestBytes =
     node["manifestSize"] <- JsonValue.Create(int64 manifestBytes.Length)
     Encoding.UTF8.GetBytes(node.ToJsonString())
 
+// Outer archive fixture: inner archive + standalone manifest + preparation.json sidecar.
+// Inner bytes and manifest bytes are computed first; the receipt binds the four known
+// inner-archive / manifest hashes and sizes; outer bytes (and therefore outer digest)
+// are assembled last so the receipt never captures a stale outer digest.
+let private portableOuterArchive (policy: ReleasePolicy.PolicyProjection) =
+    let producerArchive, manifestBytes = portableCandidateArchive policy
+    let preparationBytes = preparationReceipt producerArchive manifestBytes
+    let outerBytes =
+        zipBytes
+            [ policy.ArchiveName, producerArchive
+              "distribution.json", manifestBytes
+              "preparation.json", preparationBytes ]
+    producerArchive, manifestBytes, preparationBytes, outerBytes
+
 let private outerDigest (value: string) =
     let unionType = typeof<ReleaseHandoff.OuterDigest>
     let bindingFlags = BindingFlags.Public ||| BindingFlags.NonPublic
@@ -245,10 +259,12 @@ let private unsafePathRejected (name: string) =
     testCase ($"outer ZIP rejects unsafe path '{name}'") (fun () ->
         let policy = canonicalPolicy "dotnet"
         let producerArchive, manifestBytes = portableCandidateArchive policy
+        let preparationBytes = preparationReceipt producerArchive manifestBytes
         let outerBytes =
             zipBytes
                 [ policy.ArchiveName, producerArchive
                   "distribution.json", manifestBytes
+                  "preparation.json", preparationBytes
                   name, [| 1uy |] ]
         let evidence = artifactEvidence outerBytes (expectedMetadata policy.ComponentId) (observedMetadata policy.ComponentId) (sha256Hex outerBytes) (int64 outerBytes.Length)
         expectRejected $"unsafe outer entry '{name}'" (readOuter policy outerBytes evidence))
@@ -257,10 +273,12 @@ let private attributeCase name attributes expectedDetail =
     testCase ($"outer ZIP rejects {name} attributes") (fun () ->
         let policy = canonicalPolicy "dotnet"
         let producerArchive, manifestBytes = portableCandidateArchive policy
+        let preparationBytes = preparationReceipt producerArchive manifestBytes
         let outerBytes =
             zipBytesWithExternalAttributes
                 [ policy.ArchiveName, producerArchive, attributes
-                  "distribution.json", manifestBytes, 0 ]
+                  "distribution.json", manifestBytes, 0
+                  "preparation.json", preparationBytes, 0 ]
         let evidence = artifactEvidence outerBytes (expectedMetadata policy.ComponentId) (observedMetadata policy.ComponentId) (sha256Hex outerBytes) (int64 outerBytes.Length)
         expectMalformedContaining name expectedDetail (readOuter policy outerBytes evidence))
 
@@ -268,7 +286,8 @@ let private metadataMismatchCase field mutateObserved =
     testCase ($"outer ZIP rejects observed metadata mismatch for {field}") (fun () ->
         let policy = canonicalPolicy "dotnet"
         let producerArchive, manifestBytes = portableCandidateArchive policy
-        let outerBytes = zipBytes [ policy.ArchiveName, producerArchive; "distribution.json", manifestBytes ]
+        let preparationBytes = preparationReceipt producerArchive manifestBytes
+        let outerBytes = zipBytes [ policy.ArchiveName, producerArchive; "distribution.json", manifestBytes; "preparation.json", preparationBytes ]
         let evidence =
             artifactEvidence
                 outerBytes
@@ -297,11 +316,13 @@ let private symlinkOuterEntryRejected =
         let componentId = "dotnet"
         let policy = canonicalPolicy componentId
         let producerArchive, manifestBytes = portableCandidateArchive policy
+        let preparationBytes = preparationReceipt producerArchive manifestBytes
         let symlinkAttributes = 0xA000 <<< 16
         let outerBytes =
             zipBytesWithExternalAttributes
                 [ policy.ArchiveName, producerArchive, symlinkAttributes
-                  "distribution.json", manifestBytes, 0 ]
+                  "distribution.json", manifestBytes, 0
+                  "preparation.json", preparationBytes, 0 ]
 
         use outerStream = new MemoryStream(outerBytes)
         use outerArchive = new ZipArchive(outerStream, ZipArchiveMode.Read)
@@ -423,7 +444,8 @@ let private outerEvidenceMutationCase label mutateEvidence =
     testCase ($"outer ZIP rejects {label}") (fun () ->
         let policy = canonicalPolicy "dotnet"
         let producerArchive, manifestBytes = portableCandidateArchive policy
-        let outerBytes = zipBytes [ policy.ArchiveName, producerArchive; "distribution.json", manifestBytes ]
+        let preparationBytes = preparationReceipt producerArchive manifestBytes
+        let outerBytes = zipBytes [ policy.ArchiveName, producerArchive; "distribution.json", manifestBytes; "preparation.json", preparationBytes ]
         let baseline = artifactEvidence outerBytes (expectedMetadata policy.ComponentId) (observedMetadata policy.ComponentId) (sha256Hex outerBytes) (int64 outerBytes.Length)
         expectRejected label (readOuter policy outerBytes (mutateEvidence baseline)))
 
@@ -452,7 +474,8 @@ let private exactOuterEntryNegativeTests =
         testCase ($"outer ZIP rejects {label}") (fun () ->
             let policy = canonicalPolicy "dotnet"
             let producerArchive, manifestBytes = portableCandidateArchive policy
-            let outerBytes = zipBytes (entries policy producerArchive manifestBytes)
+            let preparationBytes = preparationReceipt producerArchive manifestBytes
+            let outerBytes = zipBytes (entries policy producerArchive manifestBytes preparationBytes)
             let evidence = artifactEvidence outerBytes (expectedMetadata policy.ComponentId) (observedMetadata policy.ComponentId) (sha256Hex outerBytes) (int64 outerBytes.Length)
             expectRejected label (readOuter policy outerBytes evidence))
 
@@ -464,12 +487,14 @@ let private exactOuterEntryNegativeTests =
 
     testList
         "outer exact entry-set negatives"
-        [ makeCase "an extra entry" (fun policy inner manifest -> [ policy.ArchiveName, inner; "distribution.json", manifest; "extra.txt", [| 1uy |] ])
-          makeCase "a missing inner archive" (fun _ _ manifest -> [ ("distribution.json", manifest) ])
-          makeCase "a missing standalone manifest" (fun policy inner _ -> [ (policy.ArchiveName, inner) ])
-          makeCase "a duplicate inner archive name" (fun policy inner manifest -> [ policy.ArchiveName, inner; policy.ArchiveName, inner; "distribution.json", manifest ])
-          makeCase "a duplicate standalone manifest name" (fun policy inner manifest -> [ policy.ArchiveName, inner; "distribution.json", manifest; "distribution.json", manifest ])
-          makeCase "a case-insensitive collision" (fun policy inner manifest -> [ policy.ArchiveName, inner; caseVariant policy.ArchiveName, inner; "distribution.json", manifest ]) ]
+        [ makeCase "an extra entry" (fun policy inner manifest prep -> [ policy.ArchiveName, inner; "distribution.json", manifest; "preparation.json", prep; "extra.txt", [| 1uy |] ])
+          makeCase "a missing inner archive" (fun _ _ manifest prep -> [ ("distribution.json", manifest); ("preparation.json", prep) ])
+          makeCase "a missing standalone manifest" (fun policy inner _ prep -> [ (policy.ArchiveName, inner); ("preparation.json", prep) ])
+          makeCase "a missing preparation receipt" (fun policy inner manifest _ -> [ (policy.ArchiveName, inner); ("distribution.json", manifest) ])
+          makeCase "a duplicate inner archive name" (fun policy inner manifest prep -> [ policy.ArchiveName, inner; policy.ArchiveName, inner; "distribution.json", manifest; "preparation.json", prep ])
+          makeCase "a duplicate standalone manifest name" (fun policy inner manifest prep -> [ policy.ArchiveName, inner; "distribution.json", manifest; "distribution.json", manifest; "preparation.json", prep ])
+          makeCase "a duplicate preparation receipt name" (fun policy inner manifest prep -> [ policy.ArchiveName, inner; "distribution.json", manifest; "preparation.json", prep; "preparation.json", prep ])
+          makeCase "a case-insensitive collision" (fun policy inner manifest prep -> [ policy.ArchiveName, inner; caseVariant policy.ArchiveName, inner; "distribution.json", manifest; "preparation.json", prep ]) ]
 
 let private unsafePathTests =
     [ "../escape.txt"
@@ -501,7 +526,8 @@ let private ordinaryUnixRegularEntryAccepted =
     testCase "outer ZIP accepts an ordinary Unix regular file attribute" (fun () ->
         let policy = canonicalPolicy "dotnet"
         let producerArchive, manifestBytes = portableCandidateArchive policy
-        let outerBytes = zipBytesWithExternalAttributes [ policy.ArchiveName, producerArchive, (0x8000 <<< 16); "distribution.json", manifestBytes, 0 ]
+        let preparationBytes = preparationReceipt producerArchive manifestBytes
+        let outerBytes = zipBytesWithExternalAttributes [ policy.ArchiveName, producerArchive, (0x8000 <<< 16); "distribution.json", manifestBytes, 0; "preparation.json", preparationBytes, 0 ]
         let evidence = artifactEvidence outerBytes (expectedMetadata policy.ComponentId) (observedMetadata policy.ComponentId) (sha256Hex outerBytes) (int64 outerBytes.Length)
         match readOuter policy outerBytes evidence with
         | Error error -> failtestf "ordinary Unix regular-file entry was rejected: %A" error
@@ -520,7 +546,8 @@ let private outerLimitsNegativeTests =
         testCase "outer ZIP rejects declared uncompressed entry size above the cap without allocating it" (fun () ->
             let policy = canonicalPolicy "dotnet"
             let producerArchive, manifestBytes = portableCandidateArchive policy
-            let outerBytes = zipBytes [ policy.ArchiveName, producerArchive; "distribution.json", manifestBytes ]
+            let preparationBytes = preparationReceipt producerArchive manifestBytes
+            let outerBytes = zipBytes [ policy.ArchiveName, producerArchive; "distribution.json", manifestBytes; "preparation.json", preparationBytes ]
             patchCentralSizes policy.ArchiveName 1u (uint32 (ReleaseHandoff.outerEntryUncompressedMax + 1L)) outerBytes
             let evidence = artifactEvidence outerBytes (expectedMetadata policy.ComponentId) (observedMetadata policy.ComponentId) (sha256Hex outerBytes) (int64 outerBytes.Length)
             expectMalformedContaining "outer entry size" "uncompressed cap" (readOuter policy outerBytes evidence))
@@ -529,7 +556,8 @@ let private outerLimitsNegativeTests =
         testCase "outer ZIP rejects declared expansion ratio above the cap without expanding it" (fun () ->
             let policy = canonicalPolicy "dotnet"
             let producerArchive, manifestBytes = portableCandidateArchive policy
-            let outerBytes = zipBytes [ policy.ArchiveName, producerArchive; "distribution.json", manifestBytes ]
+            let preparationBytes = preparationReceipt producerArchive manifestBytes
+            let outerBytes = zipBytes [ policy.ArchiveName, producerArchive; "distribution.json", manifestBytes; "preparation.json", preparationBytes ]
             patchCentralSizes policy.ArchiveName 1u 201u outerBytes
             let evidence = artifactEvidence outerBytes (expectedMetadata policy.ComponentId) (observedMetadata policy.ComponentId) (sha256Hex outerBytes) (int64 outerBytes.Length)
             expectMalformedContaining "outer compression ratio" "compression ratio cap" (readOuter policy outerBytes evidence))
@@ -538,7 +566,8 @@ let private outerLimitsNegativeTests =
         testCase "outer ZIP rejects declared total uncompressed size above the cap without allocating it" (fun () ->
             let policy = canonicalPolicy "dotnet"
             let _, manifestBytes = portableCandidateArchive policy
-            let outerBytes = zipBytes [ policy.ArchiveName, [| 1uy |]; "distribution.json", manifestBytes ]
+            let _, _, preparationBytes, _ = portableOuterArchive policy
+            let outerBytes = zipBytes [ policy.ArchiveName, [| 1uy |]; "distribution.json", manifestBytes; "preparation.json", preparationBytes ]
             patchCentralSizes "distribution.json" (uint32 ((uint64 ReleaseHandoff.outerEntryUncompressedMax + uint64 ReleaseHandoff.outerEntryCompressionRatioMax - 1UL) / uint64 ReleaseHandoff.outerEntryCompressionRatioMax)) (uint32 ReleaseHandoff.outerEntryUncompressedMax) outerBytes
             let evidence = artifactEvidence outerBytes (expectedMetadata policy.ComponentId) (observedMetadata policy.ComponentId) (sha256Hex outerBytes) (int64 outerBytes.Length)
             expectMalformedContaining "outer total uncompressed size" "total" (readOuter policy outerBytes evidence))
@@ -557,7 +586,11 @@ let private mismatchedStandaloneManifestRejected =
         let policy = canonicalPolicy "dotnet"
         let producerArchive, embeddedManifest = portableCandidateArchive policy
         let standaloneManifest = Array.append embeddedManifest [| byte ' ' |]
-        let outerBytes = zipBytes [ policy.ArchiveName, producerArchive; "distribution.json", standaloneManifest ]
+        let preparationBytes = preparationReceipt producerArchive embeddedManifest
+        // Inner archive bytes and known-correct manifest bytes are computed first; the receipt
+        // binds their hashes/sizes and the outer ZIP only references them. The standalone entry
+        // is then intentionally mutated so the verified bytes disagree with the preparation claim.
+        let outerBytes = zipBytes [ policy.ArchiveName, producerArchive; "distribution.json", standaloneManifest; "preparation.json", preparationBytes ]
         let evidence = artifactEvidence outerBytes (expectedMetadata policy.ComponentId) (observedMetadata policy.ComponentId) (sha256Hex outerBytes) (int64 outerBytes.Length)
 
         match readOuter policy outerBytes evidence with
@@ -577,7 +610,8 @@ let private missingEmbeddedManifestRejected =
                 (policy.PublishedFiles
                  |> List.map (fun name -> name, Encoding.UTF8.GetBytes($"candidate-payload:{policy.ComponentId}:{name}"))
                  |> fun payloads -> payloads @ [ "NOTICE.txt", Encoding.UTF8.GetBytes "candidate notice" ])
-        let outerBytes = zipBytes [ policy.ArchiveName, innerBytes; "distribution.json", manifestBytes ]
+        let preparationBytes = preparationReceipt innerBytes manifestBytes
+        let outerBytes = zipBytes [ policy.ArchiveName, innerBytes; "distribution.json", manifestBytes; "preparation.json", preparationBytes ]
         let evidence = artifactEvidence outerBytes (expectedMetadata policy.ComponentId) (observedMetadata policy.ComponentId) (sha256Hex outerBytes) (int64 outerBytes.Length)
 
         match readOuter policy outerBytes evidence with
@@ -593,7 +627,8 @@ let private snapshotStorageIsNotExposed =
     testCase "handoff snapshot copies and read-only streams do not expose verified backing arrays" (fun () ->
         let policy = canonicalPolicy "dotnet"
         let producerArchive, manifestBytes = portableCandidateArchive policy
-        let outerBytes = zipBytes [ policy.ArchiveName, producerArchive; "distribution.json", manifestBytes ]
+        let preparationBytes = preparationReceipt producerArchive manifestBytes
+        let outerBytes = zipBytes [ policy.ArchiveName, producerArchive; "distribution.json", manifestBytes; "preparation.json", preparationBytes ]
         let evidence = artifactEvidence outerBytes (expectedMetadata policy.ComponentId) (observedMetadata policy.ComponentId) (sha256Hex outerBytes) (int64 outerBytes.Length)
         let snapshot =
             match readOuter policy outerBytes evidence with
@@ -656,7 +691,8 @@ let private preparationOuterDigestIsIndependent =
             match ReleaseHandoff.parsePreparationReceipt (Encoding.UTF8.GetString(preparationReceipt producerArchive manifestBytes)) "receipt.json" with
             | Ok value -> value
             | Error error -> failtestf "valid preparation receipt was rejected: %A" error
-        let outerBytes = zipBytes [ policy.ArchiveName, producerArchive; "distribution.json", manifestBytes ]
+        let preparationBytes = preparationReceipt producerArchive manifestBytes
+        let outerBytes = zipBytes [ policy.ArchiveName, producerArchive; "distribution.json", manifestBytes; "preparation.json", preparationBytes ]
         Expect.notEqual receipt.InnerArchiveSha256.Value (sha256Hex outerBytes) "producer receipt digest is distinct from the post-upload outer digest")
 
 let private portableCandidate componentId =
@@ -667,7 +703,8 @@ let private portableCandidate componentId =
         let outerBytes =
             zipBytes
                 [ policy.ArchiveName, producerArchive
-                  "distribution.json", manifestBytes ]
+                  "distribution.json", manifestBytes
+                  "preparation.json", prepReceiptBytes ]
 
         let prepReceipt =
             match ReleaseHandoff.parsePreparationReceipt (Encoding.UTF8.GetString prepReceiptBytes) "receipt.json" with
@@ -711,10 +748,10 @@ let private portableCandidate componentId =
             match ReleaseHandoff.readRawTransport "candidate-artifact.zip" outerBytes evidence policy with
             | Error error ->
                 failtestf
-                    "canonical two-entry outer ZIP was rejected (%s, %d bytes, names=%A): %A"
+                    "canonical three-entry outer ZIP was rejected (%s, %d bytes, names=%A): %A"
                     policy.ArchiveName
                     outerBytes.Length
-                    [ policy.ArchiveName; "distribution.json" ]
+                    [ policy.ArchiveName; "distribution.json"; "preparation.json" ]
                     error
             | Ok value -> value
 
@@ -725,7 +762,7 @@ let private portableCandidate componentId =
         Expect.equal (snapshot.InnerArchiveBytesCopy()) producerArchive "snapshot contains the producer ZIP, not outer transport bytes"
         Expect.equal (snapshot.ManifestBytesCopy()) manifestBytes "standalone manifest remains distinct candidate data"
         Expect.equal (snapshot.EmbeddedManifestBytesCopy()) manifestBytes "verified embedded manifest matches the standalone manifest"
-        Expect.equal (snapshot.Entries |> List.map (fun entry -> entry.Name.Value) |> Set.ofList) (set [ policy.ArchiveName; "distribution.json" ]) "outer archive has exactly the canonical two entries"
+        Expect.equal (snapshot.Entries |> List.map (fun entry -> entry.Name.Value) |> Set.ofList) (set [ policy.ArchiveName; "distribution.json"; "preparation.json" ]) "outer archive has exactly the canonical three entries"
 
         use innerStream = snapshot.InnerArchiveStream()
         use manifestStream = snapshot.ManifestStream()
@@ -739,6 +776,56 @@ let private portableCandidate componentId =
         Expect.equal (innerCopy.ToArray()) producerArchive "inner archive stream yields only the verified producer ZIP"
         Expect.equal (manifestCopy.ToArray()) manifestBytes "manifest stream yields the standalone manifest"
         Expect.equal (embeddedManifestCopy.ToArray()) manifestBytes "embedded manifest stream yields the verified inner manifest")
+
+let private malformedPrepMismatchTests =
+    // One combined case loops the four inner/manifest hash+size fields so each mismatch
+    // dimension is exercised against the verified transport bytes without an exhaustive
+    // per-field matrix; the canonical fixture proves each observed byte that the receipt
+    // must match.
+    let mismatchCase label mutate =
+        testCase ($"{label}") (fun () ->
+            let policy = canonicalPolicy "dotnet"
+            let producerArchive, manifestBytes = portableCandidateArchive policy
+            let goodReceiptBytes = preparationReceipt producerArchive manifestBytes
+            let goodNode = JsonNode.Parse(Encoding.UTF8.GetString goodReceiptBytes).AsObject()
+            mutate goodNode
+            let mutatedReceiptBytes = Encoding.UTF8.GetBytes(goodNode.ToJsonString())
+            let outerBytes =
+                zipBytes
+                    [ policy.ArchiveName, producerArchive
+                      "distribution.json", manifestBytes
+                      "preparation.json", mutatedReceiptBytes ]
+            let evidence =
+                artifactEvidence
+                    outerBytes
+                    (expectedMetadata policy.ComponentId)
+                    (observedMetadata policy.ComponentId)
+                    (sha256Hex outerBytes)
+                    (int64 outerBytes.Length)
+            match readOuter policy outerBytes evidence with
+            | Error (MalformedArtifact(_, detail)) ->
+                Expect.isTrue
+                    (detail.Contains("preparation", StringComparison.Ordinal)
+                     || detail.Contains("innerArchive", StringComparison.Ordinal)
+                     || detail.Contains("manifest", StringComparison.Ordinal))
+                    $"{label} rejection names the preparation or its inner/manifest claim: {detail}"
+            | Error error -> failtestf "%s rejected with an unexpected error: %A" label error
+            | Ok _ -> failtestf "%s was accepted" label)
+
+    testList "preparation hash/size mismatch against verified transport" [
+        mismatchCase
+            "a preparation inner archive SHA-256 mismatch"
+            (fun node -> node["innerArchiveSha256"] <- JsonValue.Create(String.replicate 64 "f"))
+        mismatchCase
+            "a preparation inner archive size mismatch"
+            (fun node -> node["innerArchiveSize"] <- JsonValue.Create(int64 (Encoding.UTF8.GetString(Encoding.UTF8.GetBytes "x").Length + 999)))
+        mismatchCase
+            "a preparation manifest SHA-256 mismatch"
+            (fun node -> node["manifestSha256"] <- JsonValue.Create(String.replicate 64 "e"))
+        mismatchCase
+            "a preparation manifest size mismatch"
+            (fun node -> node["manifestSize"] <- JsonValue.Create(0L))
+    ]
 
 let positiveTests =
     testList "canonical portable outer positives" [
@@ -765,5 +852,6 @@ let tests =
               outerLimitsNegativeTests
               mismatchedStandaloneManifestRejected
               missingEmbeddedManifestRejected
+              malformedPrepMismatchTests
               snapshotStorageIsNotExposed ]
     ]

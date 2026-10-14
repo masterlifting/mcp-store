@@ -90,21 +90,22 @@ the preparation job cannot accidentally inherit write authority.
 The legacy credential-bearing transaction subprocess path
 (`ReleaseRunner.exe <manifest> <archive> <contract-json>`) has been
 retired; the only publication entrypoint is `ReleaseRunner publish
-<publisher-closure-path> <candidate-directory> --repo=… --run-id=…
+<publisher-closure-path> <candidate-transport.zip> --repo=… --run-id=…
 --attempt=… --event-sha=… --role=… --component=… --artifact-id=…
 --artifact-name=… --transport-sha256=… --builder-sdk=… --builder-runtime=…
---builder-platform=… --workspace-root=… [--trigger=…]`. The publisher
+--builder-platform=… --workspace-root=… --trusted-receipt=…
+--transport-evidence=… [--trigger=…]`. The publisher
 reads the audited `infrastructure/release/Publisher.json` closure (which
 carries only the canonical `repository`, `rosterPath`, and `schemaVersion` —
-no zero hash placeholders, no policy duplicates), reads the generated
-`receipt.json` from the candidate directory, re-derives every policy value
+no zero hash placeholders, no policy duplicates), reads the independently supplied
+trusted publisher receipt, re-derives every policy value
 from the canonical `Config.fsx` bytes at the platform-supplied event SHA
 through `ReleasePolicy.parseBytes`, cross-checks the receipt's
 `componentConfigShas`, `RosterSha256`, `EventRevision`, `RunId`, `Attempt`,
 `Role`, and `BuilderSdk/Runtime/Platform` against the publisher's
 independent observations and the CLI-supplied `--workspace-root`,
-re-hashes every candidate byte and verifies it against the CLI-supplied
-`--transport-sha256`, validates the candidate archive against the strict
+hashes the bounded raw outer ZIP bytes and verifies them against the CLI-supplied
+`--transport-sha256` and FetchCandidate observed download hash/size, validates the outer transport against the strict
 `ReleaseArchive.parse` transport validator (which enforces exact names,
 entry / expansion limits, no traversal / absolute / drive / UNC /
 alternate-stream paths, no links, no duplicates, no case collisions) AND
@@ -142,30 +143,30 @@ release entrypoint; no producer `Release.fsx` wrapper exists.
   inner archive and standalone manifest digests/sizes (the four
   publisher-cross-checkable inner fields only — no outer transport
   digest, no runtime fields, no toolchain values). The candidate
-  directory carries no prep-workspace absolute paths. The SEPARATELY
-  generated `receipt.json` (the trusted publisher receipt produced by
-  the independently built trusted builder job, not by the preparation
-  stage or by `Bootstrap.ps1`) is downloaded into the candidate
-  directory by the platform/bootstrap step before the publisher reads
-  it via `ReleaseHandoff.readTrustedPublisherReceiptFromFile`.
+  directory carries no prep-workspace absolute paths. The independently
+  generated trusted publisher receipt is not part of this preparation output;
+  the publisher receives it separately via `--trusted-receipt`.
 
-- `ReleaseRunner.exe publish <publisher-closure-path> <candidate-directory>
+ - `ReleaseRunner.exe publish <publisher-closure-path> <candidate-transport.zip>
   --repo=<owner>/<name> --run-id=<id> --attempt=<n>
   --event-sha=<40-hex> --role=<candidate>
   --component=<dotnet|workflow> --artifact-id=<id> --artifact-name=<name>
-  --transport-sha256=<actual-64-hex> --builder-sdk=<x>
-  --builder-runtime=<y> --builder-platform=<z> --workspace-root=<path>
-  --trusted-receipt=<builder-emitted-receipt.json>
-  --preparation-receipt=<candidate-prep-diagnostics.json>
-  --transport-evidence=<fetchcandidate-bootstrap-receipt.json>
-  [--trigger=<event>]` — the sole data-only publication entrypoint.
+   --transport-sha256=<actual-64-hex> --builder-sdk=<x>
+   --builder-runtime=<y> --builder-platform=<z> --workspace-root=<path>
+   --trusted-receipt=<builder-emitted-receipt.json>
+   --transport-evidence=<fetchcandidate-bootstrap-receipt.json>
+  [--trigger=<event>]` — the sole data-only publication entrypoint. The second
+  positional argument is the actual raw GitHub artifact ZIP (outer transport
+  bytes), never an extracted candidate directory or the inner producer archive.
+  Its canonical parent is used only for receipt non-overlap guards. The transport
+  filename is not policy: `policy.ArchiveName` selects the expected inner ZIP entry.
   The CLI parser accepts ONLY the documented `--key=value` flags; any
   unknown flag, duplicate flag, or positional argument after the two
   required paths is rejected before the publisher reads a single byte
-  (no aliases, no legacy `orchestrate` mode, no 3-arg path). Three
+  (no aliases, no legacy `orchestrate` mode, no 3-arg path). Two
   receipt paths are mandatory AND distinct (`--trusted-receipt`,
-  `--preparation-receipt`, `--transport-evidence`); a missing, empty
-  or pairwise-equal value is a typed `MalformedArtifact` before any
+  `--transport-evidence`); a missing, empty
+  or equal value is a typed `MalformedArtifact` before any
   file read. The `--role` value is restricted to `candidate`; a
   `publisher` or `runtime` value is a typed `MalformedArtifact` before
   any file read, token read, or HTTP transport. The `--transport-
@@ -177,19 +178,11 @@ release entrypoint; no producer `Release.fsx` wrapper exists.
   evidence, not candidate publish input. The `--trusted-receipt`
   value MUST point at the receipt emitted by the independently built
   trusted builder job; the path is canonicalised, must NOT be inside
-  the candidate directory, must NOT equal `<candidate>/receipt.json`
-  or `<candidate>/preparation.json`, and must NOT equal either of the
-  other two receipt paths. The `--preparation-receipt` value MUST
-  point at the independent preparation diagnostics document; it
-  carries the producer-known inner-archive identity and standalone
-  manifest identity only (no runtime fields, no toolchain values, no
-  platform outer digest). The publisher reads the audited
+  the candidate directory, must NOT equal `<candidate>/receipt.json`,
+  and must NOT equal the transport-evidence path. The publisher reads the audited
   `Publisher.json` closure (identifiers only: `schemaVersion`,
   `repository`, `rosterPath`), reads the typed
-  `TrustedPublisherReceipt` from the `--trusted-receipt` path and the
-  typed `PreparationReceipt` from the `--preparation-receipt` path
-  (the candidate directory carries neither — three receipts at three
-  separate external paths), cross-checks the receipt's `Repository`,
+  `TrustedPublisherReceipt` from the `--trusted-receipt` path, cross-checks the receipt's `Repository`,
   `RosterPath`, `RosterSha256`, `EventRevision`, `RunId`, `Attempt`,
   `Role`, `ComponentConfigPaths`/`Shas`, and
   `BuilderSdk/Runtime/Platform` against the publisher's independent
@@ -203,19 +196,27 @@ release entrypoint; no producer `Release.fsx` wrapper exists.
   observed candidate archive SHA-256 equals the CLI-supplied
   `--transport-sha256`, composes the typed `CandidateArchiveSnapshot`
   through `ReleaseHandoff.readRawTransport` (the strict outer archive
-  transport validator: exact names, entry / expansion limits, no
+  transport validator: exactly the canonical producer archive,
+  `distribution.json`, and `preparation.json`; entry / expansion limits, no
   traversal/absolute/drive/UNC/alternate-stream paths, no links, no
   duplicates, no case collisions; standalone/embedded manifest byte
   equality cross-check; separate typed `InnerArchiveSha256` vs.
-  `OuterDigest` namespaces), cross-checks the snapshot's inner archive
-  identity against the `PreparationReceipt` (no candidate-controlled
+  `OuterDigest` namespaces; preparation fields are checked against the
+  verified member bytes before snapshot creation), (no candidate-controlled
   outer digest; the platform outer digest comes from
   `ArtifactEvidence.ActualOuterDigest`), composes the `VerifiedCandidate`
   snapshot through `VerifiedCandidate.createFromSnapshot` (the minimal
-  `EvaluateVerifiedCandidate` encapsulation that builds from the typed
-  snapshot; the verified byte arrays live behind private fields with
-  defensive-copy accessors), and drives `ReleaseTransaction.run`
-  directly with a SINGLE invocation. `__SOURCE_DIRECTORY__` and the
+   `EvaluateVerifiedCandidate` encapsulation that builds from the typed
+   snapshot; the verified byte arrays live behind private fields with
+   defensive-copy accessors), then requires the exact
+   `MCP_RELEASE_DO_UPLOAD=true` opt-in and a non-empty `GITHUB_TOKEN` before
+   constructing HTTP transport or creating the download directory. Missing
+   authorization fails closed with structured `status=failed` and exit `4`;
+   there is no local-mirror, simulation, or implicit fallback. The release
+   locator tag is the verified enrolled `componentId` (`dotnet` or `workflow`),
+   not a version-derived tag; version remains part of archive and metadata
+   identity. The runner then drives `ReleaseTransaction.run` directly with a
+   SINGLE invocation. `__SOURCE_DIRECTORY__` and the
   build-machine HEAD are never used to derive the trusted root, the
   trusted policy, or the trusted archive digest.
 
@@ -240,13 +241,13 @@ no zero hash placeholders, no per-component Config.fsx SHAs, no SDK or
 runtime values. Every trust anchor that the publisher needs (the roster
 SHA-256, every per-component Config.fsx SHA-256, the observed toolchain,
 the run-attempt metadata) comes from the SEPARATELY generated
-`receipt.json` that the trusted builder emits and the bootstrap step
-downloads into the candidate directory before the publisher reads it.
+`receipt.json` that the trusted builder emits and the publisher reads via the
+explicit `--trusted-receipt` path (not from the candidate transport).
 The publisher independently re-hashes the roster and every Config.fsx
 and compares against the receipt; a candidate that manufactures its own
 expectations is rejected.
 
-### Receipt (`receipt.json` in the candidate directory)
+### Trusted publisher receipt (`--trusted-receipt`)
 
 The receipt is GENERATED by the trusted builder job (not by the authored
 closure) and carries the full set of runtime evidence the publisher
@@ -273,25 +274,26 @@ files (`Sources.json` for the trusted builder, `Publisher.json` for the
 audited publish-time closure) and the GENERATED receipt together cover
 the SEC1 boundary evidence.
 
-### Candidate directory contract
+### Raw candidate transport contract
 
-The candidate directory carries three exact-named files (no prep-workspace
-absolute paths, no self-asserted JSON envelopes, no other metadata the
-publisher would have to reject):
+The raw GitHub artifact ZIP passed as the publish CLI's second positional
+argument carries exactly three entries (no prep-workspace absolute paths, no
+self-asserted JSON envelopes, no other metadata the publisher would have to
+reject):
 
 - `<archive-name>.zip` — the candidate archive as written by the producer
 - `distribution.json` — the standalone manifest as written by the producer
-- `receipt.json` — the trusted-builder-generated evidence document the
-  bootstrap step downloads into the candidate directory before the publisher
-  reads it
-
-The publisher reads ALL THREE through `ReleaseHandoff.Handoff.readFromDirectory`,
-which enforces the bounded outer-archive transport validator
+- `preparation.json` — the producer-known inner archive and standalone manifest hashes and sizes
+The publisher reads the raw ZIP bytes directly through
+`ReleaseHandoff.Handoff.readRawTransport`, which enforces the bounded outer-archive transport validator
 (`ReleaseArchive.parse` — exact names, entry / expansion limits, no
 traversal / absolute / drive / UNC / alternate-stream paths, no links, no
 duplicates, no case collisions), parses the embedded `distribution.json`
 from the archive, and confirms standalone / embedded manifest byte
-equality before any policy decision runs.
+equality before any policy decision runs. The preparation receipt is parsed
+from its verified member bytes using bounded strict UTF-8 and cross-checked
+against the actual archive and manifest bytes before the private snapshot is
+returned; it is untrusted consistency data only.
 
 ### Strict transport archive validator
 
@@ -400,6 +402,20 @@ null or mismatching receipt `component` is a typed `MalformedArtifact` /
 `--role=candidate` and the receipt `role=candidate` are exact-matched;
 the receipt `status` MUST be `fetched`; the receipt's `component` MUST
 be present.
+The bootstrap currently validates and extracts the raw download into its isolated
+candidate directory, then removes the temporary install root; it does not expose
+the original transport file. Thus this publisher input cannot yet be wired from
+FetchCandidate alone. DevOps must retain/copy the actual streamed raw ZIP bytes to
+a protected path outside extraction and pass that exact file; never substitute
+the extracted inner archive or its digest.
+
+The `--workspace-root` is the trusted canonical source package/repository root
+against which roster and component policy paths are resolved. The current
+`BuildProvenance.committedHead` implementation invokes Git with that exact path as
+its working directory, so it assumes this root is also a Git worktree root (or a
+Git-accepted directory within the worktree). A packaged source snapshot without
+Git metadata cannot satisfy the existing exact-HEAD check; this assignment does
+not relax or replace that trust check.
 
 ### Bootstrap CLI values
 

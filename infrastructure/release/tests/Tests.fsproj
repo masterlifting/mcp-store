@@ -23,6 +23,7 @@
     <Compile Include="Integrity.fs" />
     <Compile Include="Policy.fs" />
     <Compile Include="Handoff.fs" />
+    <Compile Include="Authority.fs" />
     <Compile Include="Revision.fs" />
     <Compile Include="Runner.fs" />
     <Compile Include="Telegram.fs" />

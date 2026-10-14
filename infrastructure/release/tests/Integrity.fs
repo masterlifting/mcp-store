@@ -193,14 +193,22 @@ let private writeCandidate (root: string) (producer: Producer) (revision: string
         let archiveBytes = zipBytes (payloads @ [ "distribution.json", manifestBytes ])
         let archiveSha = sha256 archiveBytes
         let manifestSha = sha256 manifestBytes
-        let outerBytes = zipBytes [ producer.ArchiveName, archiveBytes; "distribution.json", manifestBytes ]
-        let outerSha = sha256 outerBytes
+        // Inner archive and standalone manifest are produced first; preparation.json binds the
+        // four known inner/manifest hashes and sizes, then the three-entry outer ZIP is
+        // assembled so the receipt never references a stale outer digest.
         let prepared = JsonObject()
         prepared["schemaVersion"] <- JsonValue.Create 1
         prepared["innerArchiveSha256"] <- JsonValue.Create archiveSha
         prepared["innerArchiveSize"] <- JsonValue.Create(int64 archiveBytes.Length)
         prepared["manifestSha256"] <- JsonValue.Create manifestSha
         prepared["manifestSize"] <- JsonValue.Create(int64 manifestBytes.Length)
+        let preparationBytes = Encoding.UTF8.GetBytes(prepared.ToJsonString())
+        let outerBytes =
+            zipBytes
+                [ producer.ArchiveName, archiveBytes
+                  "distribution.json", manifestBytes
+                  "preparation.json", preparationBytes ]
+        let outerSha = sha256 outerBytes
         let preparation =
             match ReleaseHandoff.parsePreparationReceipt (prepared.ToJsonString()) "preparation.json" with
             | Ok receipt -> receipt

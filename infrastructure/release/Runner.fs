@@ -99,7 +99,7 @@ let private runPrepareMode (argv: string[]) : Async<int> =
 
 type private PublishCli =
     { ClosurePath: string
-      CandidateDirectory: string
+      CandidateTransportPath: string
       Repo: string
       RunId: string
       Attempt: string
@@ -114,7 +114,6 @@ type private PublishCli =
       BuilderPlatform: string
       WorkspaceRoot: string
       TrustedReceiptPath: string
-      PreparationReceiptPath: string
       TransportEvidence: string
       Trigger: string option }
 
@@ -134,7 +133,6 @@ let private allowedPublishFlagNames : Set<string> =
           "--builder-platform"
           "--workspace-root"
           "--trusted-receipt"
-          "--preparation-receipt"
           "--transport-evidence"
           "--trigger" ]
 
@@ -145,10 +143,10 @@ let private allowedRoles : Set<string> = Set.ofList [ "candidate" ]
 
 let private parsePublishCli (argv: string[]) : Result<PublishCli, ReleaseError> =
     if argv.Length < 3 then
-        Error(MalformedArtifact("publish-cli", "the publish entrypoint expects at least a publisher-closure-path, a candidate-directory, and the required --key=value flags"))
+        Error(MalformedArtifact("publish-cli", "the publish entrypoint expects a publisher-closure-path, a raw candidate transport ZIP file, and the required --key=value flags"))
     else
         let closurePath = argv.[1]
-        let candidateDirectory = argv.[2]
+        let candidateTransportPath = argv.[2]
 
         let mutable failure : ReleaseError option = None
         let mutable index = 3
@@ -168,7 +166,6 @@ let private parsePublishCli (argv: string[]) : Result<PublishCli, ReleaseError> 
         let mutable builderPlatform = ""
         let mutable workspaceRoot = ""
         let mutable trustedReceiptPath = ""
-        let mutable preparationReceiptPath = ""
         let mutable transportEvidence = ""
         let mutable trigger : string option = None
 
@@ -210,7 +207,6 @@ let private parsePublishCli (argv: string[]) : Result<PublishCli, ReleaseError> 
                         | "--builder-platform" -> builderPlatform <- value
                         | "--workspace-root" -> workspaceRoot <- value
                         | "--trusted-receipt" -> trustedReceiptPath <- value
-                        | "--preparation-receipt" -> preparationReceiptPath <- value
                         | "--transport-evidence" -> transportEvidence <- value
                         | "--trigger" -> trigger <- Some value
                         | _ ->
@@ -233,7 +229,6 @@ let private parsePublishCli (argv: string[]) : Result<PublishCli, ReleaseError> 
               ("--builder-platform", builderPlatform)
               ("--workspace-root", workspaceRoot)
               ("--trusted-receipt", trustedReceiptPath)
-              ("--preparation-receipt", preparationReceiptPath)
               ("--transport-evidence", transportEvidence) ]
 
         let mutable missing : string list = []
@@ -256,7 +251,7 @@ let private parsePublishCli (argv: string[]) : Result<PublishCli, ReleaseError> 
         | None ->
             Ok
                 { ClosurePath = closurePath
-                  CandidateDirectory = candidateDirectory
+                  CandidateTransportPath = candidateTransportPath
                   Repo = repo
                   RunId = runId
                   Attempt = attempt
@@ -271,7 +266,6 @@ let private parsePublishCli (argv: string[]) : Result<PublishCli, ReleaseError> 
                   BuilderPlatform = builderPlatform
                   WorkspaceRoot = workspaceRoot
                   TrustedReceiptPath = trustedReceiptPath
-                  PreparationReceiptPath = preparationReceiptPath
                   TransportEvidence = transportEvidence
                   Trigger = trigger }
 
@@ -297,13 +291,22 @@ let private loadCandidateText (path: string) : Result<string, ReleaseError> =
     | Ok bytes -> Ok(Encoding.UTF8.GetString bytes)
     | Error error -> Error error
 
-let private boundedDirectory (path: string) : Result<string, ReleaseError> =
-    if String.IsNullOrWhiteSpace path then
-        Error(MalformedArtifact("publish", "the publisher received an empty candidate-directory path"))
-    elif not (Directory.Exists path) then
-        Error(MissingArtifact path)
-    else
-        Ok(Path.GetFullPath path)
+let private boundedTransportPath (path: string) : Result<string * string, ReleaseError> =
+    try
+        if String.IsNullOrWhiteSpace path then
+            Error(MalformedArtifact("publish", "the publisher received an empty raw candidate transport file path"))
+        elif Directory.Exists path then
+            Error(MalformedArtifact("publish", "the candidate transport positional argument must be a raw ZIP file, not a directory"))
+        elif not (File.Exists path) then
+            Error(MissingArtifact path)
+        else
+            let canonicalPath = Path.GetFullPath path
+            Ok(canonicalPath, Path.GetDirectoryName canonicalPath)
+    with
+    | :? IOException as error -> Error(FileFailure("resolve", path, error.Message))
+    | :? UnauthorizedAccessException as error -> Error(FileFailure("resolve", path, error.Message))
+    | :? ArgumentException as error -> Error(FileFailure("resolve", path, error.Message))
+    | :? NotSupportedException as error -> Error(FileFailure("resolve", path, error.Message))
 
 let private crossCheckStrings (field: string) (expected: string) (observed: string) : Result<unit, ReleaseError> =
     if expected = observed then Ok ()
@@ -701,15 +704,12 @@ let private isolateBootstrapEvidencePath
 let private isolateTrustedReceiptPath
     (receiptPath: string)
     (candidateRoot: string)
-    (preparationReceiptPath: string)
     (transportEvidencePath: string)
     : Result<string, ReleaseError> =
     let canonicalReceipt = Path.GetFullPath receiptPath
     let canonicalCandidate = Path.GetFullPath candidateRoot
-    let canonicalPrep = Path.GetFullPath preparationReceiptPath
     let canonicalTransport = Path.GetFullPath transportEvidencePath
     let canonicalCandidateReceipt = Path.GetFullPath(Path.Combine(canonicalCandidate, "receipt.json"))
-    let canonicalCandidatePrep = Path.GetFullPath(Path.Combine(canonicalCandidate, "preparation.json"))
     let sep = string Path.DirectorySeparatorChar
     let inside (inner: string) (outer: string) : bool =
         let comparison = StringComparison.OrdinalIgnoreCase
@@ -717,46 +717,11 @@ let private isolateTrustedReceiptPath
         elif inner.StartsWith(outer + sep, comparison) then true
         else false
     if canonicalReceipt = canonicalCandidateReceipt then
-        Error(MalformedArtifact("publish-cli", $"the publisher rejects --trusted-receipt '{receiptPath}': the trusted receipt path collides with the candidate's 'receipt.json'; the trusted publisher receipt, the preparation receipt, and the bootstrap receipt are three separate documents at three separate explicit paths"))
+        Error(MalformedArtifact("publish-cli", $"the publisher rejects --trusted-receipt '{receiptPath}': the trusted receipt path collides with the candidate's 'receipt.json'"))
     elif inside canonicalReceipt canonicalCandidate then
         Error(MalformedArtifact("publish-cli", $"the publisher rejects --trusted-receipt '{receiptPath}': the trusted receipt path must NOT be inside the candidate directory; a candidate cannot author its own trusted provenance"))
-    elif canonicalReceipt = canonicalCandidatePrep then
-        Error(MalformedArtifact("publish-cli", $"the publisher rejects --trusted-receipt '{receiptPath}': the trusted receipt path collides with the candidate's 'preparation.json'; preparation diagnostics is a separate document and must be supplied via --preparation-receipt"))
-    elif canonicalReceipt = canonicalPrep then
-        Error(MalformedArtifact("publish-cli", $"the publisher rejects --trusted-receipt '{receiptPath}': the trusted receipt path equals --preparation-receipt; the two receipts are separate documents at separate paths"))
     elif canonicalReceipt = canonicalTransport then
-        Error(MalformedArtifact("publish-cli", $"the publisher rejects --trusted-receipt '{receiptPath}': the trusted receipt path equals --transport-evidence; the two receipts are separate documents at separate paths"))
-    else
-        Ok canonicalReceipt
-
-let private isolatePreparationReceiptPath
-    (receiptPath: string)
-    (candidateRoot: string)
-    (trustedReceiptPath: string)
-    (transportEvidencePath: string)
-    : Result<string, ReleaseError> =
-    let canonicalReceipt = Path.GetFullPath receiptPath
-    let canonicalCandidate = Path.GetFullPath candidateRoot
-    let canonicalTrusted = Path.GetFullPath trustedReceiptPath
-    let canonicalTransport = Path.GetFullPath transportEvidencePath
-    let canonicalCandidatePrep = Path.GetFullPath(Path.Combine(canonicalCandidate, "preparation.json"))
-    let canonicalCandidateReceipt = Path.GetFullPath(Path.Combine(canonicalCandidate, "receipt.json"))
-    let sep = string Path.DirectorySeparatorChar
-    let inside (inner: string) (outer: string) : bool =
-        let comparison = StringComparison.OrdinalIgnoreCase
-        if inner = outer then true
-        elif inner.StartsWith(outer + sep, comparison) then true
-        else false
-    if canonicalReceipt = canonicalCandidatePrep then
-        Error(MalformedArtifact("publish-cli", $"the publisher rejects --preparation-receipt '{receiptPath}': the preparation receipt path collides with the candidate's 'preparation.json'; preparation diagnostics are separate from the candidate directory and must be supplied at an explicit external path"))
-    elif inside canonicalReceipt canonicalCandidate then
-        Error(MalformedArtifact("publish-cli", $"the publisher rejects --preparation-receipt '{receiptPath}': the preparation receipt path must NOT be inside the candidate directory; a candidate cannot author its own preparation diagnostics"))
-    elif canonicalReceipt = canonicalCandidateReceipt then
-        Error(MalformedArtifact("publish-cli", $"the publisher rejects --preparation-receipt '{receiptPath}': the preparation receipt path collides with the candidate's 'receipt.json'; the trusted publisher receipt is a separate document and must be supplied via --trusted-receipt"))
-    elif canonicalReceipt = canonicalTrusted then
-        Error(MalformedArtifact("publish-cli", $"the publisher rejects --preparation-receipt '{receiptPath}': the preparation receipt path equals --trusted-receipt; the two receipts are separate documents at separate paths"))
-    elif canonicalReceipt = canonicalTransport then
-        Error(MalformedArtifact("publish-cli", $"the publisher rejects --preparation-receipt '{receiptPath}': the preparation receipt path equals --transport-evidence; the two receipts are separate documents at separate paths"))
+        Error(MalformedArtifact("publish-cli", $"the publisher rejects --trusted-receipt '{receiptPath}': the trusted receipt path equals --transport-evidence"))
     else
         Ok canonicalReceipt
 
@@ -849,39 +814,6 @@ let private crossCheckReceipt
     | Some error -> Error error
     | None -> Ok ()
 
-let private crossCheckPreparation
-    (preparation: ReleaseHandoff.PreparationReceipt)
-    (snapshot: ReleaseHandoff.CandidateArchiveSnapshot)
-    : Result<unit, ReleaseError> =
-    let innerSha = snapshot.InnerArchiveSha256.Value
-    let innerSize = snapshot.InnerArchiveSize
-
-    let checkInnerSha () = crossCheckStrings "preparation.innerArchiveSha256" preparation.InnerArchiveSha256.Value innerSha
-    let checkInnerSize () = crossCheckStrings "preparation.innerArchiveSize" (string preparation.InnerArchiveSize) (string innerSize)
-
-    let standaloneSha = snapshot.ManifestSha256
-    let manifestSize = Option.defaultValue 0L snapshot.ManifestSize
-
-    let checkStandaloneSha (v: ReleaseHandoff.OuterDigest) =
-        crossCheckStrings "preparation.manifestSha256" preparation.ManifestSha256.Value v.Value
-
-    let checkStandaloneSize () =
-        crossCheckStrings "preparation.manifestSize" (string preparation.ManifestSize) (string manifestSize)
-
-    match checkInnerSha () with
-    | Error error -> Error error
-    | Ok () ->
-        match checkInnerSize () with
-        | Error error -> Error error
-        | Ok () ->
-            match standaloneSha with
-            | Some v ->
-                match checkStandaloneSha v with
-                | Error error -> Error error
-                | Ok () -> checkStandaloneSize ()
-            | None ->
-                Error(MalformedArtifact("publish", "the verified candidate archive is missing the canonical standalone manifest entry; refusing to publish"))
-
 let private crossCheckBootstrapReceipt
     (cli: PublishCli)
     (bootstrap: BootstrapReceipt)
@@ -967,10 +899,56 @@ let private buildEvidence
       TransportLength = outerLength
       RawTransportBytes = outerBytes }
 
-let private runPublishPipeline
+let private protectedDownloadDirectory
+    (cli: PublishCli)
+    : Result<string, ReleaseError> =
+    try
+        let canonicalPath (path: string) = Path.GetFullPath path
+        let candidatePath = canonicalPath cli.CandidateTransportPath
+        let candidateParent = Path.GetDirectoryName candidatePath
+        let downloadDirectory = canonicalPath (Path.Combine(candidateParent, "downloads"))
+        let workspace = canonicalPath cli.WorkspaceRoot
+        let trustedReceipt = canonicalPath cli.TrustedReceiptPath
+        let transportEvidence = canonicalPath cli.TransportEvidence
+        let separator = string Path.DirectorySeparatorChar
+        let overlaps (left: string) (right: string) =
+            let left = left.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+            let right = right.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+            let contains (inner: string) (outer: string) =
+                String.Equals(inner, outer, StringComparison.OrdinalIgnoreCase)
+                || inner.StartsWith(outer + separator, StringComparison.OrdinalIgnoreCase)
+            contains left right || contains right left
+
+        if [ workspace; trustedReceipt; transportEvidence ]
+           |> List.exists (overlaps downloadDirectory) then
+            Error(
+                MalformedArtifact(
+                    "publish-cache",
+                    "the publisher download cache overlaps the trusted workspace, trusted receipt, or transport evidence"))
+        elif File.Exists downloadDirectory then
+            Error(MalformedArtifact("publish-cache", "the publisher download cache path is an existing file"))
+        else
+            let mutable current = DirectoryInfo downloadDirectory
+            let mutable unsafeAncestor = false
+            while not (isNull current) && not unsafeAncestor do
+                if current.Exists && (current.Attributes &&& FileAttributes.ReparsePoint) <> enum<FileAttributes> 0 then
+                    unsafeAncestor <- true
+                current <- current.Parent
+
+            if unsafeAncestor then
+                Error(MalformedArtifact("publish-cache", "the publisher download cache has a reparse-point ancestor"))
+            else
+                Ok downloadDirectory
+    with
+    | :? IOException as error -> Error(FileFailure("resolve-cache", cli.CandidateTransportPath, error.Message))
+    | :? UnauthorizedAccessException as error -> Error(FileFailure("resolve-cache", cli.CandidateTransportPath, error.Message))
+    | :? ArgumentException as error -> Error(FileFailure("resolve-cache", cli.CandidateTransportPath, error.Message))
+    | :? NotSupportedException as error -> Error(FileFailure("resolve-cache", cli.CandidateTransportPath, error.Message))
+
+let private runPublishPipelineWithTransportFactory
+    (createTransport: unit -> ReleasePublish.HttpTransport)
     (cli: PublishCli)
     (policy: ReleasePolicy.PolicyProjection)
-    (preparation: ReleaseHandoff.PreparationReceipt)
     (snapshot: ReleaseHandoff.CandidateArchiveSnapshot)
     (candidateArchiveName: string)
     (metadataLocalPath: string)
@@ -978,70 +956,82 @@ let private runPublishPipeline
     (repositoryName: string)
     : Async<int> =
     async {
-        match crossCheckPreparation preparation snapshot with
+        match! ReleaseEvaluate.VerifiedCandidate.createFromSnapshot
+                    snapshot policy candidateArchiveName cli.EventSha metadataLocalPath repositoryOwner repositoryName with
         | Error error ->
             emitPreContractFailure (ReleaseError.message error)
             return 4
-        | Ok () ->
-            match! ReleaseEvaluate.VerifiedCandidate.createFromSnapshot
-                        snapshot policy candidateArchiveName cli.EventSha metadataLocalPath repositoryOwner repositoryName with
-            | Error error ->
-                emitPreContractFailure (ReleaseError.message error)
-                return 4
-            | Ok verified ->
+        | Ok verified ->
                 let locator : ReleasePublish.ReleaseLocator =
                     { Owner = repositoryOwner
                       Repository = repositoryName
-                      Tag = "v" + policy.Version }
+                      Tag = policy.ComponentId }
 
-                let transport = ReleasePublish.defaultHttpTransport ()
-                let downloadDir = Path.Combine(cli.WorkspaceRoot, "infrastructure", "release", "downloads")
-
-                if not (Directory.Exists downloadDir) then
-                    Directory.CreateDirectory downloadDir |> ignore
-
-                match ReleasePublish.environmentToken () with
-                | Error _ ->
-                    let useGitHub = false
-                    let! result =
-                        ReleaseTransaction.run
-                            transport
-                            None
-                            useGitHub
-                            downloadDir
-                            locator
-                            verified
-                    match result with
+                // Require both independent publication authorities before creating transport or filesystem state.
+                if Environment.GetEnvironmentVariable "MCP_RELEASE_DO_UPLOAD" <> "true" then
+                    let error =
+                        FileFailure(
+                            "auth",
+                            "MCP_RELEASE_DO_UPLOAD",
+                            "publication requires the exact value 'true'; local-mirror and implicit modes are not supported")
+                    emitPreContractFailure (ReleaseError.message error)
+                    return 4
+                else
+                    match ReleasePublish.environmentToken () with
                     | Error error ->
                         emitPreContractFailure (ReleaseError.message error)
                         return 4
-                    | Ok (resolution, exitCode) ->
-                        emitResolution resolution
-                        return exitCode
-                | Ok auth ->
-                    let useGitHub = true
-                    let! result =
-                        ReleaseTransaction.run
-                            transport
-                            (Some auth)
-                            useGitHub
-                            downloadDir
-                            locator
-                            verified
-                    match result with
-                    | Error error ->
-                        emitPreContractFailure (ReleaseError.message error)
-                        return 4
-                    | Ok (resolution, exitCode) ->
-                        emitResolution resolution
-                        return exitCode
+                    | Ok auth ->
+                        match protectedDownloadDirectory cli with
+                        | Error error ->
+                            emitPreContractFailure (ReleaseError.message error)
+                            return 4
+                        | Ok downloadDir ->
+                            // Keep transport construction and cache creation behind path and authority checks.
+                            let transport = createTransport ()
+                            if not (Directory.Exists downloadDir) then
+                                Directory.CreateDirectory downloadDir |> ignore
+
+                            let! result =
+                                ReleaseTransaction.run
+                                    transport
+                                    (Some auth)
+                                    true
+                                    downloadDir
+                                    locator
+                                    verified
+                            match result with
+                            | Error error ->
+                                emitPreContractFailure (ReleaseError.message error)
+                                return 4
+                            | Ok (resolution, exitCode) ->
+                                emitResolution resolution
+                                return exitCode
     }
+
+let private runPublishPipeline
+    (cli: PublishCli)
+    (policy: ReleasePolicy.PolicyProjection)
+    (snapshot: ReleaseHandoff.CandidateArchiveSnapshot)
+    (candidateArchiveName: string)
+    (metadataLocalPath: string)
+    (repositoryOwner: string)
+    (repositoryName: string)
+    : Async<int> =
+    runPublishPipelineWithTransportFactory
+        (fun () -> ReleasePublish.defaultHttpTransport ())
+        cli
+        policy
+        snapshot
+        candidateArchiveName
+        metadataLocalPath
+        repositoryOwner
+        repositoryName
 
 type private VerifiedWorkspace =
     { Cli: PublishCli
       Closure: ReleasePublisherClosure.PublisherClosure
       Receipt: ReleaseHandoff.TrustedPublisherReceipt
-      Preparation: ReleaseHandoff.PreparationReceipt
       Bootstrap: BootstrapReceipt
       Policy: ReleasePolicy.PolicyProjection
       CandidateRoot: string
@@ -1077,34 +1067,20 @@ let private loadTrustedReceipt
     (cli: PublishCli)
     (candidateRoot: string)
     : Result<ReleaseHandoff.TrustedPublisherReceipt, ReleaseError> =
-    match isolateTrustedReceiptPath cli.TrustedReceiptPath candidateRoot cli.PreparationReceiptPath cli.TransportEvidence with
+    match isolateTrustedReceiptPath cli.TrustedReceiptPath candidateRoot cli.TransportEvidence with
     | Error error -> Error error
     | Ok canonicalPath ->
         match loadReceiptText canonicalPath with
         | Error error -> Error error
         | Ok text -> ReleaseHandoff.parseTrustedPublisherReceipt text canonicalPath
 
-let private loadPreparationReceipt
-    (cli: PublishCli)
-    (candidateRoot: string)
-    : Result<ReleaseHandoff.PreparationReceipt, ReleaseError> =
-    match isolatePreparationReceiptPath cli.PreparationReceiptPath candidateRoot cli.TrustedReceiptPath cli.TransportEvidence with
-    | Error error -> Error error
-    | Ok canonicalPath ->
-        match loadReceiptText canonicalPath with
-        | Error error -> Error error
-        | Ok text -> ReleaseHandoff.parsePreparationReceipt text canonicalPath
-
 let private loadReceipts
     (cli: PublishCli)
     (candidateRoot: string)
-    : Result<ReleaseHandoff.TrustedPublisherReceipt * ReleaseHandoff.PreparationReceipt, ReleaseError> =
+    : Result<ReleaseHandoff.TrustedPublisherReceipt, ReleaseError> =
     match loadTrustedReceipt cli candidateRoot with
     | Error error -> Error error
-    | Ok receipt ->
-        match loadPreparationReceipt cli candidateRoot with
-        | Error error -> Error error
-        | Ok preparation -> Ok(receipt, preparation)
+    | Ok receipt -> Ok receipt
 
 let private loadAndVerifyBootstrapReceipt
     (cli: PublishCli)
@@ -1138,24 +1114,53 @@ let private verifyRosterHash
             Ok ()
 
 let private verifyOuterTransport
-    (candidateRoot: string)
-    (policy: ReleasePolicy.PolicyProjection)
+    (candidateTransportPath: string)
+    (bootstrap: BootstrapReceipt)
     (cli: PublishCli)
     : Result<byte[] * string, ReleaseError> =
-    let candidateArchiveName = policy.ArchiveName
-    let candidateArchiveFullPath = Path.Combine(candidateRoot, candidateArchiveName)
-    match loadCandidateBytes candidateArchiveFullPath with
-    | Error error -> Error error
-    | Ok outerBytes ->
-        if not (isLowerHex64 cli.TransportSha256) then
+    try
+        let info = FileInfo candidateTransportPath
+        if not info.Exists then Error(MissingArtifact candidateTransportPath)
+        elif info.Length > ReleaseHandoff.outerTransportMaxBytes then
+            Error(MalformedArtifact(candidateTransportPath, $"the raw candidate transport exceeds the {ReleaseHandoff.outerTransportMaxBytes}-byte bounded read"))
+        elif not (isLowerHex64 cli.TransportSha256) then
             let detail = "the publish CLI --transport-sha256 '" + cli.TransportSha256 + "' is not a 64-character lowercase hex SHA-256"
             Error(MalformedArtifact("publish-cli", detail))
         else
-            let observedDigest = hashBytes outerBytes
-            if observedDigest <> cli.TransportSha256 then
-                Error(IdentityMismatch("transport-sha256", cli.TransportSha256, observedDigest))
+            use input = new FileStream(candidateTransportPath, FileMode.Open, FileAccess.Read, FileShare.Read)
+            use output = new MemoryStream()
+            let buffer = Array.zeroCreate<byte> 81920
+            let mutable total = 0L
+            let mutable finished = false
+            let mutable oversized = false
+            while not finished && not oversized do
+                let read = input.Read(buffer, 0, buffer.Length)
+                if read = 0 then finished <- true
+                else
+                    total <- total + int64 read
+                    if total > ReleaseHandoff.outerTransportMaxBytes then oversized <- true
+                    else output.Write(buffer, 0, read)
+            if oversized then
+                Error(MalformedArtifact(candidateTransportPath, $"the raw candidate transport exceeds the {ReleaseHandoff.outerTransportMaxBytes}-byte bounded read"))
             else
-                Ok(outerBytes, observedDigest)
+                let outerBytes = output.ToArray()
+                let observedDigest = hashBytes outerBytes
+                let observedSize = int64 outerBytes.Length
+                let sizeChecks =
+                    [ crossCheckStrings "bootstrap.artifact.sizeInBytes" (string bootstrap.ArtifactSizeInBytes) (string observedSize)
+                      crossCheckStrings "bootstrap.download.bytesRead" (string bootstrap.DownloadBytesRead) (string observedSize) ]
+                let digestChecks =
+                    [ crossCheckStrings "transport-sha256" cli.TransportSha256 observedDigest
+                      crossCheckStrings "bootstrap.download.observedSha256" bootstrap.DownloadObservedSha256 observedDigest
+                      crossCheckStrings "bootstrap.artifact.apiDigest" bootstrap.ArtifactApiDigest observedDigest
+                      crossCheckStrings "bootstrap.artifact.platformDigest" bootstrap.ArtifactPlatformDigest observedDigest ]
+                match List.tryPick (function Error error -> Some error | Ok () -> None) (sizeChecks @ digestChecks) with
+                | Some error -> Error error
+                | None ->
+                    Ok(outerBytes, observedDigest)
+    with
+    | :? IOException as error -> Error(FileFailure("read", candidateTransportPath, error.Message))
+    | :? UnauthorizedAccessException as error -> Error(FileFailure("read", candidateTransportPath, error.Message))
 
 let private verifyCommittedHead
     (cli: PublishCli)
@@ -1178,8 +1183,8 @@ let private readSnapshot
     (outerBytes: byte[])
     (outerDigestValue: string)
     : Result<ReleaseHandoff.CandidateArchiveSnapshot, ReleaseError> =
-    let evidence = buildEvidence cli bootstrap candidateArchiveName outerDigestValue (int64 outerBytes.Length) outerBytes
-    ReleaseHandoff.readRawTransport candidateArchiveName outerBytes evidence policy
+    let evidence = buildEvidence cli bootstrap cli.CandidateTransportPath outerDigestValue (int64 outerBytes.Length) outerBytes
+    ReleaseHandoff.readRawTransport cli.CandidateTransportPath outerBytes evidence policy
 
 let private verifyWorkspace (cli: PublishCli) : Async<Result<VerifiedWorkspace, ReleaseError>> =
     async {
@@ -1189,15 +1194,16 @@ let private verifyWorkspace (cli: PublishCli) : Async<Result<VerifiedWorkspace, 
             match splitCanonical cli with
             | Error error -> return Error error
             | Ok (cliOwner, cliName) ->
-                match boundedDirectory cli.CandidateDirectory with
+                match boundedTransportPath cli.CandidateTransportPath with
                 | Error error -> return Error error
-                | Ok candidateRoot ->
+                | Ok (candidateTransportPath, candidateRoot) ->
+                    let cli = { cli with CandidateTransportPath = candidateTransportPath }
                     match loadAndVerifyBootstrapReceipt cli candidateRoot with
                     | Error error -> return Error error
                     | Ok bootstrap ->
                         match loadReceipts cli candidateRoot with
                         | Error error -> return Error error
-                        | Ok (receipt, preparation) ->
+                        | Ok receipt ->
                             match crossCheckReceipt cli closure receipt with
                             | Error error -> return Error error
                             | Ok () ->
@@ -1207,7 +1213,7 @@ let private verifyWorkspace (cli: PublishCli) : Async<Result<VerifiedWorkspace, 
                                     match reconcilePolicyWithReceipt cli.ProducerComponent cli.WorkspaceRoot receipt with
                                     | Error error -> return Error error
                                     | Ok (policy, _, _) ->
-                                        match verifyOuterTransport candidateRoot policy cli with
+                                        match verifyOuterTransport candidateTransportPath bootstrap cli with
                                         | Error error -> return Error error
                                         | Ok (outerBytes, outerDigestValue) ->
                                             match! verifyCommittedHead cli with
@@ -1229,7 +1235,6 @@ let private verifyWorkspace (cli: PublishCli) : Async<Result<VerifiedWorkspace, 
                                                                 { Cli = cli
                                                                   Closure = closure
                                                                   Receipt = receipt
-                                                                  Preparation = preparation
                                                                   Bootstrap = bootstrap
                                                                   Policy = policy
                                                                   CandidateRoot = candidateRoot
@@ -1245,7 +1250,7 @@ let private verifyWorkspace (cli: PublishCli) : Async<Result<VerifiedWorkspace, 
 let private runPublishMode (argv: string[]) : Async<int> =
     async {
         if argv.Length < 3 then
-            eprintfn "usage: ReleaseRunner publish <publisher-closure-path> <candidate-directory> --repo=<owner>/<name> --run-id=<id> --attempt=<n> --event-sha=<40-hex> --role=<candidate> --component=<dotnet|workflow> --artifact-id=<id> --artifact-name=<name> --transport-sha256=<actual-64-hex> --builder-sdk=<x> --builder-runtime=<y> --builder-platform=<z> --workspace-root=<path> --trusted-receipt=<builder-emitted-receipt.json> --preparation-receipt=<candidate-prep-diagnostics.json> --transport-evidence=<fetchcandidate-bootstrap-receipt.json> [--trigger=<event>]"
+            eprintfn "usage: ReleaseRunner publish <publisher-closure-path> <candidate-transport.zip> --repo=<owner>/<name> --run-id=<id> --attempt=<n> --event-sha=<40-hex> --role=<candidate> --component=<dotnet|workflow> --artifact-id=<id> --artifact-name=<name> --transport-sha256=<actual-64-hex> --builder-sdk=<x> --builder-runtime=<y> --builder-platform=<z> --workspace-root=<source-root> --trusted-receipt=<builder-emitted-receipt.json> --transport-evidence=<fetchcandidate-bootstrap-receipt.json> [--trigger=<event>]"
             return 2
         else
             match parsePublishCli argv with
@@ -1262,7 +1267,6 @@ let private runPublishMode (argv: string[]) : Async<int> =
                         runPublishPipeline
                             verified.Cli
                             verified.Policy
-                            verified.Preparation
                             verified.Snapshot
                             verified.CandidateArchiveName
                             verified.MetadataLocalPath
@@ -1274,13 +1278,14 @@ let private runPublishMode (argv: string[]) : Async<int> =
 let main argv =
     if argv.Length = 0 then
         eprintfn "usage: ReleaseRunner prepare <config-path> <candidate-directory>"
-        eprintfn "usage: ReleaseRunner publish <publisher-closure-path> <candidate-directory> --repo=<owner>/<name> --run-id=<id> --attempt=<n> --event-sha=<40-hex> --role=<candidate> --component=<dotnet|workflow> --artifact-id=<id> --artifact-name=<name> --transport-sha256=<actual-64-hex> --builder-sdk=<x> --builder-runtime=<y> --builder-platform=<z> --workspace-root=<path> --trusted-receipt=<builder-emitted-receipt.json> --preparation-receipt=<candidate-prep-diagnostics.json> --transport-evidence=<fetchcandidate-bootstrap-receipt.json> [--trigger=<event>]"
+        eprintfn "usage: ReleaseRunner publish <publisher-closure-path> <candidate-transport.zip> --repo=<owner>/<name> --run-id=<id> --attempt=<n> --event-sha=<40-hex> --role=<candidate> --component=<dotnet|workflow> --artifact-id=<id> --artifact-name=<name> --transport-sha256=<actual-64-hex> --builder-sdk=<x> --builder-runtime=<y> --builder-platform=<z> --workspace-root=<source-root> --trusted-receipt=<builder-emitted-receipt.json> --transport-evidence=<fetchcandidate-bootstrap-receipt.json> [--trigger=<event>]"
         2
     elif argv.[0] = "prepare" then
+        // the compiled CLI must finish its asynchronous operation before exiting
         runPrepareMode argv |> Async.RunSynchronously
     elif argv.[0] = "publish" then
         runPublishMode argv |> Async.RunSynchronously
     else
         eprintfn "usage: ReleaseRunner prepare <config-path> <candidate-directory>"
-        eprintfn "usage: ReleaseRunner publish <publisher-closure-path> <candidate-directory> --repo=<owner>/<name> --run-id=<id> --attempt=<n> --event-sha=<40-hex> --role=<candidate> --component=<dotnet|workflow> --artifact-id=<id> --artifact-name=<name> --transport-sha256=<actual-64-hex> --builder-sdk=<x> --builder-runtime=<y> --builder-platform=<z> --workspace-root=<path> --trusted-receipt=<builder-emitted-receipt.json> --preparation-receipt=<candidate-prep-diagnostics.json> --transport-evidence=<fetchcandidate-bootstrap-receipt.json> [--trigger=<event>]"
+        eprintfn "usage: ReleaseRunner publish <publisher-closure-path> <candidate-transport.zip> --repo=<owner>/<name> --run-id=<id> --attempt=<n> --event-sha=<40-hex> --role=<candidate> --component=<dotnet|workflow> --artifact-id=<id> --artifact-name=<name> --transport-sha256=<actual-64-hex> --builder-sdk=<x> --builder-runtime=<y> --builder-platform=<z> --workspace-root=<source-root> --trusted-receipt=<builder-emitted-receipt.json> --transport-evidence=<fetchcandidate-bootstrap-receipt.json> [--trigger=<event>]"
         2

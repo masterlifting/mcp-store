@@ -40,8 +40,8 @@ let private topLevelBridgeSites =
     Map.ofList
         [ "infrastructure/release/Bootstrap.fsx", [ "match verify root |> Async.RunSynchronously with" ]
           "infrastructure/release/Runner.fs",
-          [ "runOrchestrateMode argv |> Async.RunSynchronously"
-            "runTransactionMode argv |> Async.RunSynchronously" ]
+          [ "runPrepareMode argv |> Async.RunSynchronously"
+            "runPublishMode argv |> Async.RunSynchronously" ]
           "dotnet/release/Build.fsx", [ "match run () |> Async.RunSynchronously with" ]
           "dotnet/release/Pins.fsx", [ "match run () |> Async.RunSynchronously with" ]
           "dotnet/tests/DistributionTests.fsx", [ "|> Async.RunSynchronously" ]
@@ -300,7 +300,8 @@ let private documentedBridge (relative: string) (code: string) (lines: string ar
             let trimmed = comment.Trim()
             trimmed.StartsWith("//", StringComparison.Ordinal)
             && (trimmed.Contains("Standalone entry bridge", StringComparison.Ordinal)
-                || trimmed = "// FSI needs one synchronous top-level entry for the asynchronous script."))
+                || trimmed = "// FSI needs one synchronous top-level entry for the asynchronous script."
+                || trimmed = "// the compiled CLI must finish its asynchronous operation before exiting"))
 
     if exactSites && documentation then Some "documented standalone entry bridge" else None
 

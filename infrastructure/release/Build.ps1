@@ -1,7 +1,6 @@
 #requires -Version 7.0
-# role: trusted builder transport glue
-# Stage validates the audited closures, stages the Sources.json closure outside the checkout and restores it with an authored project-local import; Emit hashes the compiled runtime into the manifest, inner envelope, outer transport and trusted publisher receipt.
-# It holds no producer policy, transaction, upload, producer-script or FSI logic, and never parses a producer Config.fsx.
+# Stage validates the audited closures and restores the Sources.json closure outside the checkout; Emit hashes the compiled runtime into runtime-manifest.json, the inner envelope and the trusted publisher receipt that the platform uploads as exactly those three direct members.
+# The builder holds no producer policy, transaction, upload, producer-script or FSI logic, never parses a producer Config.fsx, and never predicts the platform outer digest.
 
 [CmdletBinding()]
 param(
@@ -36,7 +35,7 @@ param(
     [string]$Configuration = "Release",
     [string]$EnvelopeName = "publisher-runtime.zip",
     [string]$ManifestName = "runtime-manifest.json",
-    [string]$OuterName = "publisher-transport.zip",
+    [string]$TrustedReceiptName = "receipt.json",
     [string]$RequiredRuntimeFile = "ReleaseRunner.exe"
 )
 
@@ -154,7 +153,9 @@ $outputFull = [System.IO.Path]::GetFullPath($OutputRoot)
 if (-not (Test-Path -LiteralPath $rootFull)) { throw "the checkout root does not exist: $rootFull" }
 if ([string]::IsNullOrWhiteSpace($EnvelopeName) -or $EnvelopeName.Contains("/") -or $EnvelopeName.Contains("\")) { throw "the envelope name must be a single relative name: '$EnvelopeName'" }
 if ([string]::IsNullOrWhiteSpace($ManifestName) -or $ManifestName.Contains("/") -or $ManifestName.Contains("\")) { throw "the manifest name must be a single relative name: '$ManifestName'" }
-if ($EnvelopeName -ceq $ManifestName) { throw "the envelope and manifest names must differ" }
+if ([string]::IsNullOrWhiteSpace($TrustedReceiptName) -or $TrustedReceiptName.Contains("/") -or $TrustedReceiptName.Contains("\")) { throw "the trusted receipt name must be a single relative name: '$TrustedReceiptName'" }
+# The three members travel as flat siblings in one platform artifact, so equal or case-colliding names would silently overwrite each other at upload.
+if (@(@($EnvelopeName, $ManifestName, $TrustedReceiptName) | Sort-Object -Unique).Count -ne 3) { throw "the envelope, manifest and trusted receipt names must be distinct" }
 
 Assert-RootSeparation -RootFull $rootFull -StageFull $stageFull -OutputFull $outputFull
 
@@ -262,17 +263,11 @@ $manifestPath = Join-Path $outputFull $ManifestName
 # ToArray, not @(): the New-Object list carries a [psobject] wrapper that the array-subexpression binder rejects with 'Argument types do not match' on PowerShell 7.5/7.6.
 Set-Content -LiteralPath $manifestPath -Value ([ordered]@{ schemaVersion = $script:ManifestSchemaVersion; files = $manifestEntries.ToArray() } | ConvertTo-Json -Depth 8) -Encoding utf8
 
-# The inner envelope is authored here; the outer platform zip is created later by actions/upload-artifact, so the two digests stay in separate namespaces.
+# The inner envelope is authored here; the platform assembles the three direct members at upload time, so the outer digest stays an upload-dependent value the builder never predicts or authors.
 $envelopeEntries = [ordered]@{}
 foreach ($name in $runtimeFiles) { $envelopeEntries[$name] = Join-Path $publishRootFull ($name.Replace("/", $script:Separator)) }
 $envelopePath = Join-Path $outputFull $EnvelopeName
 New-DeterministicZip -Destination $envelopePath -Entries $envelopeEntries
-
-$outerEntries = [ordered]@{}
-$outerEntries[$EnvelopeName] = $envelopePath
-$outerEntries[$ManifestName] = $manifestPath
-$outerPath = Join-Path $outputFull $OuterName
-New-DeterministicZip -Destination $outerPath -Entries $outerEntries
 
 $envelopeSha = Get-FileSha256Hex -Path $envelopePath
 $manifestSha = Get-FileSha256Hex -Path $manifestPath
@@ -318,14 +313,23 @@ $receipt = [ordered]@{
     builderRuntime       = $BuilderRuntime
     builderPlatform      = $BuilderPlatform
 }
-$receiptPath = Join-Path $outputFull "receipt.json"
+$receiptPath = Join-Path $outputFull $TrustedReceiptName
 Set-Content -LiteralPath $receiptPath -Value ($receipt | ConvertTo-Json -Depth 8) -Encoding utf8
 
+# The receipt SHA-256 is an independent expectation the bootstrap authenticates the uploaded member bytes against; the receipt hashes neither itself nor the envelope, so no member of the transport authenticates itself.
+$receiptSha = Get-FileSha256Hex -Path $receiptPath
+
+Write-OutputLine -Key "envelopeName" -Value $EnvelopeName
+Write-OutputLine -Key "manifestName" -Value $ManifestName
+Write-OutputLine -Key "trustedReceiptName" -Value $TrustedReceiptName
 Write-OutputLine -Key "envelopeSha256" -Value $envelopeSha
 Write-OutputLine -Key "manifestSha256" -Value $manifestSha
-Write-OutputLine -Key "expectedOuterEntries" -Value (ConvertTo-Json -Compress -InputObject @($EnvelopeName, $ManifestName))
-Write-OutputLine -Key "outerTransportPath" -Value $outerPath
+Write-OutputLine -Key "receiptSha256" -Value $receiptSha
+Write-OutputLine -Key "expectedOuterEntries" -Value (ConvertTo-Json -Compress -InputObject @($EnvelopeName, $ManifestName, $TrustedReceiptName))
+Write-OutputLine -Key "envelopePath" -Value $envelopePath
+Write-OutputLine -Key "manifestPath" -Value $manifestPath
+Write-OutputLine -Key "trustedReceiptPath" -Value $receiptPath
 
-Write-Host ("builder emit ok: runtimeFiles={0} envelopeSha256={1} manifestSha256={2}" -f $runtimeFiles.Count, $envelopeSha, $manifestSha)
-Write-Host ("builder outputs: outer={0} manifest={1} receipt={2}" -f $outerPath, $manifestPath, $receiptPath)
+Write-Host ("builder emit ok: runtimeFiles={0} envelopeSha256={1} manifestSha256={2} receiptSha256={3}" -f $runtimeFiles.Count, $envelopeSha, $manifestSha, $receiptSha)
+Write-Host ("builder outputs: envelope={0} manifest={1} receipt={2}" -f $envelopePath, $manifestPath, $receiptPath)
 exit 0

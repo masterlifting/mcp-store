@@ -80,11 +80,15 @@ let private missingIndependentClosure =
     testCaseAsync "missingIndependentClosure" <| async {
         Expect.isTrue (File.Exists runnerPath) $"runner binary exists at {runnerPath}"
         let fixtureRoot = Fixture.newTempDir "mcp-runner-publisher-closure"
-        let candidateRoot = Path.Combine(fixtureRoot, "candidate")
-        Directory.CreateDirectory candidateRoot |> ignore
+        // The publisher closure must be the FIRST verification failure; the candidate transport
+        // is a zero-byte raw-file stub that satisfies boundedTransportPath (directory-or-file +
+        // exists check) without containing a valid outer ZIP. Transport-byte verification never
+        // runs because loadClosure fails before verifyOuterTransport; the missing closure
+        // remains the typed and actual precondition that blocks publication.
         let closurePath = Path.Combine(fixtureRoot, "missing-publisher.json")
+        let candidateTransportPath = Path.Combine(fixtureRoot, "candidate-transport.zip")
+        File.WriteAllBytes(candidateTransportPath, Array.empty)
         let trustedReceiptPath = Path.Combine(fixtureRoot, "trusted-publisher-receipt.json")
-        let preparationReceiptPath = Path.Combine(fixtureRoot, "preparation-receipt.json")
         let transportEvidencePath = Path.Combine(fixtureRoot, "fetch-candidate-bootstrap-receipt.json")
         let transportSha256 = String.replicate 64 "a"
         let eventSha = Fixture.canonicalEvaluatedRevision
@@ -107,7 +111,7 @@ let private missingIndependentClosure =
         artifact["name"] <- JsonValue.Create "controlled-candidate"
         artifact["role"] <- JsonValue.Create "candidate"
         artifact["component"] <- JsonValue.Create "dotnet"
-        artifact["sizeInBytes"] <- JsonValue.Create 1
+        artifact["sizeInBytes"] <- JsonValue.Create 0
         artifact["expired"] <- JsonValue.Create false
         artifact["apiDigestRaw"] <- JsonValue.Create ($"sha256:{transportSha256}")
         artifact["apiDigest"] <- JsonValue.Create transportSha256
@@ -118,8 +122,8 @@ let private missingIndependentClosure =
         let download = JsonObject()
         download["redirectHost"] <- JsonValue.Create "objects.githubusercontent.com"
         download["redirectCode"] <- JsonValue.Create 302
-        download["bytesRead"] <- JsonValue.Create 1
-        download["platformBytes"] <- JsonValue.Create 1
+        download["bytesRead"] <- JsonValue.Create 0
+        download["platformBytes"] <- JsonValue.Create 0
         download["observedSha256"] <- JsonValue.Create transportSha256
         bootstrapReceipt["download"] <- download
 
@@ -146,7 +150,7 @@ let private missingIndependentClosure =
         bootstrapReceipt["runAttemptObservation"] <- runAttemptObservation
 
         try
-            // Valid evidence keeps this closure regression independent of later FetchCandidate validation.
+            // Valid transport-evidence keeps this closure regression independent of later FetchCandidate validation.
             let workspaceRoot = Path.GetFullPath repositoryRoot
             let workspacePrefix =
                 workspaceRoot.TrimEnd([| Path.DirectorySeparatorChar; Path.AltDirectorySeparatorChar |])
@@ -160,7 +164,7 @@ let private missingIndependentClosure =
             let args =
                 [ "publish"
                   closurePath
-                  candidateRoot
+                  candidateTransportPath
                   "--repo=masterlifting/mcp-store"
                   "--run-id=controlled-run"
                   "--attempt=1"
@@ -175,7 +179,6 @@ let private missingIndependentClosure =
                   "--builder-platform=controlled-platform"
                   $"--workspace-root={repositoryRoot}"
                   $"--trusted-receipt={trustedReceiptPath}"
-                  $"--preparation-receipt={preparationReceiptPath}"
                   $"--transport-evidence={transportEvidencePath}" ]
             let info = ProcessStartInfo(runnerPath)
             info.WorkingDirectory <- repositoryRoot
