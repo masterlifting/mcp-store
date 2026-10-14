@@ -106,7 +106,7 @@ The distribution scripts are component-local: they emit only Workflow artifacts.
 The .NET MCP has its own producer boundary under `dotnet/` and its release is
 not part of the Workflow bootstrap.
 
-The v1 release build produces the immutable `v1.0.3.zip`
+The v1 release build produces the immutable `v1.0.4.zip`
 framework-dependent `net11.0` distribution. The archive filename encodes the
 version only; the producer identity already comes from the producer directory,
 the manifest `id`, the project/assembly identity, the release context, and
@@ -119,14 +119,14 @@ dotnet build workflow/Mcp.Workflow.fsproj -c Release
 dotnet run --project workflow/Mcp.Workflow.fsproj -c Release --no-build
 ```
 
-For the immutable `v1.0.3.zip` asset, run
+For the immutable `v1.0.4.zip` asset, run
 `dotnet fsi workflow/release/Build.fsx`, then
 `dotnet fsi workflow/release/Pins.fsx`, and verify with
 `dotnet fsi workflow/tests/DistributionTests.fsx`. The build stages only
 `workflow/Mcp.Workflow.fsproj` under `workflow/dist/workflow/` and emits:
 
 ```text
-workflow/dist/v1.0.3.zip
+workflow/dist/v1.0.4.zip
 workflow/dist/workflow/distribution.json
 workflow/dist/consumer-pins.json
 ```
@@ -139,6 +139,13 @@ archive is allowlisted to the runtime DLL, its framework-dependent metadata,
 apphost files are rejected. Regeneration removes only the workflow v1 staging
 directory. Packaging refuses to run from a dirty source tree and stamps each
 manifest with the clean `HEAD` revision it built from.
+
+**Packaging provenance gate.** The definitive `v1.0.4.zip` asset and its
+`consumer-pins.json` must be produced only after this version-bump PR merges,
+from a clean fresh working tree on the final `main` committed revision. No
+packaging run, archive, or pin generation occurs from the PR branch or any
+pre-merge state, and this gate adds no new packaging tooling or automatic
+consumer updates.
 
 The manifest uses deterministic arrays: `files` contains `{ "path", "sha256" }`
 objects for the runtime allowlist. `path` is an exact slash-separated,
@@ -168,10 +175,11 @@ overlay ID, rewording guidance, or accidentally omitting an overlay does.
 
 ## Migration safety policy
 
-This release removes the built-in `opencode` identity and rewires discovery to
-`<project-root>/.workflow/profiles`. The producer performs **no implicit
-migration**: new tasks use `harness`; legacy tasks keep their stored identity
-and fingerprint until a deterministic, authorized operation changes them.
+The 1.0.3 release removed the built-in `opencode` identity and rewired
+discovery to `<project-root>/.workflow/profiles`. The producer performs **no
+implicit migration**: new tasks use `harness`; legacy tasks keep their stored
+identity and fingerprint until a deterministic, authorized operation changes
+them.
 
 ### Draft tasks with a legacy profile
 
