@@ -1,6 +1,6 @@
 {
   "participants": [
-    { "componentId": "dotnet", "configPath": "dotnet/release/Config.fsx" },
-    { "componentId": "workflow", "configPath": "workflow/release/Config.fsx" }
+    { "componentId": "dotnet", "configPath": "dotnet/release/Config.json" },
+    { "componentId": "workflow", "configPath": "workflow/release/Config.json" }
   ]
 }

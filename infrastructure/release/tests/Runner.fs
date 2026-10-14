@@ -17,7 +17,7 @@ let private runnerPath =
     Path.Combine(repositoryRoot, "infrastructure", "release", "bin", "Release", "net11.0", "ReleaseRunner.exe")
 
 let private readCanonicalPolicy componentId =
-    let path = Path.Combine(repositoryRoot, componentId, "release", "Config.fsx")
+    let path = Path.Combine(repositoryRoot, componentId, "release", "Config.json")
     ReleasePolicy.parseBytes path (File.ReadAllBytes path)
     |> function
         | Ok policy -> policy
@@ -76,136 +76,172 @@ let private runnerEmptyArgumentsReturnUsage =
             Expect.isTrue (stderr.Contains("usage: ReleaseRunner publish", StringComparison.Ordinal)) "publish usage is shown"
     }
 
-let private missingIndependentClosure =
-    testCaseAsync "missingIndependentClosure" <| async {
-        Expect.isTrue (File.Exists runnerPath) $"runner binary exists at {runnerPath}"
-        let fixtureRoot = Fixture.newTempDir "mcp-runner-publisher-closure"
-        // The publisher closure must be the FIRST verification failure; the candidate transport
-        // is a zero-byte raw-file stub that satisfies boundedTransportPath (directory-or-file +
-        // exists check) without containing a valid outer ZIP. Transport-byte verification never
-        // runs because loadClosure fails before verifyOuterTransport; the missing closure
-        // remains the typed and actual precondition that blocks publication.
-        let closurePath = Path.Combine(fixtureRoot, "missing-publisher.json")
-        let candidateTransportPath = Path.Combine(fixtureRoot, "candidate-transport.zip")
-        File.WriteAllBytes(candidateTransportPath, Array.empty)
-        let trustedReceiptPath = Path.Combine(fixtureRoot, "trusted-publisher-receipt.json")
-        let transportEvidencePath = Path.Combine(fixtureRoot, "fetch-candidate-bootstrap-receipt.json")
-        let transportSha256 = String.replicate 64 "a"
-        let eventSha = Fixture.canonicalEvaluatedRevision
+// WHY: the modern publish context enforces (a) the canonical --repo value, (b) a 40-char
+//   lowercase hex --event-sha, (c) the exact-three required flags, (d) no unknown or
+//   duplicate flag, (e) candidate-directory outside the trusted checkout, (f) registered
+//   policy via the roster, and (g) HEAD == --event-sha. Each regression below exercises one
+//   real failure path; an unknown flag or unknown receipt claim is rejected with a typed
+//   preauth refusal, exit 4. No legacy bootstrap-receipt gate is exercised.
+let private runnerPublishRejectsWrongRepo = testCaseAsync "publish rejects a non-canonical --repo" <| async {
+    Expect.isTrue (File.Exists runnerPath) $"runner binary exists at {runnerPath}"
+    let args =
+        [ "publish"
+          "dotnet/release/Config.json"
+          (Path.Combine(Path.GetTempPath(), "candidate"))
+          "--workspace-root=" + repositoryRoot
+          "--event-sha=3612e8e6dd4655543e6d4b9dc0edee9c24b82bf1"
+          "--repo=other-owner/mcp-store" ]
+    let info = ProcessStartInfo(runnerPath)
+    info.WorkingDirectory <- repositoryRoot
+    info.UseShellExecute <- false
+    info.RedirectStandardOutput <- true
+    info.RedirectStandardError <- true
+    info.CreateNoWindow <- true
+    args |> List.iter info.ArgumentList.Add
+    [ "GITHUB_TOKEN"; "GH_TOKEN"; "MCP_RELEASE_DO_UPLOAD"; "MCP_RELEASE_GITHUB_OWNER"
+      "MCP_RELEASE_GITHUB_REPOSITORY"; "GITHUB_ENV"; "GITHUB_OUTPUT" ]
+    |> List.iter (fun name -> info.EnvironmentVariables.Remove name |> ignore)
 
-        let bootstrapReceipt = JsonObject()
-        bootstrapReceipt["schemaVersion"] <- JsonValue.Create 2
-        bootstrapReceipt["mode"] <- JsonValue.Create "FetchCandidate"
-        bootstrapReceipt["status"] <- JsonValue.Create "fetched"
-        bootstrapReceipt["repository"] <- JsonValue.Create "masterlifting/mcp-store"
-        bootstrapReceipt["repositoryId"] <- JsonValue.Create "123456789"
-        bootstrapReceipt["runId"] <- JsonValue.Create "controlled-run"
-        bootstrapReceipt["runAttempt"] <- JsonValue.Create "1"
-        bootstrapReceipt["eventSha"] <- JsonValue.Create eventSha
-        bootstrapReceipt["observedEvent"] <- JsonValue.Create "workflow_dispatch"
-        bootstrapReceipt["role"] <- JsonValue.Create "candidate"
-        bootstrapReceipt["component"] <- JsonValue.Create "dotnet"
+    match! capture 15000 info with
+    | Error error -> failtestf "publish wrong-repo: failed to run: %s" error
+    | Ok (exitCode, stdout, _) ->
+        Expect.equal exitCode 4 "non-canonical --repo is rejected"
+        let result = JsonNode.Parse(stdout.TrimEnd()).AsObject()
+        Expect.equal (result["status"].GetValue<string>()) "failed" "structured failure status"
+        Expect.isTrue
+            ((result["reason"].GetValue<string>()).Contains("masterlifting/mcp-store", StringComparison.Ordinal))
+            "the refusing --repo diagnostic names the canonical owner"
+}
 
-        let artifact = JsonObject()
-        artifact["id"] <- JsonValue.Create "controlled-artifact"
-        artifact["name"] <- JsonValue.Create "controlled-candidate"
-        artifact["role"] <- JsonValue.Create "candidate"
-        artifact["component"] <- JsonValue.Create "dotnet"
-        artifact["sizeInBytes"] <- JsonValue.Create 0
-        artifact["expired"] <- JsonValue.Create false
-        artifact["apiDigestRaw"] <- JsonValue.Create ($"sha256:{transportSha256}")
-        artifact["apiDigest"] <- JsonValue.Create transportSha256
-        artifact["platformDigest"] <- JsonValue.Create transportSha256
-        artifact["digestSource"] <- JsonValue.Create "controlled-fixture"
-        bootstrapReceipt["artifact"] <- artifact
+let private runnerPublishRejectsUppercaseEventSha = testCaseAsync "publish rejects an uppercase --event-sha" <| async {
+    Expect.isTrue (File.Exists runnerPath) $"runner binary exists at {runnerPath}"
+    let args =
+        [ "publish"
+          "dotnet/release/Config.json"
+          (Path.Combine(Path.GetTempPath(), "candidate"))
+          "--workspace-root=" + repositoryRoot
+          "--event-sha=3612E8E6DD4655543E6D4B9DC0EDEE9C24B82BF1"
+          "--repo=masterlifting/mcp-store" ]
+    let info = ProcessStartInfo(runnerPath)
+    info.WorkingDirectory <- repositoryRoot
+    info.UseShellExecute <- false
+    info.RedirectStandardOutput <- true
+    info.RedirectStandardError <- true
+    info.CreateNoWindow <- true
+    args |> List.iter info.ArgumentList.Add
+    [ "GITHUB_TOKEN"; "GH_TOKEN"; "MCP_RELEASE_DO_UPLOAD"; "MCP_RELEASE_GITHUB_OWNER"
+      "MCP_RELEASE_GITHUB_REPOSITORY"; "GITHUB_ENV"; "GITHUB_OUTPUT" ]
+    |> List.iter (fun name -> info.EnvironmentVariables.Remove name |> ignore)
 
-        let download = JsonObject()
-        download["redirectHost"] <- JsonValue.Create "objects.githubusercontent.com"
-        download["redirectCode"] <- JsonValue.Create 302
-        download["bytesRead"] <- JsonValue.Create 0
-        download["platformBytes"] <- JsonValue.Create 0
-        download["observedSha256"] <- JsonValue.Create transportSha256
-        bootstrapReceipt["download"] <- download
+    match! capture 15000 info with
+    | Error error -> failtestf "publish uppercase-sha: failed to run: %s" error
+    | Ok (exitCode, stdout, _) ->
+        Expect.equal exitCode 4 "uppercase --event-sha is rejected"
+        let result = JsonNode.Parse(stdout.TrimEnd()).AsObject()
+        Expect.equal (result["status"].GetValue<string>()) "failed" "structured failure status"
+        Expect.isTrue
+            ((result["reason"].GetValue<string>()).Contains("--event-sha", StringComparison.Ordinal))
+            "the refusing --event-sha diagnostic names the flag"
+}
 
-        let uploaderJob = JsonObject()
-        uploaderJob["id"] <- JsonValue.Create "1234567890"
-        uploaderJob["name"] <- JsonValue.Create "prepare dotnet"
-        uploaderJob["runId"] <- JsonValue.Create "controlled-run"
-        uploaderJob["runAttempt"] <- JsonValue.Create "1"
-        uploaderJob["headSha"] <- JsonValue.Create eventSha
-        uploaderJob["status"] <- JsonValue.Create "completed"
-        uploaderJob["conclusion"] <- JsonValue.Create "success"
-        uploaderJob["listingUri"] <- JsonValue.Create "https://api.github.com/repos/masterlifting/mcp-store/actions/runs/controlled-run/attempts/1/jobs"
-        uploaderJob["artifactLinkLimit"] <- JsonValue.Create "platform does not expose artifact-to-job links"
-        bootstrapReceipt["uploaderJob"] <- uploaderJob
+let private runnerPublishRejectsUnknownFlag = testCaseAsync "publish rejects a non-modern publish flag" <| async {
+    Expect.isTrue (File.Exists runnerPath) $"runner binary exists at {runnerPath}"
+    // --run-id, --role, --component, --artifact-id, --artifact-name, --transport-sha256,
+    // --builder-sdk, --builder-runtime, --builder-platform, --trusted-receipt,
+    // --transport-evidence are all retired / non-modern flags; an unknown flag is the typed
+    // preauth refusal path. The runner does not recognize them, so it emits a typed Error.
+    let args =
+        [ "publish"
+          "dotnet/release/Config.json"
+          (Path.Combine(Path.GetTempPath(), "candidate"))
+          "--workspace-root=" + repositoryRoot
+          "--event-sha=3612e8e6dd4655543e6d4b9dc0edee9c24b82bf1"
+          "--repo=masterlifting/mcp-store"
+          "--run-id=controlled-run" ]
+    let info = ProcessStartInfo(runnerPath)
+    info.WorkingDirectory <- repositoryRoot
+    info.UseShellExecute <- false
+    info.RedirectStandardOutput <- true
+    info.RedirectStandardError <- true
+    info.CreateNoWindow <- true
+    args |> List.iter info.ArgumentList.Add
+    [ "GITHUB_TOKEN"; "GH_TOKEN"; "MCP_RELEASE_DO_UPLOAD"; "MCP_RELEASE_GITHUB_OWNER"
+      "MCP_RELEASE_GITHUB_REPOSITORY"; "GITHUB_ENV"; "GITHUB_OUTPUT" ]
+    |> List.iter (fun name -> info.EnvironmentVariables.Remove name |> ignore)
 
-        let runAttemptObservation = JsonObject()
-        runAttemptObservation["uri"] <- JsonValue.Create "https://api.github.com/repos/masterlifting/mcp-store/actions/runs/controlled-run/attempts/1"
-        runAttemptObservation["id"] <- JsonValue.Create "controlled-run"
-        runAttemptObservation["runAttempt"] <- JsonValue.Create "1"
-        runAttemptObservation["headSha"] <- JsonValue.Create eventSha
-        runAttemptObservation["event"] <- JsonValue.Create "workflow_dispatch"
-        runAttemptObservation["repositoryId"] <- JsonValue.Create "123456789"
-        runAttemptObservation["repositoryFullName"] <- JsonValue.Create "masterlifting/mcp-store"
-        bootstrapReceipt["runAttemptObservation"] <- runAttemptObservation
+    match! capture 15000 info with
+    | Error error -> failtestf "publish unknown-flag: failed to run: %s" error
+    | Ok (exitCode, stdout, _) ->
+        Expect.equal exitCode 4 "unknown publish flag is rejected"
+        let result = JsonNode.Parse(stdout.TrimEnd()).AsObject()
+        Expect.equal (result["status"].GetValue<string>()) "failed" "structured failure status"
+        Expect.isTrue
+            ((result["reason"].GetValue<string>()).Contains("unknown publish flag", StringComparison.Ordinal))
+            "the refusing flag diagnostic names the unrecognized flag"
+}
 
-        try
-            // Valid transport-evidence keeps this closure regression independent of later FetchCandidate validation.
-            let workspaceRoot = Path.GetFullPath repositoryRoot
-            let workspacePrefix =
-                workspaceRoot.TrimEnd([| Path.DirectorySeparatorChar; Path.AltDirectorySeparatorChar |])
-                + string Path.DirectorySeparatorChar
-            let fullFixtureRoot = Path.GetFullPath fixtureRoot
-            Expect.isFalse
-                (fullFixtureRoot.Equals(workspaceRoot, StringComparison.OrdinalIgnoreCase)
-                 || fullFixtureRoot.StartsWith(workspacePrefix, StringComparison.OrdinalIgnoreCase))
-                "receipt fixture paths are outside the publisher workspace"
-            File.WriteAllText(transportEvidencePath, bootstrapReceipt.ToJsonString())
-            let args =
-                [ "publish"
-                  closurePath
-                  candidateTransportPath
-                  "--repo=masterlifting/mcp-store"
-                  "--run-id=controlled-run"
-                  "--attempt=1"
-                  $"--event-sha={eventSha}"
-                  "--role=candidate"
-                  "--component=dotnet"
-                  "--artifact-id=controlled-artifact"
-                  "--artifact-name=controlled-candidate"
-                  $"--transport-sha256={transportSha256}"
-                  "--builder-sdk=controlled-sdk"
-                  "--builder-runtime=controlled-runtime"
-                  "--builder-platform=controlled-platform"
-                  $"--workspace-root={repositoryRoot}"
-                  $"--trusted-receipt={trustedReceiptPath}"
-                  $"--transport-evidence={transportEvidencePath}" ]
-            let info = ProcessStartInfo(runnerPath)
-            info.WorkingDirectory <- repositoryRoot
-            info.UseShellExecute <- false
-            info.RedirectStandardOutput <- true
-            info.RedirectStandardError <- true
-            info.CreateNoWindow <- true
-            args |> List.iter info.ArgumentList.Add
-            [ "GITHUB_TOKEN"; "GH_TOKEN"; "MCP_RELEASE_DO_UPLOAD"; "MCP_RELEASE_GITHUB_OWNER"
-              "MCP_RELEASE_GITHUB_REPOSITORY"; "GITHUB_ENV"; "GITHUB_OUTPUT" ]
-            |> List.iter (fun name -> info.EnvironmentVariables.Remove name |> ignore)
+let private runnerPublishRejectsMissingRequiredFlag = testCaseAsync "publish refuses when a required flag is absent" <| async {
+    Expect.isTrue (File.Exists runnerPath) $"runner binary exists at {runnerPath}"
+    let args =
+        [ "publish"
+          "dotnet/release/Config.json"
+          (Path.Combine(Path.GetTempPath(), "candidate"))
+          "--workspace-root=" + repositoryRoot
+          "--repo=masterlifting/mcp-store" ]
+    let info = ProcessStartInfo(runnerPath)
+    info.WorkingDirectory <- repositoryRoot
+    info.UseShellExecute <- false
+    info.RedirectStandardOutput <- true
+    info.RedirectStandardError <- true
+    info.CreateNoWindow <- true
+    args |> List.iter info.ArgumentList.Add
+    [ "GITHUB_TOKEN"; "GH_TOKEN"; "MCP_RELEASE_DO_UPLOAD"; "MCP_RELEASE_GITHUB_OWNER"
+      "MCP_RELEASE_GITHUB_REPOSITORY"; "GITHUB_ENV"; "GITHUB_OUTPUT" ]
+    |> List.iter (fun name -> info.EnvironmentVariables.Remove name |> ignore)
 
-            match! capture 15000 info with
-            | Error error -> failtestf "publish closure preflight failed to run: %s" error
-            | Ok (exitCode, stdout, _) ->
-                Expect.equal exitCode 4 "missing trusted closure blocks publication"
-                let result = JsonNode.Parse(stdout.TrimEnd()).AsObject()
-                Expect.equal (result["status"].GetValue<string>()) "failed" "structured failure status"
-                Expect.equal
-                    (result["reason"].GetValue<string>())
-                    $"required release artifact does not exist: {closurePath}"
-                    "typed missing publisher closure is the first verification failure"
-                for name in [ "publishedArchiveSha256"; "publishedManifestSha256"; "publishedRevision"; "publishedMetadataSha256" ] do
-                    Expect.isFalse (result.ContainsKey name) $"{name} is absent without a trusted closure"
-        finally
-            Fixture.safeDeleteDir fixtureRoot
-    }
+    match! capture 15000 info with
+    | Error error -> failtestf "publish missing-flag: failed to run: %s" error
+    | Ok (exitCode, stdout, _) ->
+        Expect.equal exitCode 4 "missing required flag is rejected"
+        let result = JsonNode.Parse(stdout.TrimEnd()).AsObject()
+        Expect.equal (result["status"].GetValue<string>()) "failed" "structured failure status"
+        Expect.isTrue
+            ((result["reason"].GetValue<string>()).Contains("--event-sha", StringComparison.Ordinal))
+            "the missing flag diagnostic names the missing flag"
+}
+
+let private runnerPublishRejectsUnregisteredConfig = testCaseAsync "publish rejects an unregistered config path before any child starts" <| async {
+    Expect.isTrue (File.Exists runnerPath) $"runner binary exists at {runnerPath}"
+    let candidatePath = Path.Combine(Path.GetTempPath(), "candidate")
+    let args =
+        [ "publish"
+          "dotnet/release/Unregistered.json"
+          candidatePath
+          "--workspace-root=" + repositoryRoot
+          "--event-sha=3612e8e6dd4655543e6d4b9dc0edee9c24b82bf1"
+          "--repo=masterlifting/mcp-store" ]
+    let info = ProcessStartInfo(runnerPath)
+    info.WorkingDirectory <- repositoryRoot
+    info.UseShellExecute <- false
+    info.RedirectStandardOutput <- true
+    info.RedirectStandardError <- true
+    info.CreateNoWindow <- true
+    args |> List.iter info.ArgumentList.Add
+    [ "GITHUB_TOKEN"; "GH_TOKEN"; "MCP_RELEASE_DO_UPLOAD"; "MCP_RELEASE_GITHUB_OWNER"
+      "MCP_RELEASE_GITHUB_REPOSITORY"; "GITHUB_ENV"; "GITHUB_OUTPUT" ]
+    |> List.iter (fun name -> info.EnvironmentVariables.Remove name |> ignore)
+
+    match! capture 15000 info with
+    | Error error -> failtestf "publish unregistered: failed to run: %s" error
+    | Ok (exitCode, stdout, _) ->
+        Expect.equal exitCode 4 "unregistered config path is rejected"
+        let result = JsonNode.Parse(stdout.TrimEnd()).AsObject()
+        Expect.equal (result["status"].GetValue<string>()) "failed" "structured failure status"
+        Expect.isTrue
+            ((result["reason"].GetValue<string>()).Contains("not registered", StringComparison.Ordinal))
+            "the refusing config-path diagnostic names the roster boundary"
+        Expect.isFalse (Directory.Exists candidatePath) "rejection occurs before any candidate output"
+}
 
 let tests =
     testList
@@ -215,4 +251,8 @@ let tests =
           cleanTreeGuardFailsClosed
           committedHeadIsResolved
           runnerEmptyArgumentsReturnUsage
-          missingIndependentClosure ]
+          runnerPublishRejectsWrongRepo
+          runnerPublishRejectsUppercaseEventSha
+          runnerPublishRejectsUnknownFlag
+          runnerPublishRejectsMissingRequiredFlag
+          runnerPublishRejectsUnregisteredConfig ]

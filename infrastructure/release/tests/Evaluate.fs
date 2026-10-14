@@ -95,37 +95,8 @@ let private dtoFrom (archivePath: string) (manifestPath: string) =
         RepositoryName = "mcp-store"
     }
 
-let private preparationReceiptBytes archiveBytes manifestBytes =
-    let node = JsonObject()
-    node["schemaVersion"] <- JsonValue.Create 1
-    node["innerArchiveSha256"] <- JsonValue.Create(sha256HexBytes archiveBytes)
-    node["innerArchiveSize"] <- JsonValue.Create(int64 archiveBytes.Length)
-    node["manifestSha256"] <- JsonValue.Create(sha256HexBytes manifestBytes)
-    node["manifestSize"] <- JsonValue.Create(int64 manifestBytes.Length)
-    Encoding.UTF8.GetBytes(node.ToJsonString())
-
-let private outerTransport archiveName archiveBytes manifestBytes =
-    // Inner archive and manifest bytes precede the receipt so its hashes reflect known bytes;
-    // the outer ZIP that encloses the three entries is assembled last.
-    let preparationBytes = preparationReceiptBytes archiveBytes manifestBytes
-
-    use output = new MemoryStream()
-
-    do
-        use archive = new ZipArchive(output, ZipArchiveMode.Create, true)
-
-        for name, bytes in
-            [ archiveName, archiveBytes
-              "distribution.json", manifestBytes
-              "preparation.json", preparationBytes ] do
-            let entry = archive.CreateEntry(name, CompressionLevel.Optimal)
-            use stream = entry.Open()
-            stream.Write(bytes, 0, bytes.Length)
-
-    output.ToArray()
-
-let private verifiedCandidate archivePath manifestPath evaluatedHead = async {
-    let configPath = Path.Combine(repositoryRoot, "dotnet", "release", "Config.fsx")
+let private verifiedCandidate (archivePath: string) (manifestPath: string) (evaluatedHead: string) = async {
+    let configPath = Path.Combine(repositoryRoot, "dotnet", "release", "Config.json")
     let policyBytes = File.ReadAllBytes configPath
 
     let policy =
@@ -133,59 +104,44 @@ let private verifiedCandidate archivePath manifestPath evaluatedHead = async {
         | Ok value -> value
         | Error error -> failtestf "canonical candidate policy was rejected: %s" (ReleaseError.message error)
 
-    let archiveBytes = File.ReadAllBytes archivePath
-    let manifestBytes = File.ReadAllBytes manifestPath
-    let transportBytes = outerTransport policy.ArchiveName archiveBytes manifestBytes
-    let expected: ReleaseHandoff.ExpectedMetadata =
-        { ArtifactId = "controlled-candidate"
-          ArtifactName = "dotnet-candidate"
-          Role = "candidate"
-          Component = policy.ComponentId
-          Repository = "masterlifting/mcp-store"
-          RunId = "controlled-run"
-          Attempt = "1"
-          Sha = evaluatedHead }
-    let observed: ReleaseHandoff.ObservedPlatformMetadata =
-        { ArtifactId = expected.ArtifactId
-          ArtifactName = expected.ArtifactName
-          Role = expected.Role
-          Component = expected.Component
-          Repository = expected.Repository
-          RunId = expected.RunId
-          Attempt = expected.Attempt
-          Sha = expected.Sha }
+    // WHY: the canonical 2-entry candidate directory (archive + distribution.json) is built
+    //   under a temp root and handed to the production `ReleaseHandoff.readCandidate` factory;
+    //   no outer transport, preparation receipt, or platform-observed evidence exists outside
+    //   the verified immutable snapshot. The verified candidate is constructed through the
+    //   production `VerifiedCandidate.createFromSnapshot` entry point so the same identity
+    //   contract is exercised.
+    let candidateRoot = Path.Combine(Path.GetTempPath(), $"mcp-evaluate-candidate-{Guid.NewGuid():N}")
+    Directory.CreateDirectory candidateRoot |> ignore
+    try
+        // WHY: the candidate leaf must carry the policy-declared archive name (e.g.
+        //   `v1.0.4.zip`) so `readCandidate`'s exact-two-entry allowlist matches; callers
+        //   may pass external `archivePath` values whose filenames are observation labels
+        //   (abs.zip, imm.zip, ...), so the published archive bytes are renamed onto the
+        //   canonical leaf without rewriting the bytes, header, normalization, or manifest.
+        let archiveName = policy.ArchiveName
+        File.Copy(archivePath, Path.Combine(candidateRoot, archiveName), true)
+        File.Copy(manifestPath, Path.Combine(candidateRoot, "distribution.json"), true)
 
-    let digest =
-        match ReleaseHandoff.makeOuterDigest (sha256HexBytes transportBytes) with
-        | Ok value -> value
-        | Error error -> failtestf "candidate transport digest fixture was rejected: %s" (ReleaseError.message error)
+        let snapshot =
+            match ReleaseHandoff.readCandidate candidateRoot policy evaluatedHead with
+            | Ok value -> value
+            | Error error -> failtestf "candidate directory was rejected by readCandidate: %s" (ReleaseError.message error)
 
-    let evidence: ReleaseHandoff.ArtifactEvidence =
-        { Expected = expected
-          Observed = observed
-          ActualOuterDigest = digest
-          TransportSourcePath = "controlled-candidate.zip"
-          TransportLength = int64 transportBytes.Length
-          RawTransportBytes = transportBytes }
+        let! result =
+            ReleaseEvaluate.VerifiedCandidate.createFromSnapshot
+                snapshot
+                policy
+                policy.ArchiveName
+                evaluatedHead
+                (Path.Combine(tempRoot, "metadata-local.json"))
+                "masterlifting"
+                "mcp-store"
 
-    let snapshot =
-        match ReleaseHandoff.readRawTransport "controlled-candidate.zip" transportBytes evidence policy with
-        | Ok value -> value
-        | Error error -> failtestf "candidate transport was rejected: %s" (ReleaseError.message error)
-
-    let! result =
-        ReleaseEvaluate.VerifiedCandidate.createFromSnapshot
-            snapshot
-            policy
-            policy.ArchiveName
-            evaluatedHead
-            (Path.Combine(tempRoot, "metadata-local.json"))
-            "masterlifting"
-            "mcp-store"
-
-    match result with
-    | Ok candidate -> return candidate
-    | Error error -> return failtestf "verified candidate fixture was rejected: %s" (ReleaseError.message error)
+        match result with
+        | Ok candidate -> return candidate
+        | Error error -> return failtestf "verified candidate factory was rejected: %s" (ReleaseError.message error)
+    finally
+        try Directory.Delete(candidateRoot, true) with _ -> ()
 }
 
 let private evaluateCandidateWith observer archivePath manifestPath evaluatedHead = async {

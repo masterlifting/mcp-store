@@ -331,3 +331,77 @@ stdout retained at `C:\Users\andre\AppData\Local\Temp\opencode\Probes.log`; no
 authorization header value, real token, host URL, or live network call appears in it
 (only the canonical release tag-path fragment `/releases/tags/<producer>` and the
 Expecto summary). The full 153-case suite was NOT re-run.
+
+## Candidate handoff and CLI diagnostics fix
+
+Root cause: `ReleaseHandoff.readCandidate` correctly limited the downloaded
+candidate directory to the outer two-file set (producer archive plus
+`distribution.json`), but accidentally applied that same set to entries inside
+the producer ZIP. The inner archive contract is instead the canonical
+`policy.PublishedFiles` plus `NOTICE.txt` and `distribution.json`. The runner
+also collapsed absent required CLI flags into a generic diagnostic.
+
+Fix: retain the exact outer-directory check, and validate inner archive
+membership through `ReleaseCompare.validate` with the policy-derived
+`ComponentContract`, reusing its canonical archive allowlist/header validation.
+Existing parsing/bounds, duplicate and unsafe-entry checks, embedded/standalone
+manifest byte equality, event revision identity, and snapshot behavior are
+preserved. Missing flags now use a typed parse case and name the first absent
+flag deterministically. Restored the single CLI async-bridge why-comment. No
+receipt or raw outer-ZIP protocol was added.
+
+Validation: dedicated Release project build succeeded with 0 errors and 0
+warnings; Dotnet MCP run ID `d44oe01M0_EHfIjCqhdhlSbhr6Wvzhxx0-OIjMPQzyM`.
+Tests were not run by this implementation assignment; no full-suite result is
+claimed.
+
+## Bounded source fix continuation (Policy JSON negatives, Authority fixture, Checker bridge sites)
+
+Root cause: post-build readiness recheck observed three remaining in-scope
+failures. The `policy.strictJsonGrammarTests` negative suite used bare
+`String.Replace` mutators that survive the canonical whitespace in source but
+bypass the `JsonNode` property/array intent of the frozen grammar suite; the
+`Authority` fixture still carried an unused private-field `PublishCli`
+reflection that called `FSharpValue.MakeRecord(publishCliType, ...)` solely as a
+shape diagnostic (the production 7-arg pipeline reflection already enforces the
+arity); and the `SyncOverAsyncChecker` `topLevelBridgeSites` allowlist still
+named the pre-rename `prepare argv |> ...` and `runPublish argv |> ...`
+literals rather than the current `runPrepareMode argv |> ...` and
+`runPublishMode argv |> ...` bridges in `infrastructure/release/Runner.fs`.
+
+Fix: `infrastructure/release/tests/Policy.fs` rewrites the `Replace`-based
+missing-field negatives to `mutated (fun node -> node.Remove "<field>" |> ignore)`;
+the duplicate-field negative now round-trips through `JsonNode.Parse →
+ToJsonString → indexed textual reinsertion` because `JsonObject` cannot carry
+duplicate keys (the post-process asserts both `"version": "9.9"` and
+`"version": "1.0.4"` are still present). All other categories (unknown field,
+non-string componentId, number publishedFiles entry, null required field,
+malformed UTF-8, embedded NUL, oversized source, malformed JSON document,
+trailing comma) are unchanged — strict parser contract is preserved.
+`infrastructure/release/tests/Authority.fs` removes `publishCliType`,
+`makePublishCli`, the `cliRecord = makePublishCli f` null-check, and the
+`Microsoft.FSharp.Reflection` import; the 7-arg positional
+`runPublishPipelineWithTransportFactory` reflection plus its
+`parameterCount = 7` arity assertion is the only remaining production-surface
+check. `dotnet/tests/Mcp.Dotnet.Tests/blocking/Checker.fs` updates the
+`infrastructure/release/Runner.fs` allowlist to
+`["runPrepareMode argv |> Async.RunSynchronously"; "runPublishMode argv |> Async.RunSynchronously"]`,
+matching the actual bridge literals at `Runner.fs` lines 163 and 165.
+
+Scope: `infrastructure/release/tests/Policy.fs`,
+`infrastructure/release/tests/Authority.fs`,
+`dotnet/tests/Mcp.Dotnet.Tests/blocking/Checker.fs` only. `Tests.fsproj`,
+`Main.fs`, production source, scripts, YAML, and `Config.json` files are
+unchanged. Tests are not run by this source-only assignment; no full-suite
+result is claimed. The arithmetic check, the credential-name strip, the
+canonical 2-entry candidate directory, the canonical Deflate (method 8)
+inner archive, the canonical JSON / source-revision identity, the 6
+unauthorized children (factory=0, HTTP=0, exit=4), the 2 authorized scripted-
+500 fixed-tag GET/no-POST/exit=1, the 14 critical Integrity preflight/38/digest/
+readback/noRetry/recovery/private-byte regressions, the `Release.Tests.Main`
+`--prepare-authority-probe` direct-dispatch, the `RunPrepareMode argv |> ...`
+HOST-boundary WHY comment, and the documented `Standalone entry bridge` /
+`FSI needs one synchronous top-level entry` exemption markers are all
+retained unchanged. No commit, push, real network call, or secret read was
+attempted; no production, script, YAML, or `Config.json` edits beyond the
+test-surface changes listed were made.

@@ -1,7 +1,8 @@
 # role: entrypoint/command
-# Projects canonical SDK/runtime/platform before any SDK install and verifies the executing toolchain after install.
-# `Participants.json` is the only enrollment authority: the projection, the component list and the workflow matrix derive from it, and `*/release/Config.fsx` stays the only value source.
-# The shared SDK/runtime/platform equality check belongs to this bootstrap guard only; the transaction and runner never require one global toolchain identity.
+# Pre-SDK projection and post-install verification of the canonical toolchain from each producer's policy JSON.
+# `Participants.json` is the only enrollment authority: the projection, the component list, the workflow loops and the
+# CLI paths derive from it, and `*/release/Config.json` stays the only value source. Nothing here evaluates F#, so the
+# projection runs before any SDK exists and the verification needs no separate bootstrap script.
 
 [CmdletBinding(DefaultParameterSetName = "Project")]
 param(
@@ -22,58 +23,68 @@ $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "Roster.ps1")
 
 $rosterPath = Join-Path $Root "infrastructure\release\Participants.json"
-$bootstrapScript = Join-Path $Root "infrastructure\release\Bootstrap.fsx"
 
-# Exact-one-literal match; Bootstrap.fsx cross-checks this projection against the evaluated config.
-function Read-CanonicalLiteral {
-    param(
-        [Parameter(Mandatory = $true)][string]$ConfigPath,
-        [Parameter(Mandatory = $true)][string]$Name
-    )
+# The exact policy field set the compiled reader also accepts; a drift here fails before any SDK install.
+$script:PolicyFields = @(
+    "componentId"; "version"; "entryDll"; "sdkVersion"; "runtimeVersion"; "platform"; "archiveName"; "assetUri"; "publishedFiles")
+$script:ToolchainFields = @("sdkVersion"; "runtimeVersion"; "platform")
 
-    if (-not (Test-Path -LiteralPath $ConfigPath)) {
-        throw "canonical config not found: $ConfigPath"
+function Read-Policy {
+    param([Parameter(Mandatory = $true)][string]$ConfigPath)
+
+    if (-not (Test-Path -LiteralPath $ConfigPath -PathType Leaf)) {
+        throw "canonical policy not found: $ConfigPath"
     }
 
-    $pattern = '^\s*let\s+' + [regex]::Escape($Name) + '\s*=\s*"([^"]*)"\s*$'
-    $hits = @(Select-String -LiteralPath $ConfigPath -Pattern $pattern)
+    $document = $null
+    try {
+        $document = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
+    } catch {
+        throw "the canonical policy is not valid JSON: $ConfigPath"
+    }
+    if ($null -eq $document) { throw "the canonical policy is empty: $ConfigPath" }
 
-    if ($hits.Count -ne 1) {
-        throw "expected exactly one literal '$Name' in $ConfigPath; found $($hits.Count)"
+    $names = @($document.PSObject.Properties.Name)
+    $missing = @($script:PolicyFields | Where-Object { $names -notcontains $_ })
+    if ($missing.Count -gt 0) { throw "policy '$ConfigPath' is missing field(s): $($missing -join ', ')" }
+    $unknown = @($names | Where-Object { $script:PolicyFields -notcontains $_ })
+    if ($unknown.Count -gt 0) { throw "policy '$ConfigPath' declares unknown field(s): $($unknown -join ', ')" }
+
+    foreach ($name in @("componentId", "version", "entryDll") + $script:ToolchainFields) {
+        if ([string]::IsNullOrWhiteSpace("$($document.$name)")) { throw "policy '$ConfigPath' has an empty '$name'" }
+    }
+    $publishedFiles = @($document.publishedFiles)
+    if ($publishedFiles.Count -eq 0 -or @($publishedFiles | Where-Object { [string]::IsNullOrWhiteSpace("$_") }).Count -gt 0) {
+        throw "policy '$ConfigPath' must declare at least one non-empty publishedFiles entry"
     }
 
-    $capture = $hits[0].Matches[0].Groups[1]
-    if (-not $capture.Success -or [string]::IsNullOrWhiteSpace($capture.Value)) {
-        throw "could not read a non-empty '$Name' literal from $ConfigPath"
-    }
-
-    return $capture.Value
+    return $document
 }
 
 function Get-Projection {
-    param([Parameter(Mandatory = $true)][object[]]$Roster)
+    param([Parameter(Mandatory = $true)][object[]]$Participants)
 
     $result = @{}
-    $columns = @("sdkVersion", "runtimeVersion", "platform")
 
-    foreach ($entry in $Roster) {
-        $configPath = Join-Path $Root $entry.configPath
-        $fields = @{}
-        # archiveName/assetUri are F# interpolations; Bootstrap.fsx emits them after install.
-        foreach ($name in @("componentId", "version", "entryDll") + $columns) {
-            $fields[$name] = Read-CanonicalLiteral -ConfigPath $configPath -Name $name
+    foreach ($entry in $Participants) {
+        $document = Read-Policy -ConfigPath (Join-Path $Root $entry.configPath)
+
+        # A policy whose identity contradicts the roster entry for the same path is drift, not policy.
+        if ("$($document.componentId)" -ne $entry.componentId) {
+            throw "componentId '$($document.componentId)' in $($entry.configPath) does not match roster participant '$($entry.componentId)'"
         }
 
-        # A config whose identity contradicts the roster entry for the same path is drift, not policy.
-        if ($fields["componentId"] -ne $entry.componentId) {
-            throw "componentId '$($fields['componentId'])' in $($entry.configPath) does not match roster participant '$($entry.componentId)'"
+        $result[$entry.componentId] = @{
+            version        = "$($document.version)"
+            entryDll       = "$($document.entryDll)"
+            sdkVersion     = "$($document.sdkVersion)"
+            runtimeVersion = "$($document.runtimeVersion)"
+            platform       = "$($document.platform)"
         }
-
-        $result[$entry.componentId] = $fields
     }
 
-    foreach ($name in $columns) {
-        $distinct = @($Roster | ForEach-Object { $result[$_.componentId][$name] } | Sort-Object -Unique)
+    foreach ($name in $script:ToolchainFields) {
+        $distinct = @($Participants | ForEach-Object { $result[$_.componentId][$name] } | Sort-Object -Unique)
         if ($distinct.Count -ne 1) {
             throw "participants disagree on canonical '$name': $($distinct -join ', ')"
         }
@@ -81,6 +92,28 @@ function Get-Projection {
     }
 
     return $result
+}
+
+function Get-InstalledSdk {
+    $lines = & dotnet --list-sdks
+    if ($LASTEXITCODE -ne 0) { throw "dotnet --list-sdks failed ($LASTEXITCODE)" }
+
+    foreach ($line in $lines) {
+        if ($line -match '^(?<version>\S+)\s+\[(?<root>.+)\]\s*$') {
+            [pscustomobject]@{ Version = $Matches['version']; Root = $Matches['root'] }
+        }
+    }
+}
+
+function Get-InstalledRuntime {
+    $lines = & dotnet --list-runtimes
+    if ($LASTEXITCODE -ne 0) { throw "dotnet --list-runtimes failed ($LASTEXITCODE)" }
+
+    foreach ($line in $lines) {
+        if ($line -match '^(?<framework>\S+)\s+(?<version>\S+)\s+\[(?<root>.+)\]\s*$') {
+            [pscustomobject]@{ Framework = $Matches['framework']; Version = $Matches['version']; Root = $Matches['root'] }
+        }
+    }
 }
 
 function Write-KeyValue {
@@ -99,14 +132,14 @@ function Write-KeyValue {
 
 $roster = Get-ReleaseRoster -Root $Root
 $componentIds = @($roster | ForEach-Object { $_.componentId })
-$projection = Get-Projection -Roster $roster
+$projection = Get-Projection -Participants $roster
 $sdk = $projection["sdkVersion"]
 $runtime = $projection["runtimeVersion"]
 $platform = $projection["platform"]
 
 $summary = [ordered]@{
-    "RELEASE_SDK"     = $sdk
-    "RELEASE_RUNTIME" = $runtime
+    "RELEASE_SDK"      = $sdk
+    "RELEASE_RUNTIME"  = $runtime
     "RELEASE_PLATFORM" = $platform
 }
 foreach ($componentId in $componentIds) {
@@ -117,7 +150,7 @@ foreach ($componentId in $componentIds) {
 }
 
 if ($Project) {
-    Write-Host "# projected canonical toolchain and roster participants (no F# evaluation)"
+    Write-Host "# projected canonical toolchain and roster participants from the policy JSON (no F# evaluation)"
     # The matrix is projected as JSON so the workflow carries no participation list of its own.
     $componentsJson = ConvertTo-Json -Compress -InputObject $componentIds
     if ($env:GITHUB_OUTPUT) {
@@ -128,57 +161,47 @@ if ($Project) {
     } else {
         Write-Host "GITHUB_OUTPUT is not set; projecting to stdout only (local validation mode)"
     }
+    # Later steps in the same job read the projection from the environment, so no step restates a participant list.
+    $summary["RELEASE_COMPONENTS"] = $componentsJson
+    if ($env:GITHUB_ENV) {
+        Write-KeyValue -Pairs $summary -Target $env:GITHUB_ENV
+    } else {
+        Write-Host "GITHUB_ENV is not set; skipping environment write (local validation mode)"
+    }
     Write-KeyValue -Pairs $summary
     exit 0
 }
 
-# Reject an unlisted target before any bootstrap work so an inventory mismatch fails the job, not the transaction.
+# Reject an unlisted target before verification so an inventory mismatch fails the job, not the toolchain check.
 if ($Component -and ($componentIds -notcontains $Component)) {
     throw "component '$Component' is not enrolled in $rosterPath; refusing to verify an unlisted participant"
 }
 
 $componentLabel = if ($Component) { $Component } else { "all roster participants" }
 
-# Export the projection so Bootstrap.fsx can assert projection == evaluated config == executing toolchain.
-if (-not (Test-Path -LiteralPath $bootstrapScript)) {
-    throw "bootstrap script not found: $bootstrapScript"
+$installedSdks = @(Get-InstalledSdk)
+$observedSdks = @($installedSdks | ForEach-Object { $_.Version })
+if ($observedSdks -notcontains $sdk) {
+    throw "the canonical SDK '$sdk' is not installed; observed [$($observedSdks -join ', ')]"
 }
 
-$env:RELEASE_EXPECTED_SDK = $sdk
-$env:RELEASE_EXPECTED_RUNTIME = $runtime
-$env:RELEASE_EXPECTED_PLATFORM = $platform
-
-Write-Host "running toolchain verification: $bootstrapScript (component=$componentLabel)"
-$bootstrapOutput = & dotnet fsi $bootstrapScript 2>&1
-$bootstrapExit = $LASTEXITCODE
-
-if ($bootstrapExit -ne 0) {
-    Write-Host "bootstrap failed with exit $bootstrapExit"
-    Write-Host ($bootstrapOutput -join "`n")
-    exit $bootstrapExit
+$installedRuntimes = @(Get-InstalledRuntime)
+$observedRuntimes = @($installedRuntimes | Where-Object { $_.Framework -eq "Microsoft.NETCore.App" } | ForEach-Object { $_.Version })
+if ($observedRuntimes -notcontains $runtime) {
+    throw "the canonical runtime 'Microsoft.NETCore.App $runtime' is not installed; observed [$($observedRuntimes -join ', ')]"
 }
 
-Write-Host "bootstrap output:"
-Write-Host ($bootstrapOutput -join "`n")
-
-$envLines = @{}
-foreach ($line in $bootstrapOutput) {
-    $trimmed = "$line".Trim()
-    if ($trimmed.StartsWith("#") -or [string]::IsNullOrWhiteSpace($trimmed)) {
-        continue
-    }
-    $eq = $trimmed.IndexOf("=")
-    if ($eq -le 0) { continue }
-    $key = $trimmed.Substring(0, $eq)
-    $value = $trimmed.Substring($eq + 1)
-    $envLines[$key] = $value
+$runningPlatform = [System.Runtime.InteropServices.RuntimeInformation]::RuntimeIdentifier
+if ($runningPlatform -ne $platform) {
+    throw "this host runs '$runningPlatform' where the canonical platform is '$platform'"
 }
+
+Write-Host "verified executing toolchain sdk=$sdk runtime=$runtime platform=$platform for $componentLabel"
 
 if ($env:GITHUB_ENV) {
-    Write-KeyValue -Pairs $envLines -Target $env:GITHUB_ENV
+    Write-KeyValue -Pairs $summary -Target $env:GITHUB_ENV
 } else {
     Write-Host "GITHUB_ENV is not set; skipping environment write (local validation mode)"
 }
 
-Write-Host "toolchain verification complete for component=$componentLabel"
 exit 0

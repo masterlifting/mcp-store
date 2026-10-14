@@ -589,3 +589,16 @@ Negative:
 These are the factual open facts at compile time. None of them are
 inferred or invented; none of them are required for this batch's
 compile to succeed.
+
+## Frozen three-job JSON cutover — core implementation evidence
+
+The later approved forward-only cutover supersedes the earlier two-channel design
+above:
+
+- `infrastructure/release/Runner.fs` now exposes exactly `prepare <Config.json> <outdir>` and `publish <Config.json> <candidate-directory> --workspace-root=<trusted-checkout> --event-sha=<exactHEAD> --repo=<masterlifting/mcp-store>`. Publish rejects unknown, duplicate, missing, and empty flags; validates canonical roster/config bytes, fixed repository identity, exact event HEAD, clean checkout, and candidate data before requiring the upload opt-in/token.
+- The private transport factory seam takes verified snapshot/policy/context and retains one `VerifiedCandidate.createFromSnapshot`, `ReleaseEvaluate.evaluate`, and `ReleaseTransaction.run` path. Metadata staging uses a sibling `publication` directory.
+- `infrastructure/release/Handoff.fs` now contains a privately-constructed `CandidateArchiveSnapshot` and `readCandidate(candidateDirectory, expectedPolicy, eventSha)`. It requires exactly the producer archive and standalone `distribution.json`, bounds archive/member reads, rejects unsafe names and link attributes, validates the inner archive and compares standalone/embedded manifest identities and event revision. Receipt, platform metadata, and outer transport types/readers are removed.
+- `infrastructure/release/Orchestration.fs` no longer writes preparation JSON or SHA diagnostics. Preparation emits only archive plus standalone manifest and refuses a non-empty output directory.
+- `infrastructure/release/Release.fsproj` no longer compiles `PublisherClosure.fs`; `PublisherClosure.fs`, `Publisher.json`, and `Sources.json` are deleted. The README describes only the frozen CLI/data boundary.
+
+Assignment capability flags were `mayBuild=false`, `mayTest=false`, `mayDelegate=false`; accordingly no build or tests were run. Concurrent JSON policy/enrollment edits remained owned by another worker and were not changed here. Compile/test compatibility with the JSON policy owner and migrated test suite remains unverified; coordinator should run the dedicated release build and tests after both owners finish. No hosted action, network call, credential access, or secret value was used.

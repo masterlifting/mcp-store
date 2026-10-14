@@ -1,3 +1,10 @@
+// role: actual production transaction integrity regressions
+// scope: 14 critical regressions exercising the verified archive upload, metadata upload,
+//   recovery, identity mutation, and zero-POST/38-observation/18-identity/digest/noRetry/recovery
+//   invariants across both Dotnet and Workflow producers via the real ReleaseTransaction.run
+//   entry point with a scripted HTTP transport; the candidate is built through the canonical
+//   2-entry ReleaseHandoff.readCandidate data directory so no outer/prep/evidence wrappers
+//   exist outside the production code path.
 module Release.Tests.Integrity
 
 open Expecto
@@ -121,7 +128,7 @@ let private createTransport (handler: HttpMessageHandler) : HttpTransport =
 let private repositoryRoot = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "..", ".."))
 
 let private loadProducer componentId =
-    let configPath = Path.Combine(repositoryRoot, componentId, "release", "Config.fsx")
+    let configPath = Path.Combine(repositoryRoot, componentId, "release", "Config.json")
     let bytes = File.ReadAllBytes configPath
     let policy =
         match ReleasePolicy.parseBytes configPath bytes with
@@ -193,69 +200,23 @@ let private writeCandidate (root: string) (producer: Producer) (revision: string
         let archiveBytes = zipBytes (payloads @ [ "distribution.json", manifestBytes ])
         let archiveSha = sha256 archiveBytes
         let manifestSha = sha256 manifestBytes
-        // Inner archive and standalone manifest are produced first; preparation.json binds the
-        // four known inner/manifest hashes and sizes, then the three-entry outer ZIP is
-        // assembled so the receipt never references a stale outer digest.
-        let prepared = JsonObject()
-        prepared["schemaVersion"] <- JsonValue.Create 1
-        prepared["innerArchiveSha256"] <- JsonValue.Create archiveSha
-        prepared["innerArchiveSize"] <- JsonValue.Create(int64 archiveBytes.Length)
-        prepared["manifestSha256"] <- JsonValue.Create manifestSha
-        prepared["manifestSize"] <- JsonValue.Create(int64 manifestBytes.Length)
-        let preparationBytes = Encoding.UTF8.GetBytes(prepared.ToJsonString())
-        let outerBytes =
-            zipBytes
-                [ producer.ArchiveName, archiveBytes
-                  "distribution.json", manifestBytes
-                  "preparation.json", preparationBytes ]
-        let outerSha = sha256 outerBytes
-        let preparation =
-            match ReleaseHandoff.parsePreparationReceipt (prepared.ToJsonString()) "preparation.json" with
-            | Ok receipt -> receipt
-            | Error error -> failwithf "preparation fixture failed: %s" (ReleaseError.message error)
-        let expected : ReleaseHandoff.ExpectedMetadata =
-            { ArtifactId = "controlled-artifact"
-              ArtifactName = producer.ComponentId + "-candidate"
-              Role = "candidate"
-              Component = producer.ComponentId
-              Repository = "masterlifting/mcp-store"
-              RunId = "controlled-run"
-              Attempt = "1"
-              Sha = revision }
-        let observed : ReleaseHandoff.ObservedPlatformMetadata =
-            { ArtifactId = expected.ArtifactId
-              ArtifactName = expected.ArtifactName
-              Role = expected.Role
-              Component = expected.Component
-              Repository = expected.Repository
-              RunId = expected.RunId
-              Attempt = expected.Attempt
-              Sha = expected.Sha }
-        let outerDigest =
-            match ReleaseHandoff.makeOuterDigest outerSha with
-            | Ok digest -> digest
-            | Error error -> failwithf "outer transport digest fixture failed: %s" (ReleaseError.message error)
-        let evidence : ReleaseHandoff.ArtifactEvidence =
-            { Expected = expected
-              Observed = observed
-              ActualOuterDigest = outerDigest
-              TransportSourcePath = "controlled-artifact.zip"
-              TransportLength = int64 outerBytes.Length
-              RawTransportBytes = outerBytes }
-        let snapshot =
-            match ReleaseHandoff.readRawTransport "controlled-artifact.zip" outerBytes evidence producer.Policy with
-            | Ok value -> value
-            | Error error -> failwithf "prepared candidate transport failed validation: %s" (ReleaseError.message error)
 
-        if preparation.InnerArchiveSha256.Value <> snapshot.InnerArchiveSha256.Value
-           || preparation.InnerArchiveSize <> snapshot.InnerArchiveSize
-           || preparation.ManifestSha256.Value <> (snapshot.ManifestSha256 |> Option.map (fun value -> value.Value) |> Option.defaultValue "")
-           || preparation.ManifestSize <> (snapshot.ManifestSize |> Option.defaultValue -1L) then
-            failwith "preparation receipt did not match the transport-verified snapshot"
+        // Build a 2-entry candidate directory (archive + distribution.json) so the canonical
+        // `ReleaseHandoff.readCandidate` accepts it. No outer/preparation/evidence wrappers
+        // exist outside the production code path; the verified snapshot is the only seam.
+        let candidateRoot = Path.Combine(Path.GetTempPath(), $"mcp-integrity-{producer.ComponentId}-{Guid.NewGuid():N}")
+        Directory.CreateDirectory candidateRoot |> ignore
+        File.WriteAllBytes(Path.Combine(candidateRoot, producer.ArchiveName), archiveBytes)
+        File.WriteAllBytes(Path.Combine(candidateRoot, "distribution.json"), manifestBytes)
+        let verifiedSnapshot =
+            match ReleaseHandoff.readCandidate candidateRoot producer.Policy revision with
+            | Ok value -> value
+            | Error error -> failwithf "%s candidate was rejected by readCandidate: %s" producer.ComponentId (ReleaseError.message error)
+        try Directory.Delete(candidateRoot, true) with _ -> ()
 
         let! verifiedResult =
             VerifiedCandidate.createFromSnapshot
-                snapshot
+                verifiedSnapshot
                 producer.Policy
                 producer.ArchiveName
                 revision
@@ -265,7 +226,7 @@ let private writeCandidate (root: string) (producer: Producer) (revision: string
         let verified =
             match verifiedResult with
             | Ok value -> value
-            | Error error -> failwithf "verified candidate factory rejected a valid preparation: %s" (ReleaseError.message error)
+            | Error error -> failwithf "verified candidate factory rejected a valid candidate: %s" (ReleaseError.message error)
 
         return
             { Producer = producer

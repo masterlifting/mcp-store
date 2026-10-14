@@ -53,21 +53,32 @@ let private write (root: string) (relativePath: string) (contents: string) =
     File.WriteAllText(path, contents)
     path
 
-let private policySource componentId =
+// WHY: the production policy reader only consumes strict JSON over the canonical 9 fields,
+//   so the preparation fixture writes the same shape to a temporary Config.json. The JSON
+//   template is the single source of fixture policy; no F# grammar support is preserved.
+let private policyJson componentId =
     let productName = if componentId = "dotnet" then "Dotnet" else "Workflow"
     let entryDll = $"Mcp.{productName}.dll"
-    String.concat
-        Environment.NewLine
-        [ "module ReleaseConfig"
-          $"let componentId = \"{componentId}\""
-          "let version = \"7.8.9\""
-          $"let entryDll = \"{entryDll}\""
-          "let sdkVersion = \"fixture-sdk\""
-          "let runtimeVersion = \"fixture-runtime\""
-          "let platform = \"fixture-platform\""
-          "let archiveName = $\"v{version}.zip\""
-          "let assetUri = $\"https://github.com/masterlifting/mcp-store/releases/download/{componentId}/{archiveName}\""
-          $"let publishedFiles = [ \"FSharp.Core.dll\"; \"Mcp.{productName}.deps.json\"; \"{entryDll}\"; \"Mcp.{productName}.runtimeconfig.json\" ]" ]
+    let node = JsonObject()
+    node["componentId"] <- JsonValue.Create componentId
+    node["version"] <- JsonValue.Create "7.8.9"
+    node["entryDll"] <- JsonValue.Create entryDll
+    node["sdkVersion"] <- JsonValue.Create "fixture-sdk"
+    node["runtimeVersion"] <- JsonValue.Create "fixture-runtime"
+    node["platform"] <- JsonValue.Create "fixture-platform"
+    node["archiveName"] <- JsonValue.Create "v7.8.9.zip"
+    node["assetUri"] <- JsonValue.Create $"https://github.com/masterlifting/mcp-store/releases/download/{componentId}/v7.8.9.zip"
+    let files = JsonArray()
+    files.Add(JsonValue.Create "FSharp.Core.dll") |> ignore
+    files.Add(JsonValue.Create $"Mcp.{productName}.deps.json") |> ignore
+    files.Add(JsonValue.Create entryDll) |> ignore
+    files.Add(JsonValue.Create $"Mcp.{productName}.runtimeconfig.json") |> ignore
+    node["publishedFiles"] <- files
+    node.ToJsonString(JsonSerializerOptions(WriteIndented = true))
+
+// WHY: test fixture generation now goes through the strict JSON policy template so the same
+//   canonical 9-field projection path is exercised as the canonical Config.json files.
+let private policySource componentId = policyJson componentId
 
 let private parsePolicy configPath =
     ReleasePolicy.parseBytes configPath (File.ReadAllBytes configPath)
@@ -155,7 +166,7 @@ let private writeFixture (root: string) (failure: StageFailure option) =
         for componentId in componentIds do
             let item = JsonObject()
             item["componentId"] <- JsonValue.Create componentId
-            item["configPath"] <- JsonValue.Create $"{componentId}/release/Config.fsx"
+            item["configPath"] <- JsonValue.Create $"{componentId}/release/Config.json"
             participants.Add item
         roster["participants"] <- participants
         write root "infrastructure/release/Participants.json" (roster.ToJsonString()) |> ignore
@@ -166,7 +177,7 @@ let private writeFixture (root: string) (failure: StageFailure option) =
                 |> Option.map (stageFailure componentId)
                 |> Option.defaultValue ("", "")
 
-            let configPath = write root $"{componentId}/release/Config.fsx" (policySource componentId)
+            let configPath = write root $"{componentId}/release/Config.json" (policySource componentId)
             let policy = parsePolicy configPath
             writeProducerArchive root policy
             write root $"{componentId}/release/Build.fsx" (stageScript "build" (scriptFails selectedProducer selectedStage componentId "build")) |> ignore
@@ -205,13 +216,13 @@ let private prepareWritesPortableCandidateAndUsesExplicitProducerGates =
                     async {
                         do! writeFixture root None
                         let outputPath = Path.Combine(root, "candidate-output")
-                        let! exitCode, output = runPrepare root $"{componentId}/release/Config.fsx" outputPath
+                        let! exitCode, output = runPrepare root $"{componentId}/release/Config.json" outputPath
                         Expect.equal exitCode 0 $"{componentId} preparation succeeds: {output}"
                         let summary = JsonNode.Parse(output.Trim()).AsObject()
                         Expect.equal (summary["status"].GetValue<string>()) "prepared" $"{componentId} reports preparation only"
-                        Expect.isTrue (File.Exists(Path.Combine(outputPath, "preparation.json"))) $"{componentId} emits the preparation receipt"
                         Expect.isTrue (File.Exists(Path.Combine(outputPath, "distribution.json"))) $"{componentId} emits its standalone manifest"
                         Expect.isTrue (File.Exists(Path.Combine(outputPath, "v7.8.9.zip"))) $"{componentId} emits the producer archive"
+                        Expect.isFalse (File.Exists(Path.Combine(outputPath, "preparation.json"))) $"{componentId} does not emit a preparation receipt"
                         let stages = File.ReadAllText(Path.Combine(root, "prepare-stages.log"))
                         let expected = if componentId = "workflow" then "build;pins;distribution;packaged;" else "build;pins;distribution;"
                         Expect.equal stages expected $"{componentId} runs only its ordered producer gates"
@@ -233,7 +244,7 @@ let private preparationFailureStopsBeforeLaterStages =
                     async {
                         do! writeFixture root (Some failure)
                         let outputPath = Path.Combine(root, "candidate-output")
-                        let! exitCode, output = runPrepare root $"{componentId}/release/Config.fsx" outputPath
+                        let! exitCode, output = runPrepare root $"{componentId}/release/Config.json" outputPath
                         Expect.equal exitCode 4 $"{componentId}/{expectedPhase} returns the structured preparation failure"
                         let diagnostic = JsonNode.Parse(output.Trim()).AsObject()
                         Expect.equal (diagnostic["status"].GetValue<string>()) "failed" $"{componentId}/{expectedPhase} status"
@@ -260,7 +271,7 @@ let private prepareRefusesPublicationAuthority =
             info.UseShellExecute <- false
             info.RedirectStandardOutput <- true
             info.RedirectStandardError <- true
-            [ runnerAssembly; "--prepare-authority-probe"; "dotnet/release/Config.fsx"; candidatePath ]
+            [ runnerAssembly; "--prepare-authority-probe"; "dotnet/release/Config.json"; candidatePath ]
             |> List.iter info.ArgumentList.Add
             [ "GITHUB_TOKEN"; "GH_TOKEN"; "MCP_RELEASE_DO_UPLOAD"; "MCP_RELEASE_GITHUB_OWNER"
               "MCP_RELEASE_GITHUB_REPOSITORY"; "GITHUB_ENV"; "GITHUB_OUTPUT" ]

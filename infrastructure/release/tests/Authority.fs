@@ -1,8 +1,9 @@
 // role: focused authority-gate regression for the publish pipeline entrypoint
 // scope: child-process probes invoked through Expecto CLIArgs so the host's environment is
 //   never touched and no real credential values are read; the production pipeline is invoked
-//   via reflection on the private `runPublishPipelineWithTransportFactory` whose 8-arg
-//   signature is reused without modification.
+//   via reflection on the private `runPublishPipelineWithTransportFactory` whose 7-arg
+//   signature is reused without modification; the canonical 2-entry candidate directory
+//   (producer archive + distribution.json) is the only fixture seam.
 // child probe contract:
 //   * parent strips every publication credential name by NAME on the child ProcessStartInfo
 //     (info.EnvironmentVariables.Remove) without reading the value and never prints it;
@@ -32,7 +33,6 @@ open System.Text.Json.Nodes
 
 open Expecto
 open Microsoft.FSharp.Core
-open Microsoft.FSharp.Reflection
 
 open BuildProvenance
 
@@ -67,9 +67,6 @@ type private ScriptedTagHandler () =
 let private runnerAssembly =
     typeof<ReleasePolicy.PolicyProjection>.Assembly
 
-let private publishCliType =
-    runnerAssembly.GetType("ReleaseRunner+PublishCli", throwOnError = true)
-
 let private runPublishPipelineMethod =
     let runnerType = runnerAssembly.GetType("ReleaseRunner", throwOnError = true)
     let method =
@@ -84,8 +81,7 @@ let private sha256Hex (bytes: byte[]) =
     SHA256.HashData bytes |> Convert.ToHexString |> fun value -> value.ToLowerInvariant()
 
 // WHY: the inner producer archive must use the canonical Deflate (method 8) the strict
-//   ReleaseArchive.parse accepts; the outer candidate archive uses plain stored (method 0),
-//   the standard GitHub ZIP shape read permissively by ZipArchive.Read. One helper, two shapes.
+//   ReleaseArchive.parse accepts; one helper, one shape.
 let private zipBytes (level: CompressionLevel) (entries: (string * byte[]) list) =
     use output = new MemoryStream()
     do
@@ -98,27 +94,28 @@ let private zipBytes (level: CompressionLevel) (entries: (string * byte[]) list)
 
 type private Fixture =
     { Policy: ReleasePolicy.PolicyProjection
-      ArchiveName: string
-      OuterBytes: byte[]
-      OuterSha: string
       Snapshot: ReleaseHandoff.CandidateArchiveSnapshot
       Owner: string
       Name: string
-      MetadataLocalPath: string
-      RunId: string
-      Attempt: string
-      CommitSha: string
-      OuterSourcePath: string }
+      EventSha: string }
 
-let private repositoryRoot = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "..", ".."))
+let private repositoryRoot = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "../../../"))
 
-let private canonicalPolicy componentId =
-    let path = Path.Combine(repositoryRoot, componentId, "release", "Config.fsx")
-    match ReleasePolicy.parseBytes path (File.ReadAllBytes path) with
-    | Ok policy -> policy
-    | Error error -> failwithf "%s canonical policy failed to parse: %s" componentId (ReleaseError.message error)
+// WHY: policy is read via the simplified `releasePolicy` helper that re-reads the canonical
+//   Config.json from disk rather than assuming a stored policy capture; the same byte
+//   observation the production publisher makes is the input the inner pipeline observes.
+let private releasePolicy componentId =
+    let path = Path.Combine(repositoryRoot, componentId, "release", "Config.json")
+    ReleasePolicy.parseBytes path (File.ReadAllBytes path)
+    |> function
+        | Ok policy -> policy
+        | Error error -> failwithf "%s canonical policy failed to parse: %s" componentId (BuildProvenance.ReleaseError.message error)
 
-let private buildOuter (policy: ReleasePolicy.PolicyProjection) (revision: string) =
+// WHY: build the inner producer archive + manifest bytes that the production data-only
+//   candidate directory carries. The 2-entry candidate directory (archive + distribution.json)
+//   is what ReleaseHandoff.readCandidate consumes; no outer transport / prep / evidence
+//   wrappers exist outside the production code path.
+let private buildInner (policy: ReleasePolicy.PolicyProjection) (revision: string) =
     let payloads =
         policy.PublishedFiles
         |> List.map (fun name -> name, Encoding.UTF8.GetBytes $"authority-fixture:{policy.ComponentId}:{name}")
@@ -128,7 +125,6 @@ let private buildOuter (policy: ReleasePolicy.PolicyProjection) (revision: strin
     manifest["schemaVersion"] <- JsonValue.Create 1
     manifest["id"] <- JsonValue.Create policy.ComponentId
     manifest["version"] <- JsonValue.Create policy.Version
-    // The manifest and verified event context must describe the same committed source.
     manifest["revision"] <- JsonValue.Create revision
     manifest["sdk"] <- JsonValue.Create policy.SdkVersion
     manifest["entryDll"] <- JsonValue.Create policy.EntryDll
@@ -153,128 +149,30 @@ let private buildOuter (policy: ReleasePolicy.PolicyProjection) (revision: strin
         zipBytes CompressionLevel.Optimal
             (payloads
              @ [ "distribution.json", manifestBytes ])
-    // Inner archive and standalone manifest are computed first; preparation.json binds the
-    // FOUR known inner-archive / manifest hash-and-size fields before the outer bytes exist,
-    // so the receipt never references a stale digest of the outer ZIP it sits inside.
-    let preparationNode = JsonObject()
-    preparationNode["schemaVersion"] <- JsonValue.Create 1
-    preparationNode["innerArchiveSha256"] <- JsonValue.Create(sha256Hex innerBytes)
-    preparationNode["innerArchiveSize"] <- JsonValue.Create(int64 innerBytes.Length)
-    preparationNode["manifestSha256"] <- JsonValue.Create(sha256Hex manifestBytes)
-    preparationNode["manifestSize"] <- JsonValue.Create(int64 manifestBytes.Length)
-    let preparationBytes = Encoding.UTF8.GetBytes(preparationNode.ToJsonString())
-    let outerBytes =
-        zipBytes CompressionLevel.NoCompression
-            [ policy.ArchiveName, innerBytes
-              "distribution.json", manifestBytes
-              "preparation.json", preparationBytes ]
-    outerBytes, innerBytes, manifestBytes
+    innerBytes, manifestBytes
+
+let private readCandidateSnapshot (policy: ReleasePolicy.PolicyProjection) (revision: string) =
+    let innerBytes, manifestBytes = buildInner policy revision
+    let root = Path.Combine(Path.GetTempPath(), $"authority-probe-{policy.ComponentId}-{Guid.NewGuid():N}")
+    Directory.CreateDirectory root |> ignore
+    File.WriteAllBytes(Path.Combine(root, policy.ArchiveName), innerBytes)
+    File.WriteAllBytes(Path.Combine(root, "distribution.json"), manifestBytes)
+    try
+        ReleaseHandoff.readCandidate root policy revision
+    finally
+        try Directory.Delete(root, true) with _ -> ()
 
 let private buildFixture (componentId: string) (commitSha: string) : Fixture =
-    let policy = canonicalPolicy componentId
-    let outerBytes, _, manifestBytes = buildOuter policy commitSha
-    let outerSha = sha256Hex outerBytes
-
-    let expected : ReleaseHandoff.ExpectedMetadata =
-        { ArtifactId = "controlled-artifact"
-          ArtifactName = componentId + "-candidate"
-          Role = "candidate"
-          Component = componentId
-          Repository = "masterlifting/mcp-store"
-          RunId = "controlled-run"
-          Attempt = "1"
-          Sha = commitSha }
-    let observed : ReleaseHandoff.ObservedPlatformMetadata =
-        { ArtifactId = expected.ArtifactId
-          ArtifactName = expected.ArtifactName
-          Role = expected.Role
-          Component = expected.Component
-          Repository = expected.Repository
-          RunId = expected.RunId
-          Attempt = expected.Attempt
-          Sha = expected.Sha }
-
-    let outerDigest =
-        match ReleaseHandoff.makeOuterDigest outerSha with
-        | Ok value -> value
-        | Error error -> failwithf "fixture outer digest rejected: %s" (ReleaseError.message error)
-
-    let evidence : ReleaseHandoff.ArtifactEvidence =
-        { Expected = expected
-          Observed = observed
-          ActualOuterDigest = outerDigest
-          TransportSourcePath = "candidate-artifact.zip"
-          TransportLength = int64 outerBytes.Length
-          RawTransportBytes = outerBytes }
-
+    let policy = releasePolicy componentId
     let snapshot =
-        match ReleaseHandoff.readRawTransport "candidate-artifact.zip" outerBytes evidence policy with
+        match readCandidateSnapshot policy commitSha with
         | Ok value -> value
-        | Error error -> failwithf "%s readRawTransport rejected the fixture: %s" componentId (ReleaseError.message error)
-
-    let metadataAssetName = ReleaseMetadata.metadataAssetName policy.ComponentId policy.Version
-    let metadataLocalPath = Path.Combine(Path.GetTempPath(), $"authority-probe-{componentId}", metadataAssetName)
-
+        | Error error -> failwithf "%s readCandidate rejected the fixture: %s" componentId (BuildProvenance.ReleaseError.message error)
     { Policy = policy
-      ArchiveName = policy.ArchiveName
-      OuterBytes = outerBytes
-      OuterSha = outerSha
       Snapshot = snapshot
       Owner = "masterlifting"
       Name = "mcp-store"
-      MetadataLocalPath = metadataLocalPath
-      RunId = "controlled-run"
-      Attempt = "1"
-      CommitSha = commitSha
-      OuterSourcePath = "candidate-artifact.zip" }
-
-let private makePublishCli (f: Fixture) =
-    let closurePath = Path.Combine(repositoryRoot, "infrastructure", "release", "Publisher.json")
-    let candidateTransportPath = Path.Combine(Path.GetTempPath(), $"authority-probe-{f.Policy.ComponentId}", f.OuterSourcePath)
-    let trustedReceiptPath = Path.Combine(Path.GetTempPath(), $"authority-probe-{f.Policy.ComponentId}", "trusted-receipt.json")
-    let transportEvidencePath = Path.Combine(Path.GetTempPath(), $"authority-probe-{f.Policy.ComponentId}", "transport-evidence.json")
-
-    let overrideMap : Map<string, string> =
-        Map.ofList
-            [ "ClosurePath", closurePath
-              "CandidateTransportPath", candidateTransportPath
-              "Repo", "masterlifting/mcp-store"
-              "RunId", f.RunId
-              "Attempt", f.Attempt
-              "EventSha", f.CommitSha
-              "Role", "candidate"
-              "ProducerComponent", f.Policy.ComponentId
-              "ArtifactId", "controlled-artifact"
-              "ArtifactName", f.Policy.ComponentId + "-candidate"
-              "TransportSha256", f.OuterSha
-              "BuilderSdk", f.Policy.SdkVersion
-              "BuilderRuntime", f.Policy.RuntimeVersion
-              "BuilderPlatform", f.Policy.Platform
-              "WorkspaceRoot", repositoryRoot
-              "TrustedReceiptPath", trustedReceiptPath
-              "TransportEvidence", transportEvidencePath ]
-
-    let values : obj[] =
-        [| box overrideMap.["ClosurePath"]
-           box overrideMap.["CandidateTransportPath"]
-           box overrideMap.["Repo"]
-           box overrideMap.["RunId"]
-           box overrideMap.["Attempt"]
-           box overrideMap.["EventSha"]
-           box overrideMap.["Role"]
-           box overrideMap.["ProducerComponent"]
-           box overrideMap.["ArtifactId"]
-           box overrideMap.["ArtifactName"]
-           box overrideMap.["TransportSha256"]
-           box overrideMap.["BuilderSdk"]
-           box overrideMap.["BuilderRuntime"]
-           box overrideMap.["BuilderPlatform"]
-           box overrideMap.["WorkspaceRoot"]
-           box overrideMap.["TrustedReceiptPath"]
-           box overrideMap.["TransportEvidence"]
-           box (Option<string>.None) |]
-
-    FSharpValue.MakeRecord(publishCliType, values, BindingFlags.NonPublic)
+      EventSha = commitSha }
 
 // The publication credential names listed here are the only entries that are removed BY
 // NAME from a child's ProcessStartInfo before it starts. The parent never reads the value,
@@ -322,21 +220,33 @@ let private runPipelineWithHandler
           CreateUploadClient = fun () -> configure (new HttpClient (handler, disposeHandler = false))
           CreateRedirectClient = fun () -> configure (new HttpClient (handler, disposeHandler = false)) }
     let factoryObj : obj = box factory
-    let cliObj = makePublishCli f
-    // 8-arg production signature: deferred factory, PublishCli, PolicyProjection, Snapshot,
-    // archiveName, metadataLocalPath, repositoryOwner, repositoryName. Preparation is no
-    // longer a separate pipeline arg; the verified Snapshot carries the parsed receipt.
-    let args : obj[] =
+    // WHY: the production `runPublishPipelineWithTransportFactory` has exactly one signature:
+    //   (createTransport, policy, snapshot, eventSha, metadataLocalPath, owner, repo).
+    //   The argument order, types, and arity are sourced from Runner.fs; the test constructs
+    //   the matched array of seven boxed arguments and invokes through reflection so any drift
+    //   between test and production breaks here first.
+    let policy = f.Policy
+    let snapshot = f.Snapshot
+    let metadataLocalPath =
+        Path.Combine(
+            Path.GetTempPath(),
+            $"authority-probe-{policy.ComponentId}",
+            ReleaseMetadata.metadataAssetName policy.ComponentId policy.Version)
+    let invoke : obj[] =
         [| factoryObj
-           cliObj
-           box f.Policy
-           box f.Snapshot
-           box f.ArchiveName
-           box f.MetadataLocalPath
+           box policy
+           box snapshot
+           box f.EventSha
+           box metadataLocalPath
            box f.Owner
            box f.Name |]
+    let parameterCount = runPublishPipelineMethod.GetParameters().Length
+    if parameterCount <> 7 then
+        failwithf
+            "runPublishPipelineWithTransportFactory arity changed: expected 7, observed %d"
+            parameterCount
     let invoked : Async<int> =
-        runPublishPipelineMethod.Invoke (null, args) :?> Async<int>
+        runPublishPipelineMethod.Invoke (null, invoke) :?> Async<int>
     let! exitCode = invoked
     let recorded =
         match handler with
@@ -377,7 +287,7 @@ let private emitProbeResult
 let private resolveCommitHead () = async {
     match! BuildProvenance.committedHead repositoryRoot with
     | Ok head -> return head
-    | Error error -> return failwithf "failed to resolve committed HEAD: %s" (ReleaseError.message error)
+    | Error error -> return failwithf "failed to resolve committed HEAD: %s" (BuildProvenance.ReleaseError.message error)
 }
 
 // internal entry invoked from Main.fs --authority-probe; runs through normal Expecto
@@ -590,7 +500,7 @@ let private authorizedFixedTag =
                     // Remote observation failures are transaction failures, not pre-contract rejections.
                     if result.ExitCode <> 1 then
                         exitFailures.Add (
-                            $"authorized/{componentId}: transaction FAILED on scripted HTTP 500 exits with code 1 (got {result.ExitCode})")
+                            $"{componentId}: transaction FAILED on scripted HTTP 500 exits with code 1 (got {result.ExitCode})")
                     let canonical =
                         sprintf "/repos/%s/%s/releases/tags/%s"
                             canonicalRepoOwner canonicalRepoName componentId

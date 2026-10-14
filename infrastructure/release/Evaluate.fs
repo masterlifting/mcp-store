@@ -260,7 +260,7 @@ module VerifiedCandidate =
     // id/version/archive/revision) using the snapshot's bytes; no policy or
     // toolchain values are duplicated from the trusted receipt. The policy
     // argument is the byte-safe `parseBytes` projection re-derived from the
-    // canonical Config.fsx bytes by the publisher, never a candidate-supplied
+    // canonical Config.json by the publisher, never a candidate-supplied
     // projection. The evaluated head, owner and name come from the platform-
     // supplied CLI / event context; the metadata local path is supplied by the
     // caller and is the only place outside `VerifiedCandidate` that references
@@ -283,17 +283,15 @@ module VerifiedCandidate =
             let ensure cond error = if cond then Ok () else Error error
 
             let computation () : Result<VerifiedCandidate, ReleaseError> =
-                let innerBytesCopy = snapshot.InnerArchiveBytesCopy ()
+                let innerBytesCopy = snapshot.ArchiveBytesCopy ()
                 let manifestBytesCopy = snapshot.ManifestBytesCopy ()
-                let embeddedBytesCopy = snapshot.EmbeddedManifestBytesCopy ()
 
                 let archiveSha = sha256Hex innerBytesCopy
                 let archiveSize = innerBytesCopy.Length
                 let manifestSha = sha256Hex manifestBytesCopy
                 let manifestSize = manifestBytesCopy.Length
-                let embeddedSha = sha256Hex embeddedBytesCopy
 
-                let buildCandidate (header: ReleaseCompare.EmbeddedManifestHeader) (observation: ReleaseCompare.ArchiveObservation) =
+                let buildCandidate (header: ReleaseCompare.EmbeddedManifestHeader) (observation: ReleaseCompare.ArchiveObservation) (embeddedBytesCopy: byte[]) (embeddedSha: string) =
                     let contract : ReleaseCompare.ComponentContract =
                         { ComponentId = policy.ComponentId
                           Version = policy.Version
@@ -359,8 +357,6 @@ module VerifiedCandidate =
                         Error(MalformedArtifact(candidateLabel, "the verified candidate inner archive bytes are missing or empty"))
                     elif isNull manifestBytesCopy || manifestBytesCopy.Length = 0 then
                         Error(MalformedArtifact(candidateLabel, "the verified candidate manifest bytes are missing or empty"))
-                    elif isNull embeddedBytesCopy || embeddedBytesCopy.Length = 0 then
-                        Error(MalformedArtifact(candidateLabel, "the verified candidate embedded manifest bytes are missing or empty"))
                     else
                         Ok ()
 
@@ -372,7 +368,9 @@ module VerifiedCandidate =
                 let runSnapshotChecks
                     (observation: ReleaseCompare.ArchiveObservation)
                     (embeddedBody: string)
+                    (embeddedBytesCopy: byte[])
                     : Result<ReleaseCompare.EmbeddedManifestHeader, ReleaseError> =
+                    let embeddedSha = sha256Hex embeddedBytesCopy
                     let manifestBytesCheck =
                         ensure (embeddedBytesCopy = manifestBytesCopy)
                             (IdentityMismatch("candidate manifest bytes", "embedded == standalone",
@@ -410,14 +408,19 @@ module VerifiedCandidate =
                     | None ->
                         Error(MalformedArtifact(candidateLabel, "the candidate archive is missing the canonical distribution.json entry; refusing to publish"))
                     | Some embeddedBody ->
-                        runSnapshotChecks observation embeddedBody
-                        |> Result.map (fun header -> (header, observation))
+                        let embeddedBytesCopy = Encoding.UTF8.GetBytes embeddedBody
+                        if embeddedBytesCopy.Length = 0 then
+                            Error(MalformedArtifact(candidateLabel, "the verified candidate embedded manifest bytes are missing or empty"))
+                        else
+                            let embeddedSha = sha256Hex embeddedBytesCopy
+                            runSnapshotChecks observation embeddedBody embeddedBytesCopy
+                            |> Result.map (fun header -> (header, observation, embeddedBytesCopy, embeddedSha))
 
                 fieldChecks
                 |> Result.bind (fun _ -> bytesAvailable ())
                 |> Result.bind (fun _ -> ReleaseCompare.observeBytes candidateLabel innerBytesCopy)
                 |> Result.bind fromObservation
-                |> Result.map (fun (header, observation) -> buildCandidate header observation)
+                |> Result.map (fun (header, observation, embeddedBytesCopy, embeddedSha) -> buildCandidate header observation embeddedBytesCopy embeddedSha)
             return computation ()
         }
 

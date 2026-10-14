@@ -11,9 +11,9 @@
   <ItemGroup>
     <Compile Include="Fixture.fs" />
     <Compile Include="Process.fs" />
+    <Compile Include="Snapshots.fs" />
     <Compile Include="Enrollment.fs" />
     <Compile Include="Coherence.fs" />
-    <Compile Include="Bootstrap.fs" />
     <Compile Include="Compare.fs" />
     <Compile Include="Evaluate.fs" />
     <Compile Include="Historical.fs" />
@@ -23,11 +23,11 @@
     <Compile Include="Integrity.fs" />
     <Compile Include="Policy.fs" />
     <Compile Include="Handoff.fs" />
-    <Compile Include="Authority.fs" />
     <Compile Include="Revision.fs" />
     <Compile Include="Runner.fs" />
     <Compile Include="Telegram.fs" />
     <Compile Include="Orchestration.fs" />
+    <Compile Include="Authority.fs" />
     <Compile Include="Main.fs" />
   </ItemGroup>
   <ItemGroup>

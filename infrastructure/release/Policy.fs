@@ -5,7 +5,7 @@ open System
 open System.Collections.Generic
 open System.IO
 open System.Security.Cryptography
-open System.Text
+open System.Text.Json
 open BuildProvenance
 
 type PolicyProjection =
@@ -32,330 +32,126 @@ let private requiredFields =
       "assetUri"
       "publishedFiles" ]
 
-let private requiredFieldSet = Set.ofList requiredFields
-
 let private maxSourceBytes = 16 * 1024 * 1024
 
-let private strictUtf8 =
-    UTF8Encoding(encoderShouldEmitUTF8Identifier = false, throwOnInvalidBytes = true)
+let private sha256Hex (bytes: byte array) : string =
+    SHA256.HashData bytes |> Convert.ToHexString |> fun value -> value.ToLowerInvariant()
 
-exception private PolicyParse of detail: string
-let private bad detail = raise (PolicyParse detail)
+let private malformed sourcePath detail = Error(MalformedArtifact(sourcePath, detail))
 
-type private Cursor =
-    { mutable Index: int
-      Text: string
-      Length: int }
-
-let private peek (c: Cursor) : char option =
-    if c.Index < c.Length then Some c.Text.[c.Index] else None
-
-let private isIdentStart (ch: char) =
-    (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch = '_'
-
-let private isIdentChar (ch: char) =
-    isIdentStart ch || (ch >= '0' && ch <= '9')
-
-let private readIdent (c: Cursor) : string =
-    if c.Index >= c.Length || not (isIdentStart c.Text.[c.Index]) then
-        bad $"expected an identifier at offset {c.Index}"
-
-    let startIdx = c.Index
-    c.Index <- c.Index + 1
-
-    while c.Index < c.Length && isIdentChar c.Text.[c.Index] do
-        c.Index <- c.Index + 1
-
-    c.Text.Substring(startIdx, c.Index - startIdx)
-
-let private skipTrivia (c: Cursor) : unit =
-    let mutable keepGoing = true
-
-    while c.Index < c.Length && keepGoing do
-        let ch = c.Text.[c.Index]
-
-        if ch = ' ' || ch = '\t' || ch = '\r' || ch = '\n' then
-            c.Index <- c.Index + 1
-        elif ch = '/' && c.Index + 1 < c.Length && c.Text.[c.Index + 1] = '/' then
-            c.Index <- c.Index + 2
-
-            while c.Index < c.Length && c.Text.[c.Index] <> '\n' do
-                c.Index <- c.Index + 1
-        else
-            keepGoing <- false
-
-let private appendEscaped (sb: StringBuilder) (escape: char) : unit =
-    match escape with
-    | '"' -> sb.Append '"' |> ignore
-    | '\\' -> sb.Append '\\' |> ignore
-    | '/' -> sb.Append '/' |> ignore
-    | 'n' -> sb.Append '\n' |> ignore
-    | 'r' -> sb.Append '\r' |> ignore
-    | 't' -> sb.Append '\t' |> ignore
-    | 'b' -> sb.Append '\b' |> ignore
-    | 'f' -> sb.Append '\012' |> ignore
-    | _ -> bad $"unsupported escape sequence '\\{escape}' in string literal"
-
-let private readStringLiteral (c: Cursor) : string =
-    if c.Index >= c.Length || c.Text.[c.Index] <> '"' then
-        bad $"expected '\"' at offset {c.Index}"
-
-    c.Index <- c.Index + 1
-    let sb = StringBuilder()
-
-    let mutable continueLoop = true
-
-    while c.Index < c.Length && continueLoop do
-        let ch = c.Text.[c.Index]
-
-        if ch = '"' then
-            c.Index <- c.Index + 1
-            continueLoop <- false
-        elif ch = '\\' then
-            if c.Index + 1 >= c.Length then bad "unterminated escape sequence in string literal"
-            let escape = c.Text.[c.Index + 1]
-            c.Index <- c.Index + 2
-            appendEscaped sb escape
-        else
-            if ch = '\n' || ch = '\r' then bad "raw newline inside a string literal"
-            sb.Append ch |> ignore
-            c.Index <- c.Index + 1
-
-    if continueLoop then
-        bad "unterminated string literal"
-    else
-        sb.ToString()
-
-let private readInterpolatedString (c: Cursor) (bindings: IDictionary<string, string>) : string =
-    if c.Index + 1 >= c.Length || c.Text.[c.Index] <> '$' || c.Text.[c.Index + 1] <> '"' then
-        bad $"expected '$\"' at offset {c.Index}"
-
-    c.Index <- c.Index + 2
-    let sb = StringBuilder()
-
-    let mutable continueLoop = true
-
-    while c.Index < c.Length && continueLoop do
-        let ch = c.Text.[c.Index]
-
-        if ch = '"' then
-            c.Index <- c.Index + 1
-            continueLoop <- false
-        elif ch = '\\' then
-            if c.Index + 1 >= c.Length then
-                bad "unterminated escape sequence in interpolated string"
-
-            let escape = c.Text.[c.Index + 1]
-            c.Index <- c.Index + 2
-            appendEscaped sb escape
-        elif ch = '{' then
-            if c.Index + 1 < c.Length && c.Text.[c.Index + 1] = '{' then
-                sb.Append '{' |> ignore
-                c.Index <- c.Index + 2
-            else
-                c.Index <- c.Index + 1
-                let ident = readIdent c
-
-                if ident.Length = 0 then
-                    bad "empty interpolation reference"
-
-                if c.Index >= c.Length || c.Text.[c.Index] <> '}' then
-                    bad $"unclosed interpolation reference '{{{ident}'"
-
-                c.Index <- c.Index + 1
-
-                match bindings.TryGetValue ident with
-                | true, value -> sb.Append value |> ignore
-                | _ -> bad $"interpolation references undeclared binding '{ident}'"
-        elif ch = '}' then
-            if c.Index + 1 < c.Length && c.Text.[c.Index + 1] = '}' then
-                sb.Append '}' |> ignore
-                c.Index <- c.Index + 2
-            else
-                bad "unmatched '}' in interpolated string"
-        else
-            if ch = '\n' || ch = '\r' then
-                bad "raw newline inside an interpolated string"
-
-            sb.Append ch |> ignore
-            c.Index <- c.Index + 1
-
-    if continueLoop then
-        bad "unterminated interpolated string"
-    else
-        sb.ToString()
-
-let private readListElement (c: Cursor) (bindings: IDictionary<string, string>) : string =
-    skipTrivia c
-
-    if c.Index >= c.Length then
-        bad "expected a list element before end of input"
-
-    match peek c with
-    | Some '$' -> readInterpolatedString c bindings
-    | Some '"' -> readStringLiteral c
-    | Some ch -> bad $"unsupported list element at offset {c.Index}: '{ch}'"
-    | None -> bad "expected a list element before end of input"
-
-let private readListLiteral (c: Cursor) (bindings: IDictionary<string, string>) : string =
-    // c.Index points at '['.
-    if c.Index >= c.Length || c.Text.[c.Index] <> '[' then
-        bad $"expected '[' at offset {c.Index}"
-
-    c.Index <- c.Index + 1
-    let items = List<string>()
-
-    let mutable continueLoop = true
-
-    skipTrivia c
-
-    if c.Index < c.Length && c.Text.[c.Index] = ']' then
-        c.Index <- c.Index + 1
-        continueLoop <- false
-    else
-        while continueLoop do
-            let element = readListElement c bindings
-            items.Add element |> ignore
-            skipTrivia c
-
-            if c.Index >= c.Length then
-                continueLoop <- false
-            elif c.Text.[c.Index] = ';' then
-                c.Index <- c.Index + 1
-                skipTrivia c
-            elif c.Text.[c.Index] = ']' then
-                c.Index <- c.Index + 1
-                continueLoop <- false
-            elif c.Text.[c.Index] = '"' || c.Text.[c.Index] = '$' then
-                () // whitespace separates the next element; no ';' required
-            else
-                bad $"expected ';' or ']' inside list at offset {c.Index}"
-
-    String.concat ";" items
-
-let private readLetBinding (c: Cursor) (bindings: IDictionary<string, string>) : unit =
-    // Caller must have just consumed the `let` keyword.
-    let name = readIdent c
-
-    if bindings.ContainsKey name then
-        bad $"duplicate let binding '{name}' in canonical Config.fsx"
-
-    if not (Set.contains name requiredFieldSet) then
-        let requiredFieldsList = String.concat ", " requiredFields
-        bad $"unsupported let binding '{name}' in canonical Config.fsx; the canonical schema is exactly [{requiredFieldsList}]"
-
-    skipTrivia c
-
-    if c.Index >= c.Length || c.Text.[c.Index] <> '=' then
-        bad $"expected '=' after let binding name '{name}' at offset {c.Index}"
-
-    c.Index <- c.Index + 1
-    skipTrivia c
-
-    if c.Index >= c.Length then
-        bad $"expected a value for let binding '{name}'"
-
-    let resolved : string =
-        match peek c with
-        | Some '"' -> readStringLiteral c
-        | Some '$' -> readInterpolatedString c bindings
-        | Some '[' -> readListLiteral c bindings
-        | Some ch -> bad $"unsupported expression after let binding '{name}' at offset {c.Index}: '{ch}'"
-        | None -> bad $"expected a value for let binding '{name}'"
-
-    bindings.Add(name, resolved) |> ignore
-
-let private sha256Hex (bytes: byte[]) : string =
-    SHA256.HashData bytes |> Convert.ToHexString |> fun v -> v.ToLowerInvariant()
-
-let private parseAll (text: string) (sourcePath: string) : Dictionary<string, string> =
-    let cursor = { Index = 0; Text = text; Length = text.Length }
-    skipTrivia cursor
-
-    if cursor.Index + 6 > cursor.Length || cursor.Text.Substring(cursor.Index, 6) <> "module" then
-        bad "the canonical Config.fsx must start with `module <Ident>`"
-
-    cursor.Index <- cursor.Index + 6
-    skipTrivia cursor
-    let moduleName = readIdent cursor
-
-    if moduleName <> "ReleaseConfig" then
-        bad $"unsupported module name '{moduleName}'; only `module ReleaseConfig` is parsed"
-
-    skipTrivia cursor
-
-    let bindings = Dictionary<string, string>(StringComparer.Ordinal)
-    let mutable continueLoop = true
-
-    while cursor.Index < cursor.Length && continueLoop do
-        skipTrivia cursor
-
-        if cursor.Index >= cursor.Length then
-            continueLoop <- false
-        else
-            if cursor.Index + 3 > cursor.Length
-               || cursor.Text.Substring(cursor.Index, 3) <> "let" then
-                let preview = text.Substring(cursor.Index, min 16 (text.Length - cursor.Index))
-                bad $"unsupported top-level syntax at offset {cursor.Index}: '{preview}'"
-
-            cursor.Index <- cursor.Index + 3
-            skipTrivia cursor
-            readLetBinding cursor bindings
-
-    let mutable missing : string list = []
-
-    for field in requiredFields do
-        if not (bindings.ContainsKey field) then
-            missing <- field :: missing
-
-    match missing with
-    | _ :: _ ->
-        let detail = String.concat ", " (List.rev missing)
-        bad $"canonical Config.fsx is missing required field(s): {detail}"
-    | [] -> bindings
-
-let parseBytes (sourcePath: string) (boundedBytes: byte[]) : Result<PolicyProjection, ReleaseError> =
+let parseBytes (sourcePath: string) (boundedBytes: byte array) : Result<PolicyProjection, ReleaseError> =
     if isNull boundedBytes then
-        Error(MalformedArtifact(sourcePath, "the canonical Config.fsx bytes are null"))
+        malformed sourcePath "the canonical Config.json bytes are null"
     elif boundedBytes.Length > maxSourceBytes then
-        Error(MalformedArtifact(sourcePath, $"the canonical Config.fsx exceeds the bounded maximum of {maxSourceBytes} bytes (got {boundedBytes.Length})"))
+        malformed sourcePath $"the canonical Config.json exceeds the bounded maximum of {maxSourceBytes} bytes (got {boundedBytes.Length})"
     else
-        match boundedBytes |> Array.tryFindIndex (fun byte -> byte = 0uy) with
-        | Some nulOffset ->
-            Error(MalformedArtifact(sourcePath, $"the canonical Config.fsx contains an embedded NUL byte at offset {nulOffset}"))
+        match boundedBytes |> Array.tryFindIndex ((=) 0uy) with
+        | Some offset -> malformed sourcePath $"the canonical Config.json contains an embedded NUL byte at offset {offset}"
         | None ->
             try
-                let sha = sha256Hex boundedBytes
-                let text = strictUtf8.GetString boundedBytes
-                let bindings = parseAll text sourcePath
+                use document =
+                    JsonDocument.Parse(
+                        ReadOnlyMemory<byte>(boundedBytes),
+                        JsonDocumentOptions(AllowTrailingCommas = false, CommentHandling = JsonCommentHandling.Disallow, MaxDepth = 8)
+                    )
 
-                Ok
-                    { ComponentId = bindings.["componentId"]
-                      Version = bindings.["version"]
-                      EntryDll = bindings.["entryDll"]
-                      SdkVersion = bindings.["sdkVersion"]
-                      RuntimeVersion = bindings.["runtimeVersion"]
-                      Platform = bindings.["platform"]
-                      ArchiveName = bindings.["archiveName"]
-                      AssetUri = bindings.["assetUri"]
-                      PublishedFiles =
-                        (bindings.["publishedFiles"]).Split([| ';' |], StringSplitOptions.RemoveEmptyEntries)
-                        |> Array.toList
-                      SourcePath = sourcePath
-                      SourceSha256 = sha }
+                let root = document.RootElement
+
+                if root.ValueKind <> JsonValueKind.Object then
+                    malformed sourcePath "the canonical Config.json root must be an object"
+                else
+                    let properties = Dictionary<string, JsonElement>(StringComparer.Ordinal)
+                    let mutable failure: string option = None
+
+                    for property in root.EnumerateObject() do
+                        if properties.ContainsKey property.Name then
+                            failure <- Some $"the canonical Config.json contains duplicate field '{property.Name}'"
+                        elif not (List.contains property.Name requiredFields) then
+                            failure <- Some $"the canonical Config.json contains unknown field '{property.Name}'"
+                        else
+                            properties.Add(property.Name, property.Value)
+
+                    for field in requiredFields do
+                        if not (properties.ContainsKey field) && failure.IsNone then
+                            failure <- Some $"the canonical Config.json is missing required field '{field}'"
+
+                    let readString field =
+                        match properties.TryGetValue field with
+                        | true, element when element.ValueKind = JsonValueKind.String ->
+                            let value = element.GetString()
+                            if isNull value then Error $"field '{field}' must be a non-null string"
+                            elif value.Contains('\000') then Error $"field '{field}' contains a NUL character"
+                            else Ok value
+                        | true, _ -> Error $"field '{field}' must be a string"
+                        | _ -> Error $"field '{field}' is missing"
+
+                    let readPublishedFiles () =
+                        match properties.TryGetValue "publishedFiles" with
+                        | true, element when element.ValueKind = JsonValueKind.Array ->
+                            let values = ResizeArray<string>()
+                            for item in element.EnumerateArray() do
+                                if item.ValueKind <> JsonValueKind.String then
+                                    failure <- Some "field 'publishedFiles' must contain only strings"
+                                else
+                                    let value = item.GetString()
+                                    if isNull value || value.Contains('\000') then
+                                        failure <- Some "field 'publishedFiles' contains a null or NUL string"
+                                    else
+                                        values.Add value
+                            values |> Seq.toList
+                        | _ ->
+                            failure <- Some "field 'publishedFiles' must be an array of strings"
+                            []
+
+                    match failure with
+                    | Some detail -> malformed sourcePath detail
+                    | None ->
+                        let fields = requiredFields |> List.filter ((<>) "publishedFiles") |> List.map (fun field -> field, readString field)
+                        match fields |> List.tryPick (fun (field, result) -> match result with Error detail -> Some(field, detail) | Ok _ -> None) with
+                        | Some(_, detail) -> malformed sourcePath detail
+                        | None ->
+                            let values = fields |> List.map (fun (_, result) -> match result with Ok value -> value | Error _ -> "") |> List.toArray
+                            let publishedFiles = readPublishedFiles ()
+                            match failure with
+                            | Some detail -> malformed sourcePath detail
+                            | None ->
+                                Ok
+                                    { ComponentId = values.[0]
+                                      Version = values.[1]
+                                      EntryDll = values.[2]
+                                      SdkVersion = values.[3]
+                                      RuntimeVersion = values.[4]
+                                      Platform = values.[5]
+                                      ArchiveName = values.[6]
+                                      AssetUri = values.[7]
+                                      PublishedFiles = publishedFiles
+                                      SourcePath = sourcePath
+                                      SourceSha256 = sha256Hex boundedBytes }
             with
-            | PolicyParse detail -> Error(MalformedArtifact(sourcePath, detail))
-            | :? DecoderFallbackException as error ->
-                Error(MalformedArtifact(sourcePath, $"the canonical Config.fsx is not valid UTF-8: {error.Message}"))
+            | :? JsonException as error -> malformed sourcePath $"the canonical Config.json is not valid strict JSON: {error.Message}"
+
+let private readBounded (path: string) : Result<byte array, ReleaseError> =
+    try
+        use stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read)
+        if stream.Length > int64 maxSourceBytes then
+            Error(MalformedArtifact(path, $"the canonical Config.json exceeds the bounded maximum of {maxSourceBytes} bytes (got at least {stream.Length})"))
+        else
+            use buffer = new MemoryStream()
+            let chunk = Array.zeroCreate<byte> 8192
+            let mutable count = stream.Read(chunk, 0, chunk.Length)
+            while count > 0 do
+                buffer.Write(chunk, 0, count)
+                count <- stream.Read(chunk, 0, chunk.Length)
+            Ok(buffer.ToArray())
+    with
+    | :? IOException as error -> Error(FileFailure("read", path, error.Message))
+    | :? UnauthorizedAccessException as error -> Error(FileFailure("read", path, error.Message))
 
 let parse (sourcePath: string) : Result<PolicyProjection, ReleaseError> =
     try
         let absolute = Path.GetFullPath sourcePath
-        if not (File.Exists absolute) then
-            Error(MissingArtifact absolute)
-        else
-            parseBytes absolute (File.ReadAllBytes absolute)
+        if not (File.Exists absolute) then Error(MissingArtifact absolute)
+        else readBounded absolute |> Result.bind (parseBytes absolute)
     with
     | :? IOException as error -> Error(FileFailure("read", sourcePath, error.Message))
     | :? UnauthorizedAccessException as error -> Error(FileFailure("read", sourcePath, error.Message))
-    | PolicyParse detail -> Error(MalformedArtifact(sourcePath, detail))

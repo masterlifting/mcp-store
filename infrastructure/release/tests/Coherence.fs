@@ -9,7 +9,7 @@ open Expecto
 open ReleaseTestProcess
 
 let private repoRoot = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "..", ".."))
-let private currentParticipants = [ "dotnet", "dotnet/release/Config.fsx"; "workflow", "workflow/release/Config.fsx" ]
+let private currentParticipants = [ "dotnet", "dotnet/release/Config.json"; "workflow", "workflow/release/Config.json" ]
 
 let private withRoot (action: string -> Async<unit>) =
     async {
@@ -155,15 +155,10 @@ let private modernWorkflowGaps workflow =
     let jobs = workflowJobs workflow
     let prepare =
         jobs
-        |> List.tryFind (fun (_, body) -> Regex.IsMatch(body, "(?i)ReleaseRunner(?:\\.exe|\\.dll)?\\s+prepare\\b"))
-    let trustedBuilder =
-        jobs
-        |> List.tryFind (fun (_, body) ->
-            body.Contains("Publisher.json", StringComparison.Ordinal)
-            && Regex.IsMatch(body, "(?i)dotnet\\s+publish\\b"))
+        |> List.tryFind (fun (_, body) -> Regex.IsMatch(body, "(?i)&\\s+\\$\\w+\\s+prepare\\b"))
     let publisher =
         jobs
-        |> List.tryFind (fun (_, body) -> Regex.IsMatch(body, "(?i)ReleaseRunner(?:\\.exe|\\.dll)?\\s+publish\\b"))
+        |> List.tryFind (fun (_, body) -> Regex.IsMatch(body, "(?i)&\\s+\\$\\w+\\s+publish\\b"))
     let gaps = ResizeArray<string>()
 
     match prepare with
@@ -172,35 +167,23 @@ let private modernWorkflowGaps workflow =
     | Some (_, body) when Regex.IsMatch(body, "(?i)contents:\\s*write") -> gaps.Add "the preparation job has release-write authority"
     | _ -> ()
 
-    match trustedBuilder with
-    | None -> gaps.Add "no separate job builds the audited Publisher.json closure"
-    | Some (_, body) when not (Regex.IsMatch(body, "(?m)^\\s*runs-on:")) -> gaps.Add "the trusted-builder job is not a hosted job"
-    | Some (_, body) when Regex.IsMatch(body, "(?i)contents:\\s*write") -> gaps.Add "the trusted-builder job has release-write authority"
-    | Some (_, body) when body.Contains("dotnet/Mcp.Dotnet.fsproj", StringComparison.Ordinal)
-                          || body.Contains("workflow/Mcp.Workflow.fsproj", StringComparison.Ordinal)
-                          || body.Contains("dotnet fsi", StringComparison.OrdinalIgnoreCase) ->
-        gaps.Add "the trusted-builder closure includes producer projects or FSI"
-    | _ -> ()
-
     match publisher with
     | None -> gaps.Add "no separate data-only job invokes ReleaseRunner publish"
     | Some (_, body) when not (Regex.IsMatch(body, "(?m)^\\s*runs-on:")) -> gaps.Add "the publisher job is not a hosted job"
     | Some (_, body) when not (Regex.IsMatch(body, "(?i)contents:\\s*write")) -> gaps.Add "the publisher job does not declare its write authority"
-    | Some (_, body) when Regex.IsMatch(body, "(?i)setup-dotnet|dotnet\\s+(build|restore|fsi|test)\\b")
-                          || body.Contains("Update.ps1", StringComparison.Ordinal)
+    | Some (_, body) when Regex.IsMatch(body, "(?i)dotnet\\s+(build|restore|fsi|test)\\b")
                           || body.Contains("Build.fsx", StringComparison.Ordinal)
                           || body.Contains("Pins.fsx", StringComparison.Ordinal) ->
-        gaps.Add "the publisher job still installs an SDK or executes build/test/toolchain work"
+        gaps.Add "the publication job still executes build/test/toolchain work"
     | _ -> ()
 
-    match prepare, trustedBuilder, publisher with
-    | Some (prepareName, _), Some (builderName, _), Some (publisherName, publisherBody) ->
-        if Set.ofList [ prepareName; builderName; publisherName ] |> Set.count <> 3 then
-            gaps.Add "preparation, trusted builder, and publication are not isolated in fresh jobs"
+    match prepare, publisher with
+    | Some (prepareName, _), Some (publisherName, publisherBody) ->
+        if prepareName = publisherName then
+            gaps.Add "preparation and publication are not isolated in fresh jobs"
 
-        for dependency in [ prepareName; builderName ] do
-            if not (publisherBody.Contains(dependency, StringComparison.Ordinal)) then
-                gaps.Add $"publisher job does not depend on the {dependency} job"
+        if not (publisherBody.Contains($"- {prepareName}", StringComparison.Ordinal)) then
+            gaps.Add $"publication job does not depend on the {prepareName} job"
     | _ -> ()
 
     List.ofSeq gaps
@@ -208,7 +191,7 @@ let private modernWorkflowGaps workflow =
 let private publishReadinessGaps workflow =
     let publishBody =
         workflowJobs workflow
-        |> List.tryFind (fun (name, _) -> name = "publish")
+        |> List.tryFind (fun (name, _) -> name = "publication")
         |> Option.map snd
 
     match publishBody with
@@ -231,8 +214,7 @@ let private publishReadinessGaps workflow =
         if not (runnerIsExecutable && publishIsInvoked) then
             gaps.Add "the publication job has no executable ReleaseRunner publish invocation"
 
-        if not (Regex.IsMatch(executableBody, "(?i)--trusted-receipt=\\S+")) then
-            gaps.Add "the publisher invocation has no independently supplied trusted-receipt path"
+        // trust-receipt flag is retired: the publisher reads the runtime inventory and verifies it locally before the native call.
 
         List.ofSeq gaps
 
@@ -260,25 +242,25 @@ let private coherenceGuardChecksActualRosterAndWorkflowMarkers =
 
                     let hardcodedMatrix =
                             workflowFixture.Replace(
-                            "        component: ${{ fromJSON(needs.bootstrap.outputs.components) }}",
-                            "        component: dotnet"
+                            "          $components = @(ConvertFrom-Json $env:RELEASE_COMPONENTS)",
+                            "          $components = @(\"dotnet\")"
                         )
                     let! matrixCode, matrixOut, matrixErr = runCoherence root hardcodedMatrix correctProjection
                     Expect.isTrue (matrixCode <> 0) "a hardcoded workflow matrix fails the actual guard"
                     Expect.isTrue
-                        ((matrixOut + matrixErr).Contains("release matrix from roster projection", StringComparison.Ordinal))
-                        "the matrix marker mismatch is identified"
+                        ((matrixOut + matrixErr).Contains("publisher reads the projected components", StringComparison.Ordinal))
+                        "the hardcoded projection is identified by the publisher's projection-source check"
 
                     let renamedBootstrapOutput =
                             workflowFixture.Replace(
-                            "      components: ${{ steps.project.outputs.components }}",
-                            "      participants: ${{ steps.project.outputs.components }}"
+                            "          PROJECTED_COMPONENTS: ${{ steps.project.outputs.components }}",
+                            "          PROJECTED_COMPONENTS: ${{ steps.project.outputs.participants }}"
                         )
                     let! outputMarkerCode, outputMarkerOut, outputMarkerErr = runCoherence root renamedBootstrapOutput correctProjection
-                    Expect.isTrue (outputMarkerCode <> 0) "a renamed bootstrap output marker fails the actual guard"
+                    Expect.isTrue (outputMarkerCode <> 0) "a renamed projection output marker fails the actual guard"
                     Expect.isTrue
-                        ((outputMarkerOut + outputMarkerErr).Contains("bootstrap components output", StringComparison.Ordinal))
-                        "the bootstrap output mismatch is identified"
+                        ((outputMarkerOut + outputMarkerErr).Contains("the coherence guard receives the projection value", StringComparison.Ordinal))
+                        "the projection-output marker mismatch is identified"
 
                     let mismatchedProjection = "[\"dotnet\",\"telegram\"]"
                     let! projectionCode, projectionOut, projectionErr = runCoherence root workflowFixture mismatchedProjection
@@ -289,13 +271,13 @@ let private coherenceGuardChecksActualRosterAndWorkflowMarkers =
 
                     let hardcodedCli =
                             workflowFixture.Replace(
-                            "prepare \"${{ matrix.component }}/release/Config.fsx\" $candidate",
-                            "prepare \"dotnet/release/Config.fsx\" $candidate"
+                            "            $configPath = Join-Path (Get-Location) \"$component/release/Config.json\"",
+                            "            $configPath = Join-Path (Get-Location) \"dotnet/release/Config.json\""
                         )
                     let! cliCode, cliOut, cliErr = runCoherence root hardcodedCli correctProjection
                     Expect.isTrue (cliCode <> 0) "a hardcoded CLI config path fails the actual guard"
                     Expect.isTrue
-                        ((cliOut + cliErr).Contains("prepare CLI path derives from the matrix participant", StringComparison.Ordinal))
+                        ((cliOut + cliErr).Contains("no participant literal in a CLI or policy path", StringComparison.Ordinal))
                         "the CLI path drift is identified"
                 })
     }
@@ -312,16 +294,16 @@ let private coherenceGuardRejectsRosterPolicyAndInventoryDrift =
                     writeRoster root currentParticipants (Some ("version", "9.9.9")) |> ignore
                     let! policyResult = invokeCurrentWorkflow ()
 
-                    writeRoster root [ "dotnet", "dotnet/release/Config.fsx"; "dotnet", "dotnet/release/Config.fsx" ] None |> ignore
+                    writeRoster root [ "dotnet", "dotnet/release/Config.json"; "dotnet", "dotnet/release/Config.json" ] None |> ignore
                     let! duplicateResult = invokeCurrentWorkflow ()
 
-                    writeRoster root [ "dotnet", "dotnet/release/Config.fsx"; "telegram", "telegram/release/Config.fsx" ] None |> ignore
+                    writeRoster root [ "dotnet", "dotnet/release/Config.json"; "telegram", "telegram/release/Config.json" ] None |> ignore
                     let! extraResult = invokeCurrentWorkflow ()
 
-                    writeRoster root [ "dotnet", "dotnet/release/Config.fsx" ] None |> ignore
+                    writeRoster root [ "dotnet", "dotnet/release/Config.json" ] None |> ignore
                     let! omittedResult = invokeCurrentWorkflow ()
 
-                    writeRoster root [ "dotnet", "dotnet/release/Alternate.fsx"; "workflow", "workflow/release/Config.fsx" ] None |> ignore
+                    writeRoster root [ "dotnet", "dotnet/release/Alternate.json"; "workflow", "workflow/release/Config.json" ] None |> ignore
                     let! pathResult = invokeCurrentWorkflow ()
 
                     let outputOf (_, stdout, stderr) = stdout + stderr
@@ -376,7 +358,7 @@ let private coherenceGuardUsesExplicitProjectionAcrossStepOutputs =
                     let! missingCode, missingOut, missingErr = runCoherence root workflowFixture ""
                     Expect.notEqual missingCode 0 "a missing projected component value fails closed"
                     Expect.isTrue
-                        ((missingOut + missingErr).Contains("-Components must carry the bootstrap projection value", StringComparison.Ordinal))
+                        ((missingOut + missingErr).Contains("-Components must carry the projection value", StringComparison.Ordinal))
                         "the missing explicit projection is diagnosed"
                 })
     }
@@ -411,7 +393,7 @@ let private releaseWorkflowStopsBeforePublicationWhenWorkflowTestsFail =
                     Expect.equal listedPaths paths "CI retains the explicit, deterministic twelve-entrypoint set"
                     let publisherDependencies =
                         workflowJobs workflow
-                        |> List.tryFind (fun (name, _) -> name = "publish")
+                        |> List.tryFind (fun (name, _) -> name = "publication")
                         |> Option.bind (fun (_, body) ->
                             let needs =
                                 Regex.Match(
@@ -428,9 +410,9 @@ let private releaseWorkflowStopsBeforePublicationWhenWorkflowTestsFail =
                                 |> Seq.toList
                                 |> Some)
                         |> Option.defaultValue []
-                    let expectedPublisherDependencies = set [ "bootstrap"; "tests"; "prepare"; "builder" ]
-                    Expect.equal publisherDependencies.Length expectedPublisherDependencies.Count "publication has exactly four gating jobs"
-                    Expect.equal (Set.ofList publisherDependencies) expectedPublisherDependencies "publication depends on bootstrap, tests, prepare, and builder"
+                    let expectedPublisherDependencies = set [ "publisher"; "preparation" ]
+                    Expect.equal publisherDependencies.Length expectedPublisherDependencies.Count "publication has exactly two gating jobs"
+                    Expect.equal (Set.ofList publisherDependencies) expectedPublisherDependencies "publication depends on publisher and preparation"
 
                     let bin = Path.Combine(root, "stub-bin")
                     Directory.CreateDirectory bin |> ignore

@@ -30,8 +30,9 @@ function Get-RosterTargets {
 }
 
 if (-not $Targets -or $Targets.Count -eq 0) {
-    # Scripts the roster does not name (pre-SDK bootstrap, producer provenance contract) still need the strict gate.
-    $fixed = @("infrastructure/release/Bootstrap.fsx", "dotnet/tests/ProvenanceTests.fsx")
+    # The producer provenance contract is roster-independent and still needs the strict gate; the retired pre-SDK
+    # `Bootstrap.fsx` is no longer a target because the canonical projection is plain PowerShell over the policy JSON.
+    $fixed = @("dotnet/tests/ProvenanceTests.fsx")
     $Targets = @(@($fixed) + @(Get-RosterTargets) | Sort-Object -Unique)
 }
 

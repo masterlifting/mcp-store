@@ -33,7 +33,7 @@ type Decision =
     | RevisionOnlyEquivalent of published: ArchiveObservation * publishedRevision: string * evaluatedRevision: string
     | DifferentBeyondRevision of published: ArchiveObservation * candidate: ArchiveObservation * reason: string
 
-// Allowlist and archive name come from the producer's canonical Config.fsx; the comparison never re-implements them.
+// Allowlist and archive name come from the producer's canonical Config.json; the comparison never re-implements them.
 type ComponentContract =
     { ComponentId: string
       Version: string
@@ -627,7 +627,6 @@ type EmbeddedManifestHeader =
       ArchiveFiles: string list
       FileCount: int }
 
-// Pure passthrough so F2 reconciliation reads the DISTRIBUTION schema fields without re-parsing the bytes.
 let parseEmbeddedManifestHeader (body: string) : Result<EmbeddedManifestHeader, ReleaseError> =
     match parseManifest (Encoding.UTF8.GetBytes body) with
     | Error error -> Error error
@@ -641,7 +640,6 @@ let parseEmbeddedManifestHeader (body: string) : Result<EmbeddedManifestHeader, 
               ArchiveFiles = parsed.ArchiveFiles
               FileCount = parsed.Files.Length }
 
-// Surface the parsed distribution-manifest header for the F2 no-op and recovery paths so the schema is never cross-wired.
 let parseEmbeddedManifestEntry
     (observation: ArchiveObservation)
     : Result<EmbeddedManifestHeader, ReleaseError> =

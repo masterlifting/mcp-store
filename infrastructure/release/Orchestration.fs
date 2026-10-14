@@ -1,11 +1,5 @@
 // role: reusable module/helper
-// Shared preparation sequencing for one component. The preparation path is the
-// only place Build.fsx, Pins.fsx, and the producer test entrypoints ever run;
-// every child subprocess has the publication-authority environment variables
-// (GITHUB_TOKEN, MCP_RELEASE_DO_UPLOAD, MCP_RELEASE_GITHUB_OWNER,
-// MCP_RELEASE_GITHUB_REPOSITORY) removed before Start. Preparation stops
-// before any write attempt and writes a portable candidate directory the
-// publisher consumes; the publisher never re-derives policy from this output.
+// Producer scripts must remain outside the write-capable publication job.
 module ReleaseOrchestration
 
 open System
@@ -16,24 +10,11 @@ open System.Text.Json.Nodes
 open System.Threading
 open BuildProvenance
 
-// Projection of the canonical `module ReleaseConfig` after pure-parser evaluation.
-// Policy values come from the producer's Config.fsx only; this DTO is read-only.
-type ProducerProjection =
-    { ComponentId: string
-      Version: string
-      EntryDll: string
-      SdkVersion: string
-      RuntimeVersion: string
-      Platform: string
-      ArchiveName: string
-      AssetUri: string
-      PublishedFiles: string list }
-
 // Snapshot of the preparation phases for one component. The publisher re-reads
 // the candidate files from the prepared directory and re-verifies every byte;
 // nothing in this record is treated as authorization by the publisher.
 type PreparedData =
-    { Projection: ProducerProjection
+    { Projection: ReleasePolicy.PolicyProjection
       ConfigPath: string
       ConfigSha256: string
       EvaluatedHead: string
@@ -61,28 +42,14 @@ let private runChild (root: string) (scrubEnvVars: string list) (executable: str
         return! ReleaseCapture.runProcessCapture root executable args scrubEnvVars token
     }
 
-// SEC1 boundary: the publisher MUST NOT execute Config.fsx; policy is derived purely
-// from the canonical bytes through `ReleasePolicy.parse`. Any second-authored version,
-// executable syntax, duplicate binding, or unparseable token in Config.fsx fails closed
-// before the orchestrator schedules a single child process.
-let private loadProducerConfig (root: string) (configPath: string) : Async<Result<ProducerProjection, ReleaseError>> =
+// Parse canonical producer policy without executing producer-authored code.
+let private loadProducerConfig (root: string) (configPath: string) : Async<Result<ReleasePolicy.PolicyProjection, ReleaseError>> =
     async {
         let absolute = Path.GetFullPath(Path.Combine(root, configPath))
 
         match ReleasePolicy.parse absolute with
         | Error error -> return Error error
-        | Ok policy ->
-            return
-                Ok
-                    { ComponentId = policy.ComponentId
-                      Version = policy.Version
-                      EntryDll = policy.EntryDll
-                      SdkVersion = policy.SdkVersion
-                      RuntimeVersion = policy.RuntimeVersion
-                      Platform = policy.Platform
-                      ArchiveName = policy.ArchiveName
-                      AssetUri = policy.AssetUri
-                      PublishedFiles = policy.PublishedFiles }
+        | Ok policy -> return Ok policy
     }
 
 let private sha256OfFile (path: string) : Async<Result<string, ReleaseError>> =
@@ -148,7 +115,7 @@ let private fileSize (path: string) : Result<int, ReleaseError> =
     | :? IOException as error -> Error(FileFailure("stat", path, error.Message))
     | :? UnauthorizedAccessException as error -> Error(FileFailure("stat", path, error.Message))
 
-let private entryAllowlistFor (projection: ProducerProjection) : string list =
+let private entryAllowlistFor (projection: ReleasePolicy.PolicyProjection) : string list =
     (projection.PublishedFiles @ [ "NOTICE.txt"; "distribution.json" ])
     |> List.sort
 
@@ -228,7 +195,7 @@ let private runProducerTests
     (root: string)
     (componentId: string)
     (configPath: string)
-    (projection: ProducerProjection)
+    (projection: ReleasePolicy.PolicyProjection)
     : Async<Result<unit, ReleaseError>> =
     async {
         let mutable failure : (ReleaseError * string) option = None
@@ -365,12 +332,7 @@ let private prepareInternal (root: string) (configPath: string) : Async<Result<P
                                                                                     $"the standalone manifest SHA '{standaloneManifestSha256}' differs from the embedded manifest SHA '{embeddedManifestSha256}'; refusing to publish a candidate whose standalone and embedded manifests disagree"))
     }
 
-// Fresh preparation entrypoint: runs the same sequenced prep (no FSI for
-// Config.fsx, no Build/Pins/Tests credentials, no transaction subprocess) and
-// writes a portable candidate directory on disk. The publisher re-derives
-// every policy value from the audited `Publisher.json` closure plus the
-// canonical `Config.fsx` bytes at the platform-supplied event SHA; nothing
-// in the prepared directory is treated as authorization.
+// Prepare a data-only candidate directory containing exactly the archive and manifest.
 let prepare (root: string) (configPath: string) (candidateDirectory: string) : Async<int> =
     async {
         match! prepareInternal root configPath with
@@ -381,7 +343,6 @@ let prepare (root: string) (configPath: string) (candidateDirectory: string) : A
 
             let phase =
                 match error with
-                | MalformedArtifact (path, _) when path.Contains "release/Config.fsx" -> "config"
                 | ProcessFailed (phase, _, _) -> phase
                 | _ -> "config"
 
@@ -391,62 +352,29 @@ let prepare (root: string) (configPath: string) (candidateDirectory: string) : A
             return 4
         | Ok data ->
             try
-                if not (Directory.Exists candidateDirectory) then
-                    Directory.CreateDirectory candidateDirectory |> ignore
-
-                let archiveName = data.Projection.ArchiveName
-                let relativeArchiveName = archiveName
-                let relativeManifestName = "distribution.json"
-
-                let portableArchivePath = Path.Combine(candidateDirectory, relativeArchiveName)
-                let portableManifestPath = Path.Combine(candidateDirectory, relativeManifestName)
-
-                File.Copy(data.ArchivePath, portableArchivePath, true)
-                File.Copy(data.StandaloneManifestPath, portableManifestPath, true)
-
-                let diagnosticPath = Path.Combine(candidateDirectory, "sha256.txt")
-                let diagnostic =
-                    String.concat
-                        Environment.NewLine
-                        [ $"archive {relativeArchiveName} {data.ArchiveSha256}"
-                          $"manifest {relativeManifestName} {data.StandaloneManifestSha256}"
-                          $"embedded {data.EmbeddedManifestSha256}"
-                          $"configSha256 {data.ConfigSha256}"
-                          $"evaluatedHead {data.EvaluatedHead}" ]
-                File.WriteAllText(diagnosticPath, diagnostic + Environment.NewLine)
-
-                // Typed preparation receipt: the producer-known inner archive
-                // and standalone manifest digests/sizes are recorded in JSON
-                // so the publisher can cross-check its verified snapshot
-                // bytes without ever re-reading a mutable on-disk path.
-                // The receipt carries NO outer transport digest/size and NO
-                // runtime / toolchain values; the platform outer digest comes
-                // from `ArtifactEvidence.ActualOuterDigest` and the trusted
-                // runtime/toolchain values come from the trusted publisher
-                // receipt generated by the independently built builder.
-                let prepNode = JsonObject()
-                prepNode["schemaVersion"] <- JsonValue.Create 1
-                prepNode["innerArchiveSha256"] <- JsonValue.Create data.ArchiveSha256
-                prepNode["innerArchiveSize"] <- JsonValue.Create(int64 data.ArchiveSize)
-                prepNode["manifestSha256"] <- JsonValue.Create data.StandaloneManifestSha256
-                prepNode["manifestSize"] <- JsonValue.Create(int64 data.StandaloneManifestSize)
-                let prepPath = Path.Combine(candidateDirectory, "preparation.json")
-                File.WriteAllText(prepPath, prepNode.ToJsonString(JsonSerializerOptions(WriteIndented = true)))
-
-                let node = JsonObject()
-                node["status"] <- JsonValue.Create "prepared"
-                node["reason"] <- JsonValue.Create "preparation complete; the candidate directory is portable data only"
-                node["phase"] <- JsonValue.Create "prepare"
-                node["componentId"] <- JsonValue.Create data.Projection.ComponentId
-                node["version"] <- JsonValue.Create data.Projection.Version
-                node["candidateDirectory"] <- JsonValue.Create candidateDirectory
-                node["relativeArchiveName"] <- JsonValue.Create relativeArchiveName
-                node["relativeManifestName"] <- JsonValue.Create relativeManifestName
-                node["diagnosticSha256Path"] <- JsonValue.Create "sha256.txt"
-                node["preparationReceiptPath"] <- JsonValue.Create "preparation.json"
-                let payload = node.ToJsonString(JsonSerializerOptions(WriteIndented = true))
-                do! Console.Out.WriteLineAsync(payload) |> Async.AwaitTask
-                return 0
+                if Directory.Exists candidateDirectory && not (Seq.isEmpty (Directory.EnumerateFileSystemEntries candidateDirectory)) then
+                    emitPreparedFailure "prepare" "candidate output directory must be empty" data.Projection.ComponentId data.Projection.Version data.Projection.ArchiveName data.Projection.AssetUri
+                    |> Console.Out.WriteLine
+                    return 4
+                else
+                    if not (Directory.Exists candidateDirectory) then Directory.CreateDirectory candidateDirectory |> ignore
+                    let archiveName = data.Projection.ArchiveName
+                    let portableArchivePath = Path.Combine(candidateDirectory, archiveName)
+                    let portableManifestPath = Path.Combine(candidateDirectory, "distribution.json")
+                    File.Copy(data.ArchivePath, portableArchivePath, true)
+                    File.Copy(data.StandaloneManifestPath, portableManifestPath, true)
+                    let node = JsonObject()
+                    node["status"] <- JsonValue.Create "prepared"
+                    node["reason"] <- JsonValue.Create "preparation complete; the candidate directory is portable data only"
+                    node["phase"] <- JsonValue.Create "prepare"
+                    node["componentId"] <- JsonValue.Create data.Projection.ComponentId
+                    node["version"] <- JsonValue.Create data.Projection.Version
+                    node["candidateDirectory"] <- JsonValue.Create candidateDirectory
+                    node["relativeArchiveName"] <- JsonValue.Create archiveName
+                    node["relativeManifestName"] <- JsonValue.Create "distribution.json"
+                    let payload = node.ToJsonString(JsonSerializerOptions(WriteIndented = true))
+                    do! Console.Out.WriteLineAsync(payload) |> Async.AwaitTask
+                    return 0
             with
             | :? IOException as error ->
                 let node = JsonObject()

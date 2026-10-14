@@ -4,178 +4,224 @@ open System
 open System.IO
 open System.Security.Cryptography
 open System.Text
-open System.Text.RegularExpressions
+open System.Text.Json
+open System.Text.Json.Nodes
 open Expecto
 open BuildProvenance
+open Release.Tests.FixtureHelpers
 
 let private repositoryRoot =
     Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "../../../"))
 
 let private configPath componentId =
-    Path.Combine(repositoryRoot, componentId, "release", "Config.fsx")
+    Path.Combine(repositoryRoot, componentId, "release", "Config.json")
 
 let private sha256Hex (bytes: byte[]) =
     SHA256.HashData bytes |> Convert.ToHexString |> fun value -> value.ToLowerInvariant()
 
-let private captureExactlyOne label pattern source =
-    let matches = Regex.Matches(source, pattern)
+// WHY: the strict JSON grammar has exactly nine required fields; the canonical Config.json
+//   supplies them with no interpolation, no extra policies, and no overlapping keys. Each
+//   canonical projection test reads the bytes once via the Snapshots (FixtureHelpers)
+//   helper so the bound SourceSha256 is computed from the same bytes the parser observes.
+let private requiredFields =
+    [ "componentId"; "version"; "entryDll"; "sdkVersion"; "runtimeVersion"
+      "platform"; "archiveName"; "assetUri"; "publishedFiles" ]
 
-    if matches.Count <> 1 then
-        failtestf "expected one authored %s expression, found %d" label matches.Count
-
-    matches.[0].Groups.[1].Value
-
-let private authoredPolicy path source =
-    let literal name =
-        captureExactlyOne name ($"(?m)^\\s*let\\s+{Regex.Escape name}\\s*=\\s*\"([^\"]*)\"\\s*$") source
-
-    let componentId = literal "componentId"
-    let version = literal "version"
-    let entryDll = literal "entryDll"
-    let sdkVersion = literal "sdkVersion"
-    let runtimeVersion = literal "runtimeVersion"
-    let platform = literal "platform"
-    let archiveName = $"v{version}.zip"
-    let assetUriTemplate =
-        captureExactlyOne
-            "assetUri interpolation"
-            "(?ms)^\\s*let\\s+assetUri\\s*=\\s*\\$\"([^\"]*)\"\\s*$"
-            source
-    let assetUri =
-        assetUriTemplate
-            .Replace("{componentId}", componentId, StringComparison.Ordinal)
-            .Replace("{version}", version, StringComparison.Ordinal)
-    let filesExpression =
-        captureExactlyOne "publishedFiles list" "(?s)let\\s+publishedFiles\\s*=\\s*\\[(.*?)\\]" source
-    let publishedFiles =
-        Regex.Matches(filesExpression, "\"([^\"]*)\"")
-        |> Seq.cast<Match>
-        |> Seq.map (fun item -> item.Groups.[1].Value)
-        |> Seq.toList
-
-    componentId, version, entryDll, sdkVersion, runtimeVersion, platform, archiveName, assetUri, publishedFiles, path
-
-let private expectMalformed (name: string) (source: string) =
+let private expectMalformed (name: string) (sourcePath: string) (input: string) =
     testCase name (fun () ->
-        let bytes = Encoding.UTF8.GetBytes source
+        let bytes = Encoding.UTF8.GetBytes input
 
-        match ReleasePolicy.parseBytes "Config.fsx" bytes with
-        | Error(MalformedArtifact("Config.fsx", _)) -> ()
+        match ReleasePolicy.parseBytes sourcePath bytes with
+        | Error(MalformedArtifact(path, _)) ->
+            Expect.equal path sourcePath "error path labels the supplied source name"
         | Error error -> failtestf "expected a typed malformed-artifact error, got %A" error
         | Ok projection -> failtestf "expected malformed input to be rejected, got %A" projection)
+
+let private expectMalformedBytes (name: string) (sourcePath: string) (bytes: byte[]) =
+    testCase name (fun () ->
+        match ReleasePolicy.parseBytes sourcePath bytes with
+        | Error(MalformedArtifact(path, _)) ->
+            Expect.equal path sourcePath "error path labels the supplied source name"
+        | Error error -> failtestf "expected a typed malformed-artifact error, got %A" error
+        | Ok projection -> failtestf "expected malformed bytes to be rejected, got %A" projection)
 
 let private canonicalComponentIds = [ "dotnet"; "workflow" ]
 
 let private projectionTests =
     canonicalComponentIds
     |> List.map (fun componentId ->
-        testCase ($"canonical {componentId} config projects a source-bound policy") (fun () ->
-         let path = configPath componentId
-         let bytes = File.ReadAllBytes path
-         let source = Encoding.UTF8.GetString bytes
-         let expected = authoredPolicy path source
+        testCase ($"canonical {componentId} Config.json projects a source-bound policy") (fun () ->
+         let snapshot = readCanonicalConfig repositoryRoot componentId
+         let actual = snapshot.Parsed
+         let node = JsonNode.Parse(Encoding.UTF8.GetString snapshot.ConfigBytes).AsObject()
 
-         match ReleasePolicy.parseBytes path bytes with
-         | Error error -> failtestf "canonical config was rejected: %A" error
-         | Ok actual ->
-             let expectedComponentId, expectedVersion, expectedEntryDll, expectedSdk, expectedRuntime, expectedPlatform, expectedArchive, expectedAssetUri, expectedFiles, expectedPath = expected
-             Expect.equal actual.ComponentId expectedComponentId "component identity matches the authored config literal"
-             Expect.equal actual.ComponentId componentId "component identity is bound to the roster path"
-             Expect.equal actual.Version expectedVersion "version matches the authored config literal"
-             Expect.equal actual.EntryDll expectedEntryDll "entry assembly matches the authored config literal"
-             Expect.equal actual.SdkVersion expectedSdk "SDK policy matches the authored config literal"
-             Expect.equal actual.RuntimeVersion expectedRuntime "runtime policy matches the authored config literal"
-             Expect.equal actual.Platform expectedPlatform "platform matches the authored config literal"
-             Expect.equal actual.ArchiveName expectedArchive "archive name follows the canonical authored version expression"
-             Expect.equal actual.AssetUri expectedAssetUri "asset URI interpolates the independently read authored expression"
-             Expect.equal actual.PublishedFiles expectedFiles "published file list matches authored literals"
-             Expect.isTrue (List.contains actual.EntryDll actual.PublishedFiles) "published files include the entry assembly"
-             Expect.isTrue (actual.PublishedFiles |> List.distinct |> List.length = actual.PublishedFiles.Length) "published file names are unique"
-             Expect.equal actual.SourcePath expectedPath "source path"
-             Expect.equal actual.SourceSha256 (sha256Hex bytes) "hash of exact canonical bytes"))
+         for field in requiredFields do
+             Expect.isTrue (node.ContainsKey field) $"canonical Config.json contains required field {field}"
+             Expect.isTrue (node[field].GetValueKind() <> JsonValueKind.Null) $"canonical field {field} is not null"
 
-let private grammarTests =
-    [ testCase "literal, prior-binding interpolation, whitespace, and list separators are accepted" (fun () ->
-          let source =
-              "module ReleaseConfig\n"
-              + "let componentId = \"demo\"\n"
-              + "let version = \"2.3\"\n"
-              + "let entryDll = \"Demo.dll\"\n"
-              + "let sdkVersion = \"sdk\"\n"
-              + "let runtimeVersion = \"runtime\"\n"
-              + "let platform = \"win-x64\"\n"
-              + "let archiveName = $\"v{version}.zip\"\n"
-              + "let assetUri = $\"https://example.invalid/{componentId}/{version}\"\n"
-              + "let publishedFiles = [ \"one.dll\"\n \"two.dll\" ]\n"
+         Expect.equal actual.ComponentId componentId $"{componentId} component identity is bound to its canonical path"
+         Expect.equal actual.ComponentId (node["componentId"].GetValue<string>()) $"{componentId} component identity matches the canonical literal"
+         Expect.equal actual.Version (node["version"].GetValue<string>()) $"{componentId} version matches the canonical literal"
+         Expect.equal actual.EntryDll (node["entryDll"].GetValue<string>()) $"{componentId} entry assembly matches the canonical literal"
+         Expect.equal actual.SdkVersion (node["sdkVersion"].GetValue<string>()) $"{componentId} SDK policy matches the canonical literal"
+         Expect.equal actual.RuntimeVersion (node["runtimeVersion"].GetValue<string>()) $"{componentId} runtime policy matches the canonical literal"
+         Expect.equal actual.Platform (node["platform"].GetValue<string>()) $"{componentId} platform matches the canonical literal"
+         Expect.equal actual.ArchiveName (node["archiveName"].GetValue<string>()) $"{componentId} archive name matches the canonical literal"
+         Expect.equal actual.AssetUri (node["assetUri"].GetValue<string>()) $"{componentId} asset URI matches the canonical literal"
 
-          match ReleasePolicy.parseBytes "fixture" (Encoding.UTF8.GetBytes source) with
-          | Error error -> failtestf "supported grammar was rejected: %A" error
-          | Ok actual ->
-              Expect.equal actual.ArchiveName "v2.3.zip" "archive interpolation"
-              Expect.equal actual.AssetUri "https://example.invalid/demo/2.3" "URI interpolation"
-              Expect.equal actual.PublishedFiles [ "one.dll"; "two.dll" ] "whitespace-separated list");
-      expectMalformed "duplicate bindings are rejected" (File.ReadAllText(configPath "dotnet") + "\nlet version = \"9.9\"\n");
-      expectMalformed "unknown bindings are rejected" (File.ReadAllText(configPath "dotnet") + "\nlet extraPolicy = \"unexpected\"\n");
-      expectMalformed "executable top-level statements are rejected" (File.ReadAllText(configPath "dotnet") + "\ndo System.IO.File.WriteAllText(\"marker\", \"ran\")\n");
-      expectMalformed "directives are rejected" (File.ReadAllText(configPath "dotnet") + "\n#load \"other.fsx\"\n");
-      expectMalformed "function bindings are rejected" (File.ReadAllText(configPath "dotnet") + "\nlet helper () = \"value\"\n");
-      expectMalformed "mutable bindings are rejected" (File.ReadAllText(configPath "dotnet") + "\nlet mutable mode = \"value\"\n");
-      expectMalformed "unresolved interpolation references are rejected" (File.ReadAllText(configPath "dotnet").Replace("$\"v{version}.zip\"", "$\"v{missing}.zip\""));
-      testCase "an executable fixture config is rejected without running it" (fun () ->
-          let marker = Path.Combine(Path.GetTempPath(), $"release-policy-execution-{Guid.NewGuid():N}.txt")
-          let source = File.ReadAllText(configPath "dotnet")
-          let executable = source + $"{Environment.NewLine}do System.IO.File.WriteAllText(@\"{marker}\", \"executed\")"
+         let published =
+             node["publishedFiles"].AsArray()
+             |> Seq.map (fun value -> value.GetValue<string>())
+             |> Seq.toList
+         Expect.equal actual.PublishedFiles published $"{componentId} published files match the canonical array"
+         Expect.isTrue (List.contains actual.EntryDll actual.PublishedFiles) $"{componentId} published files include the entry assembly"
+         Expect.isTrue (actual.PublishedFiles |> List.distinct |> List.length = actual.PublishedFiles.Length) $"{componentId} published file names are unique"
+         Expect.equal actual.SourcePath snapshot.ConfigPath $"{componentId} source path returns the canonical file path"
+         Expect.equal actual.SourceSha256 snapshot.ConfigSha256 $"{componentId} hash of exact canonical bytes returns the helper observation"
+         let mutable parsedVersion: Version = Unchecked.defaultof<Version>
+         Expect.isTrue (Version.TryParse(actual.Version, &parsedVersion)) $"canonical {componentId} version parses as semver"
+         Expect.isTrue (actual.Version = "1.0.4" || actual.Version = "1.0.5") $"canonical {componentId} version is the current pinned release value"))
 
-          try
-              match ReleasePolicy.parseBytes "executable-fixture" (Encoding.UTF8.GetBytes executable) with
-              | Error(MalformedArtifact("executable-fixture", _)) -> ()
-              | Error error -> failtestf "expected a malformed-artifact error, got %A" error
-              | Ok projection -> failtestf "executable config was accepted: %A" projection
-              Expect.isFalse (File.Exists marker) "parsing rejects executable syntax without evaluation"
-          finally
-              if File.Exists marker then File.Delete marker);
-      testCase "malformed UTF-8 returns a typed malformed-artifact error" (fun () ->
-          let bytes = File.ReadAllBytes(configPath "dotnet")
-          let marker = Encoding.UTF8.GetBytes "dotnet"
-          let markerIndex = Array.findIndex (fun index -> index + marker.Length <= bytes.Length && bytes.[index .. index + marker.Length - 1] = marker) [| 0 .. bytes.Length - marker.Length |]
-          bytes.[markerIndex] <- 0xC3uy
-          bytes.[markerIndex + 1] <- 0x28uy
+let private strictJsonGrammarTests =
+    let canonical = readCanonicalConfig repositoryRoot "dotnet"
+    let baseline = Encoding.UTF8.GetString canonical.ConfigBytes
+    // WHY: each negative must actually change the canonical bytes; a no-op `String.Replace`
+    //   returns the baseline unchanged and exercises no rejection path. We therefore parse
+    //   the canonical Config.json into a `JsonObject`, mutate one well-defined property or
+    //   array element, and re-serialize with compact options so the bytes differ in exactly
+    //   the spot the test names. Trailing commas are an actual text mutation since the
+    //   serializer would otherwise strip them.
+    let mutated (action: JsonObject -> unit) =
+        let node = JsonNode.Parse(baseline).AsObject()
+        action node
+        node.ToJsonString(JsonSerializerOptions(WriteIndented = false))
 
-          match ReleasePolicy.parseBytes "invalid-utf8" bytes with
-          | Error(MalformedArtifact("invalid-utf8", _)) -> ()
-          | Error error -> failtestf "expected typed malformed-artifact error, got %A" error
-          | Ok projection -> failtestf "malformed UTF-8 was accepted: %A" projection);
-      expectMalformed "embedded NUL returns a typed malformed-artifact error" (File.ReadAllText(configPath "dotnet").Replace("dotnet\"", "dotnet\u0000\""));
+    let bytes (text: string) = Encoding.UTF8.GetBytes text
+
+    // JsonObject cannot carry duplicate keys, so the duplicate-field negative stays as a
+    //   textual post-process: serialize the canonical Config.json to compact JSON, then
+    //   splice a second `"version"` key immediately after the opening `{` so the parser
+    //   observes two `version` properties without the canonical version literal being
+    //   hard-coded into the fixture. Construction and assertions run inside the test
+    //   action so the module cctor cannot crash on whitespace drift between canonical
+    //   and compact representations.
+    let buildDuplicate () =
+        let serialized =
+            JsonNode.Parse(baseline)
+                .AsObject()
+                .ToJsonString(JsonSerializerOptions(WriteIndented = false))
+        let openBrace = serialized.IndexOf '{'
+        if openBrace < 0 then failtest "canonical config serialization did not start with '{'"
+        serialized.Insert(openBrace + 1, "\"version\":\"9.9\",")
+
+    [ testCase "duplicate fields are rejected" (fun () ->
+          let duplicate = buildDuplicate ()
+          let versionCount =
+              duplicate.Split([|"\"version\":"|], StringSplitOptions.None).Length - 1
+          Expect.isTrue (duplicate.Contains "\"version\":\"9.9\"") "duplicate fixture carries the inserted version literal"
+          Expect.equal versionCount 2 "duplicate fixture contains exactly two version keys"
+          match ReleasePolicy.parseBytes "Config.json" (Encoding.UTF8.GetBytes duplicate) with
+          | Error(MalformedArtifact(path, _)) ->
+              Expect.equal path "Config.json" "duplicate-version path labels the supplied source name"
+          | Error error -> failtestf "expected a typed malformed-artifact error, got %A" error
+          | Ok projection -> failtestf "expected duplicate version to be rejected, got %A" projection)
+      expectMalformedBytes "missing required field componentId is rejected" "Config.json" (
+          mutated (fun node -> node.Remove "componentId" |> ignore) |> bytes)
+      expectMalformedBytes "missing required field version is rejected" "Config.json" (
+          mutated (fun node -> node.Remove "version" |> ignore) |> bytes)
+      expectMalformedBytes "missing required field entryDll is rejected" "Config.json" (
+          mutated (fun node -> node.Remove "entryDll" |> ignore) |> bytes)
+      expectMalformedBytes "missing required field sdkVersion is rejected" "Config.json" (
+          mutated (fun node -> node.Remove "sdkVersion" |> ignore) |> bytes)
+      expectMalformedBytes "missing required field runtimeVersion is rejected" "Config.json" (
+          mutated (fun node -> node.Remove "runtimeVersion" |> ignore) |> bytes)
+      expectMalformedBytes "missing required field platform is rejected" "Config.json" (
+          mutated (fun node -> node.Remove "platform" |> ignore) |> bytes)
+      expectMalformedBytes "missing required field archiveName is rejected" "Config.json" (
+          mutated (fun node -> node.Remove "archiveName" |> ignore) |> bytes)
+      expectMalformedBytes "missing required field assetUri is rejected" "Config.json" (
+          mutated (fun node -> node.Remove "assetUri" |> ignore) |> bytes)
+      expectMalformedBytes "missing required field publishedFiles is rejected" "Config.json" (
+          mutated (fun node -> node.Remove "publishedFiles" |> ignore) |> bytes)
+      expectMalformedBytes "an unknown field is rejected" "Config.json" (
+          mutated (fun node -> node["rogueField"] <- JsonValue.Create "rogue") |> bytes)
+      expectMalformedBytes "a non-string componentId is rejected" "Config.json" (
+          mutated (fun node -> node["componentId"] <- JsonValue.Create 7) |> bytes)
+      expectMalformedBytes "a number publishedFiles entry is rejected" "Config.json" (
+          mutated (fun node ->
+              let array = node["publishedFiles"].AsArray()
+              array[0] <- JsonValue.Create 7) |> bytes)
+      expectMalformedBytes "a null required field is rejected" "Config.json" (
+          mutated (fun node -> node["version"] <- null) |> bytes)
+      expectMalformedBytes "malformed UTF-8 bytes return a typed malformed-artifact error" "invalid-utf8" ([| 0xC3uy; 0x28uy; 0x00uy |])
+      // WHY: the canonical Config.json is re-emitted as compact JSON then post-processed to
+      //   actually append a trailing comma before the closing array brace. A bare
+      //   serialization round-trip would silently normalize the trailing comma away.
+      expectMalformedBytes "trailing commas are rejected as strict JSON" "Config.json" (
+          let compact = JsonNode.Parse(baseline).AsObject().ToJsonString(JsonSerializerOptions(WriteIndented = false))
+          let trailing = compact.Replace("\"Mcp.Dotnet.runtimeconfig.json\"]", "\"Mcp.Dotnet.runtimeconfig.json\",]", StringComparison.Ordinal)
+          bytes trailing)
+      expectMalformedBytes "embedded NUL returns a typed malformed-artifact error" "Config.json" (Encoding.UTF8.GetBytes("{\"componentId\":\u0000\"dotnet\"}"))
       testCase "oversized source returns a typed malformed-artifact error" (fun () ->
-          let prefix = File.ReadAllText(configPath "dotnet")
-          let source = prefix + "\n//" + String('x', 16 * 1024 * 1024)
-
-          match ReleasePolicy.parseBytes "oversized" (Encoding.UTF8.GetBytes source) with
+          let oversized =
+              "{\"componentId\":\"dotnet\"" + String(',', 16 * 1024 * 1024)
+          match ReleasePolicy.parseBytes "oversized" (Encoding.UTF8.GetBytes oversized) with
           | Error(MalformedArtifact("oversized", _)) -> ()
           | Error error -> failtestf "expected typed malformed-artifact error, got %A" error
-          | Ok projection -> failtestf "oversized source was accepted: %A" projection) ]
+          | Ok projection -> failtestf "oversized source was accepted: %A" projection)
+      testCase "a malformed JSON document returns a typed malformed-artifact error" (fun () ->
+          match ReleasePolicy.parseBytes "not-json" (Encoding.UTF8.GetBytes "{ this is not valid JSON") with
+          | Error(MalformedArtifact("not-json", _)) -> ()
+          | Error error -> failtestf "expected typed malformed-artifact error, got %A" error
+          | Ok projection -> failtestf "malformed JSON was accepted: %A" projection) ]
+
+let private semanticGrammarTests =
+    [ testCase "canonical two-component projections both satisfy the strict schema" (fun () ->
+          let projections = canonicalComponentIds |> List.map (fun id -> (id, readCanonicalConfig repositoryRoot id))
+          Expect.isTrue (projections.Length = 2) "exactly two canonical projections were observed"
+          for componentId, snapshot in projections do
+              Expect.isTrue (snapshot.Parsed.Version.Length > 0) $"{componentId} version is non-empty"
+              Expect.isTrue (snapshot.Parsed.SdkVersion.Contains "11.0") $"{componentId} SDK version names the canonical SDK family"
+              Expect.isTrue (snapshot.Parsed.RuntimeVersion.Contains "11.0") $"{componentId} runtime version names the canonical runtime family"
+              Expect.isTrue (snapshot.Parsed.Platform = "win-x64") $"{componentId} platform is the canonical win-x64"
+              Expect.isTrue (snapshot.Parsed.AssetUri.Contains componentId) $"{componentId} asset URI names the component id"
+              Expect.isTrue (snapshot.Parsed.ArchiveName.StartsWith "v") $"{componentId} archive name is versioned")
+      testCase "every published file is a contained bare name with no directory traversal" (fun () ->
+          for componentId in canonicalComponentIds do
+              let snapshot = readCanonicalConfig repositoryRoot componentId
+              for name in snapshot.Parsed.PublishedFiles do
+                  Expect.isFalse (name.Contains "/") $"{componentId} published file {name} contains no directory separator"
+                  Expect.isFalse (name.Contains "\\") $"{componentId} published file {name} contains no backslash"
+                  Expect.isTrue (name = Path.GetFileName name) $"{componentId} published file {name} is a bare name"
+                  Expect.isFalse (name.Contains "..") $"{componentId} published file {name} contains no relative-traversal segment")
+      testCase "the canonical Config.json contains exactly the nine required fields and no others" (fun () ->
+          for componentId in canonicalComponentIds do
+              let snapshot = readCanonicalConfig repositoryRoot componentId
+              let node = JsonNode.Parse(Encoding.UTF8.GetString snapshot.ConfigBytes).AsObject()
+              let keys = node |> Seq.map (fun property -> property.Key) |> Seq.toList |> List.sort
+              Expect.equal keys (requiredFields |> List.sort) $"{componentId} Config.json has exactly the nine required fields") ]
 
 let private snapshotTests =
     [ testCase "projection and source hash remain bound to the bytes observed before file mutation" (fun () ->
-          let path = Path.Combine(Path.GetTempPath(), $"release-policy-{Guid.NewGuid():N}.fsx")
-          let originalBytes = File.ReadAllBytes(configPath "dotnet")
-          File.WriteAllBytes(path, originalBytes)
-          let observedBytes = File.ReadAllBytes path
+          let sourcePath = Path.Combine(Path.GetTempPath(), $"release-policy-{Guid.NewGuid():N}.json")
+          let originalBytes = readCanonicalConfig repositoryRoot "dotnet"
+          File.WriteAllBytes(sourcePath, originalBytes.ConfigBytes)
+          let observedBytes = File.ReadAllBytes sourcePath
           let snapshot = Array.copy observedBytes
           let expectedHash = sha256Hex snapshot
 
           let parsed =
-              match ReleasePolicy.parseBytes path snapshot with
+              match ReleasePolicy.parseBytes sourcePath snapshot with
               | Ok projection -> projection
               | Error error -> failtestf "canonical config was rejected: %A" error
 
           Array.fill snapshot 0 snapshot.Length 0uy
-          let changedFile = Encoding.UTF8.GetBytes "module ReleaseConfig\nlet componentId = \"mutated\"\n"
-          File.WriteAllBytes(path, changedFile)
+          let changedFile = Encoding.UTF8.GetBytes "{\"componentId\":\"mutated\"}"
+          File.WriteAllBytes(sourcePath, changedFile)
 
           try
               let reparsed =
-                  match ReleasePolicy.parseBytes path observedBytes with
+                  match ReleasePolicy.parseBytes sourcePath observedBytes with
                   | Ok projection -> projection
                   | Error error -> failtestf "original byte snapshot was rejected after file mutation: %A" error
 
@@ -184,11 +230,12 @@ let private snapshotTests =
               Expect.equal reparsed.SourceSha256 expectedHash "file mutation does not alter hash of retained bytes"
               Expect.equal reparsed.ComponentId "dotnet" "file mutation does not alter parsed projection from retained bytes"
           finally
-              File.Delete path) ]
+              File.Delete sourcePath) ]
 
 let tests =
     testList "release policy parseBytes" [
         testList "canonical projections" projectionTests
-        testList "supported grammar and fail-closed inputs" grammarTests
+        testList "strict JSON grammar and fail-closed inputs" strictJsonGrammarTests
+        testList "semantic schema relations" semanticGrammarTests
         testList "immutable byte snapshot" snapshotTests
     ]

@@ -1,5 +1,5 @@
 // role: test entrypoint
-#load "../release/Config.fsx"
+#load "../../infrastructure/Distribution.fsx"
 #load "../../infrastructure/Testing.fsx"
 
 open System
@@ -9,9 +9,10 @@ open System.Reflection.PortableExecutable
 
 let repoRoot = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", ".."))
 let dotnet = Path.Combine(repoRoot, "dotnet")
+let config = DistributionBuild.loadConfig (Path.Combine(dotnet, "release", "Config.json"))
 let dist = Path.Combine(dotnet, "dist")
-let componentId = ReleaseConfig.componentId
-let archiveName = ReleaseConfig.archiveName
+let componentId = config.ComponentId
+let archiveName = config.ArchiveName
 let distributionDirectory = Path.Combine(dist, componentId)
 let archivePath = Path.Combine(dist, archiveName)
 let manifestPath = Path.Combine(distributionDirectory, "distribution.json")
@@ -43,13 +44,13 @@ let runDotnet arguments : Async<string> =
 let runScript path = runDotnet [ "fsi"; path ]
 
 let producer: DistributionTestHelper.Producer =
-    { ComponentId = ReleaseConfig.componentId
-      Version = ReleaseConfig.version
-      SdkVersion = ReleaseConfig.sdkVersion
-      EntryDll = ReleaseConfig.entryDll
-      ArchiveName = ReleaseConfig.archiveName
-      AssetUri = ReleaseConfig.assetUri
-      PublishedFiles = ReleaseConfig.publishedFiles }
+    { ComponentId = config.ComponentId
+      Version = config.Version
+      SdkVersion = config.SdkVersion
+      EntryDll = config.EntryDll
+      ArchiveName = config.ArchiveName
+      AssetUri = config.AssetUri
+      PublishedFiles = config.PublishedFiles }
 
 let layout: DistributionTestHelper.Layout =
     { RepoRoot = repoRoot
@@ -71,7 +72,7 @@ async {
 
     do! DistributionTestHelper.assertDistributionContract producer layout
 
-    let packagedDllPath = Path.Combine(distributionDirectory, ReleaseConfig.entryDll)
+    let packagedDllPath = Path.Combine(distributionDirectory, config.EntryDll)
     let packagedDllHasNoDebugDirectory =
         use stream = File.OpenRead packagedDllPath
         use pe = new PEReader(stream)

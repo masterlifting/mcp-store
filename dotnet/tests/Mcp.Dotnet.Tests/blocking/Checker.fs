@@ -38,8 +38,7 @@ let private sourceExtensions = Set.ofList [ ".fs"; ".fsx" ]
 
 let private topLevelBridgeSites =
     Map.ofList
-        [ "infrastructure/release/Bootstrap.fsx", [ "match verify root |> Async.RunSynchronously with" ]
-          "infrastructure/release/Runner.fs",
+        [ "infrastructure/release/Runner.fs",
           [ "runPrepareMode argv |> Async.RunSynchronously"
             "runPublishMode argv |> Async.RunSynchronously" ]
           "dotnet/release/Build.fsx", [ "match run () |> Async.RunSynchronously with" ]

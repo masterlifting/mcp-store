@@ -16,8 +16,8 @@ open ReleaseTestProcess
 let private repoRoot = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "..", ".."))
 
 let private currentParticipants =
-    [ "dotnet", "dotnet/release/Config.fsx"
-      "workflow", "workflow/release/Config.fsx" ]
+    [ "dotnet", "dotnet/release/Config.json"
+      "workflow", "workflow/release/Config.json" ]
 
 let private withTemporaryRoot (action: string -> Async<unit>) : Async<unit> =
     async {
@@ -60,22 +60,25 @@ let private writeRosterText root (text: string) =
     File.WriteAllText(path, text)
     path
 
-let private configText componentId version entryDll sdk runtime platform =
+let private configText (componentId: string) (version: string) (entryDll: string) (sdk: string) (runtime: string) (platform: string) =
     let archiveName = $"v{version}.zip"
     let assetUri = $"https://github.com/masterlifting/mcp-store/releases/download/{componentId}/{archiveName}"
-
-    String.concat
-        Environment.NewLine
-        [ "module ReleaseConfig"
-          $"let componentId = \"{componentId}\""
-          $"let version = \"{version}\""
-          $"let entryDll = \"{entryDll}\""
-          $"let sdkVersion = \"{sdk}\""
-          $"let runtimeVersion = \"{runtime}\""
-          $"let platform = \"{platform}\""
-          $"let archiveName = \"{archiveName}\""
-          $"let assetUri = \"{assetUri}\""
-          $"let publishedFiles = [ \"{entryDll}\" ]" ]
+    // WHY: the production policy reader consumes strict JSON over the canonical 9 fields;
+    //   fixture Config.json files share the same shape so the roster toolchain checks
+    //   exercise the same projection path as the canonical configs.
+    let node = System.Text.Json.Nodes.JsonObject()
+    node["componentId"] <- System.Text.Json.Nodes.JsonValue.Create componentId
+    node["version"] <- System.Text.Json.Nodes.JsonValue.Create version
+    node["entryDll"] <- System.Text.Json.Nodes.JsonValue.Create entryDll
+    node["sdkVersion"] <- System.Text.Json.Nodes.JsonValue.Create sdk
+    node["runtimeVersion"] <- System.Text.Json.Nodes.JsonValue.Create runtime
+    node["platform"] <- System.Text.Json.Nodes.JsonValue.Create platform
+    node["archiveName"] <- System.Text.Json.Nodes.JsonValue.Create archiveName
+    node["assetUri"] <- System.Text.Json.Nodes.JsonValue.Create assetUri
+    let files = System.Text.Json.Nodes.JsonArray()
+    files.Add(System.Text.Json.Nodes.JsonValue.Create entryDll) |> ignore
+    node["publishedFiles"] <- files
+    node.ToJsonString(System.Text.Json.JsonSerializerOptions(WriteIndented = true))
 
 let private writeConfig root configPath componentId version entryDll sdk runtime platform =
     let path = Path.Combine(root, configPath)
@@ -84,8 +87,8 @@ let private writeConfig root configPath componentId version entryDll sdk runtime
     path
 
 let private projectConfigEntries =
-    [ "dotnet", "dotnet/release/Config.fsx", "Mcp.Dotnet.dll"
-      "workflow", "workflow/release/Config.fsx", "Mcp.Workflow.dll" ]
+    [ "dotnet", "dotnet/release/Config.json", "Mcp.Dotnet.dll"
+      "workflow", "workflow/release/Config.json", "Mcp.Workflow.dll" ]
 
 let private writeProjectConfigs root sdk runtime platform participants =
     for componentId, configPath, entryDll in projectConfigEntries do
@@ -138,27 +141,27 @@ let private updateProjectUsesRosterProjectionAndRejectsDrift =
                     Expect.equal exitCode 0 "the controlled roster projects without F# evaluation"
                     Expect.isTrue (output.Contains("components=[\"workflow\",\"dotnet\"]", StringComparison.Ordinal)) "component projection preserves authoritative roster order"
 
-                    let duplicate = [ "dotnet", "dotnet/release/Config.fsx"; "dotnet", "dotnet/release/Config.fsx" ]
+                    let duplicate = [ "dotnet", "dotnet/release/Config.json"; "dotnet", "dotnet/release/Config.json" ]
                     writeRoster root duplicate None |> ignore
                     let! duplicateResult = runUpdate root [ "-Project"; "-Root"; root ]
 
-                    writeRoster root [ "dotnet", "dotnet/release/Config.fsx" ] None |> ignore
+                    writeRoster root [ "dotnet", "dotnet/release/Config.json" ] None |> ignore
                     let! omittedResult = runUpdate root [ "-Project"; "-Root"; root ]
 
-                    writeRoster root (currentParticipants @ [ "telegram", "telegram/release/Config.fsx" ]) None |> ignore
+                    writeRoster root (currentParticipants @ [ "telegram", "telegram/release/Config.json" ]) None |> ignore
                     let! extraResult = runUpdate root [ "-Project"; "-Root"; root ]
 
                     writeRoster root currentParticipants (Some ("sdkVersion", "copied-policy")) |> ignore
                     let! policyResult = runUpdate root [ "-Project"; "-Root"; root ]
 
                     writeRoster root currentParticipants None |> ignore
-                    writeConfig root "dotnet/release/Config.fsx" "workflow" "1.0.0" "Mcp.Workflow.dll" "fixture-sdk" "fixture-runtime" "fixture-platform" |> ignore
-                    writeConfig root "workflow/release/Config.fsx" "workflow" "1.0.0" "Mcp.Workflow.dll" "fixture-sdk" "fixture-runtime" "fixture-platform" |> ignore
+                    writeConfig root "dotnet/release/Config.json" "workflow" "1.0.0" "Mcp.Workflow.dll" "fixture-sdk" "fixture-runtime" "fixture-platform" |> ignore
+                    writeConfig root "workflow/release/Config.json" "workflow" "1.0.0" "Mcp.Workflow.dll" "fixture-sdk" "fixture-runtime" "fixture-platform" |> ignore
                     let! identityResult = runUpdate root [ "-Project"; "-Root"; root ]
 
                     writeRoster root currentParticipants None |> ignore
-                    writeConfig root "dotnet/release/Config.fsx" "dotnet" "1.0.0" "Mcp.Dotnet.dll" "fixture-sdk" "fixture-runtime" "fixture-platform" |> ignore
-                    writeConfig root "workflow/release/Config.fsx" "workflow" "1.0.0" "Mcp.Workflow.dll" "fixture-sdk" "runtime-drift" "fixture-platform" |> ignore
+                    writeConfig root "dotnet/release/Config.json" "dotnet" "1.0.0" "Mcp.Dotnet.dll" "fixture-sdk" "fixture-runtime" "fixture-platform" |> ignore
+                    writeConfig root "workflow/release/Config.json" "workflow" "1.0.0" "Mcp.Workflow.dll" "fixture-sdk" "runtime-drift" "fixture-platform" |> ignore
                     let! toolchainResult = runUpdate root [ "-Project"; "-Root"; root ]
 
                     let outputOf (_, stdout, stderr, _) = stdout + stderr
@@ -223,7 +226,7 @@ let private prepareRejectsUnregisteredConfigBeforeAnyChild =
                     let! exitCode = ReleaseOrchestration.prepare root "dotnet/release/Alternate.fsx" candidateDirectory
 
                     Expect.equal exitCode 4 "an unregistered config fails closed"
-                    Expect.isFalse (File.Exists marker) "path authorization runs before Config.fsx evaluation"
+                    Expect.isFalse (File.Exists marker) "path authorization runs before Config.json evaluation"
                     Expect.isFalse (Directory.Exists candidateDirectory) "rejected config writes no candidate output"
                 })
     }
@@ -264,8 +267,8 @@ let private rosterLoaderRejectsCanonicalConfigPathCollisions =
                 async {
                     writeRoster
                         root
-                        [ "dotnet", "dotnet/release/Config.fsx"
-                          "workflow", "./dotnet/release/Config.fsx" ]
+                        [ "dotnet", "dotnet/release/Config.json"
+                          "workflow", "./dotnet/release/Config.json" ]
                         None
                     |> ignore
                     match! ReleaseEnrollment.loadRoster root with
@@ -300,7 +303,7 @@ let private rosterLoaderAndValidationRejectDuplicatesIncompleteMembershipAndPoli
         do!
             withTemporaryRoot (fun root ->
                 async {
-                    let duplicate = [ "dotnet", "dotnet/release/Config.fsx"; "dotnet", "dotnet/release/Config.fsx" ]
+                    let duplicate = [ "dotnet", "dotnet/release/Config.json"; "dotnet", "dotnet/release/Config.json" ]
                     writeRoster root duplicate None |> ignore
 
                     match! ReleaseEnrollment.loadRoster root with
@@ -310,7 +313,7 @@ let private rosterLoaderAndValidationRejectDuplicatesIncompleteMembershipAndPoli
                             "duplicate identity is rejected"
                     | Ok _ -> Expect.isTrue false "duplicate identity must not load"
 
-                    writeRoster root [ "dotnet", "dotnet/release/Config.fsx" ] None |> ignore
+                    writeRoster root [ "dotnet", "dotnet/release/Config.json" ] None |> ignore
                     match! ReleaseEnrollment.loadRoster root with
                     | Error error -> failwith (ReleaseError.message error)
                     | Ok roster ->
@@ -319,7 +322,7 @@ let private rosterLoaderAndValidationRejectDuplicatesIncompleteMembershipAndPoli
                             "missing required componentId(s): workflow"
                             (ReleaseEnrollment.validateRoster roster)
 
-                    writeRoster root (currentParticipants @ [ "telegram", "telegram/release/Config.fsx" ]) None |> ignore
+                    writeRoster root (currentParticipants @ [ "telegram", "telegram/release/Config.json" ]) None |> ignore
                     match! ReleaseEnrollment.loadRoster root with
                     | Error error ->
                         Expect.isTrue
@@ -339,7 +342,7 @@ let private rosterLoaderAndValidationRejectDuplicatesIncompleteMembershipAndPoli
                           "entryDll" ]
 
                     for field in forbiddenFields do
-                        writeRoster root [ "dotnet", "dotnet/release/Config.fsx" ] (Some (field, "copied-policy")) |> ignore
+                        writeRoster root [ "dotnet", "dotnet/release/Config.json" ] (Some (field, "copied-policy")) |> ignore
 
                         match! ReleaseEnrollment.loadRoster root with
                         | Error error ->
@@ -361,8 +364,8 @@ let private projectionValidationRejectsOmissionsExtrasAndPathDrift =
     testCase "the production projection guard rejects omitted, extra, and drifted entries" <| fun _ ->
         let roster =
             { Entries =
-                [ { ComponentId = "dotnet"; ConfigPath = "dotnet/release/Config.fsx" }
-                  { ComponentId = "workflow"; ConfigPath = "workflow/release/Config.fsx" } ]
+                [ { ComponentId = "dotnet"; ConfigPath = "dotnet/release/Config.json" }
+                  { ComponentId = "workflow"; ConfigPath = "workflow/release/Config.json" } ]
               SourcePath = "fixture/Participants.json" }
 
         let dotnetOnly = { roster with Entries = [ roster.Entries.Head ] }
@@ -374,7 +377,7 @@ let private projectionValidationRejectsOmissionsExtrasAndPathDrift =
 
         let expanded =
             { roster with
-                Entries = roster.Entries @ [ { ComponentId = "telegram"; ConfigPath = "telegram/release/Config.fsx" } ] }
+                Entries = roster.Entries @ [ { ComponentId = "telegram"; ConfigPath = "telegram/release/Config.json" } ] }
 
         expectErrorContaining
             "direct validation rejects an unsupported inventory member"
@@ -384,17 +387,17 @@ let private projectionValidationRejectsOmissionsExtrasAndPathDrift =
         expectErrorContaining
             "an omitted workflow projection is rejected"
             "unsupported componentId 'workflow'"
-            (ReleaseEnrollment.validateProjectionAgainstRoster "workflow" "workflow/release/Config.fsx" "fixture" dotnetOnly)
+            (ReleaseEnrollment.validateProjectionAgainstRoster "workflow" "workflow/release/Config.json" "fixture" dotnetOnly)
 
         expectErrorContaining
             "an extra Telegram projection is rejected"
             "unsupported componentId 'telegram'"
-            (ReleaseEnrollment.validateProjectionAgainstRoster "telegram" "telegram/release/Config.fsx" "fixture" roster)
+            (ReleaseEnrollment.validateProjectionAgainstRoster "telegram" "telegram/release/Config.json" "fixture" roster)
 
         expectErrorContaining
             "a component id paired with another config path is rejected"
             "configPath drift"
-            (ReleaseEnrollment.validateProjectionAgainstRoster "dotnet" "workflow/release/Config.fsx" "fixture" roster)
+            (ReleaseEnrollment.validateProjectionAgainstRoster "dotnet" "workflow/release/Config.json" "fixture" roster)
 
         expectErrorContaining
             "an unregistered transaction component is rejected"
@@ -441,81 +444,6 @@ let private genericIdentityAndMetadataUseProducerOwnedToolchains =
                 Expect.equal parsed.ProducerRuntime (Some runtime) $"{componentId} runtime remains producer-owned"
                 Expect.equal parsed.ProducerPlatform (Some platform) $"{componentId} platform remains producer-owned"
 
-let private writeBootstrapSources root =
-    let infrastructure = Path.Combine(root, "infrastructure")
-    let release = Path.Combine(infrastructure, "release")
-    Directory.CreateDirectory release |> ignore
-    File.Copy(Path.Combine(repoRoot, "infrastructure", "Provenance.fs"), Path.Combine(infrastructure, "Provenance.fs"))
-    File.Copy(Path.Combine(repoRoot, "infrastructure", "release", "Enrollment.fs"), Path.Combine(release, "Enrollment.fs"))
-    File.Copy(Path.Combine(repoRoot, "infrastructure", "release", "Bootstrap.fsx"), Path.Combine(release, "Bootstrap.fsx"))
-    Path.Combine(release, "Bootstrap.fsx")
-
-let private runBootstrap root =
-    async {
-        let info = ProcessStartInfo("dotnet")
-        info.WorkingDirectory <- root
-        info.UseShellExecute <- false
-        info.RedirectStandardOutput <- true
-        info.RedirectStandardError <- true
-        [ "fsi"; "--nologo"; Path.Combine(root, "infrastructure", "release", "Bootstrap.fsx") ]
-        |> List.iter info.ArgumentList.Add
-        [ "GITHUB_ENV"; "GITHUB_OUTPUT"; "GITHUB_TOKEN"; "MCP_RELEASE_DO_UPLOAD" ]
-        |> List.iter (fun name -> info.EnvironmentVariables.Remove name |> ignore)
-
-        match! ReleaseTestProcess.capture 120000 info with
-        | Ok result -> return result
-        | Error error -> return failwith error
-    }
-
-let private bootstrapRejectsConfigIdentityAndRuntimeDrift =
-    testList
-        "Bootstrap roster boundary"
-        [ testCaseAsync "the real Bootstrap script rejects a roster/config id mismatch" <| async {
-              do!
-                  withTemporaryRoot (fun root ->
-                      async {
-                           writeBootstrapSources root |> ignore
-                           writeRoster root currentParticipants None |> ignore
-                           writeConfig root "dotnet/release/Config.fsx" "workflow" "1.0.0" "Mcp.Workflow.dll" Fixture.canonicalSdk Fixture.canonicalRuntime Fixture.canonicalPlatform |> ignore
-                           writeConfig root "workflow/release/Config.fsx" "workflow" "1.0.0" "Mcp.Workflow.dll" Fixture.canonicalSdk Fixture.canonicalRuntime Fixture.canonicalPlatform |> ignore
-
-                           let! exitCode, stdout, stderr = runBootstrap root
-                           let output = stdout + stderr
-                           Expect.isTrue (exitCode <> 0) "Bootstrap rejects the config identity mismatch"
-                           Expect.isTrue
-                               (containsDiagnostic "componentId does not match the release pin: expected dotnet, got workflow" output)
-                               $"Bootstrap identifies the mismatched config id: {output}"
-                      })
-          }
-          testCaseAsync "Bootstrap rejects copied producer policy in the roster" <| async {
-              do!
-                  withTemporaryRoot (fun root ->
-                      async {
-                          writeBootstrapSources root |> ignore
-                          writeRoster root [ "dotnet", "dotnet/release/Config.fsx" ] (Some ("sdkVersion", Fixture.canonicalSdk)) |> ignore
-
-                          let! exitCode, stdout, stderr = runBootstrap root
-                          let output = stdout + stderr
-                          Expect.isTrue (exitCode <> 0) "Bootstrap rejects a policy-mirror field before config loading"
-                          Expect.isTrue (contains "forbidden field 'sdkVersion'" output) "Bootstrap names the forbidden roster field"
-                      })
-          }
-          testCaseAsync "Bootstrap retains the common runtime restriction" <| async {
-              do!
-                  withTemporaryRoot (fun root ->
-                      async {
-                          writeBootstrapSources root |> ignore
-                          writeRoster root currentParticipants None |> ignore
-                          writeConfig root "dotnet/release/Config.fsx" "dotnet" "1.0.0" "Mcp.Dotnet.dll" Fixture.canonicalSdk Fixture.canonicalRuntime Fixture.canonicalPlatform |> ignore
-                          writeConfig root "workflow/release/Config.fsx" "workflow" "1.0.0" "Mcp.Workflow.dll" Fixture.canonicalSdk "runtime-drift" Fixture.canonicalPlatform |> ignore
-
-                          let! exitCode, stdout, stderr = runBootstrap root
-                          let output = stdout + stderr
-                          Expect.isTrue (exitCode <> 0) "Bootstrap rejects cross-producer runtime drift"
-                          Expect.isTrue (contains "one canonical value" output) "Bootstrap reports the common runtime constraint"
-                      })
-          } ]
-
 let private currentRosterAndProjectionTests =
     testList
         "compiled enrollment API"
@@ -530,7 +458,6 @@ let tests =
         [ currentRosterAndProjectionTests
           updateProjectUsesRosterProjectionAndRejectsDrift
           updateVerifyRejectsUnenrolledComponent
-          bootstrapRejectsConfigIdentityAndRuntimeDrift
           prepareRejectsUnregisteredConfigBeforeAnyChild
           canonicalConfigPathAuthorizationIsExactAndLexical
           rosterLoaderRejectsCanonicalConfigPathCollisions ]

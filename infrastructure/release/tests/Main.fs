@@ -15,7 +15,6 @@ let private suites =
             "compiled release regressions"
             [ Enrollment.tests
               Coherence.tests
-              Bootstrap.tests
               Compare.tests
               Evaluate.tests
               Historical.tests

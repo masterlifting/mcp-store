@@ -1,5 +1,5 @@
 // role: release/build entrypoint
-#load "Config.fsx"
+#load "../../infrastructure/Distribution.fsx"
 #load "../../infrastructure/Pins.fsx"
 
 open System
@@ -7,12 +7,13 @@ open System.IO
 open BuildProvenance
 
 let root = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", ".."))
+let config = DistributionBuild.loadConfig (Path.Combine(__SOURCE_DIRECTORY__, "Config.json"))
 let dist = Path.Combine(root, "workflow", "dist")
 let output = Path.Combine(dist, "consumer-pins.json")
-let componentId = ReleaseConfig.componentId
-let version = ReleaseConfig.version
-let archiveName = ReleaseConfig.archiveName
-let assetUri = ReleaseConfig.assetUri
+let componentId = config.ComponentId
+let version = config.Version
+let archiveName = config.ArchiveName
+let assetUri = config.AssetUri
 
 let manifestPath = Path.Combine(dist, componentId, "distribution.json")
 let archivePath = Path.Combine(dist, archiveName)
