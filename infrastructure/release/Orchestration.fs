@@ -265,18 +265,8 @@ let private runProducerTests
             return Error typedError
     }
 
-// Renders the prepared-data record as the legacy stdout JSON status envelope.
-// This is the read-only summary the existing tests/scripts observe; it carries
-// Shared per-component preparation: authorizes the CLI configPath against the
-// roster, parses Config.fsx purely (no FSI execution), runs the per-component
-// Build/Pins/Tests stages as scrubbed child processes, then snapshots the
-// archive and standalone manifest plus their SHA-256 digests. The function
-// STOPS before any transaction subprocess; the credentials GITHUB_TOKEN and
-// MCP_RELEASE_DO_UPLOAD never reach this seam. The portable candidate
-// directory the prepare entrypoint writes carries only data (relative exact
-// names, snapshot digests as a diagnostic file) — the publisher re-derives
-// every policy value from the audited Publisher.json closure plus the
-// canonical Config.fsx bytes at the platform-supplied event SHA.
+// Roster authorization precedes config parsing and child execution, preventing unregistered F# from running.
+// Preparation children lack publication credentials, preventing build and test code from publishing.
 let private prepareInternal (root: string) (configPath: string) : Async<Result<PreparedData, ReleaseError>> =
     async {
         let! rosterResult = ReleaseEnrollment.loadRoster root
