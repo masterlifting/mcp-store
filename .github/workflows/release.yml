@@ -39,8 +39,6 @@ jobs:
     # Read-only: this job builds the trusted runtime and runs the regression gates; it never holds a credential.
     permissions:
       contents: read
-    env:
-      PUBLISHER_STAGE_ROOT: ${{ runner.temp }}/publisher-stage
     outputs:
       runtimeArtifactId: ${{ steps.upload.outputs.artifact-id }}
       runtimeArtifactDigest: ${{ steps.upload.outputs.artifact-digest }}
@@ -52,6 +50,12 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Initialize publisher paths
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP "publisher-stage"
+          "PUBLISHER_STAGE_ROOT=$root" >> $env:GITHUB_ENV
 
       - name: project canonical toolchain from the policy JSON (no SDK or F# needed)
         id: project
@@ -299,8 +303,6 @@ jobs:
     # Read-only: this job runs both producers' package gates and builds candidates; it never holds write authority.
     permissions:
       contents: read
-    env:
-      CANDIDATE_ROOT: ${{ runner.temp }}/candidate
     # Static producer-specific keys: each candidate is uploaded by its own step, so one common key can never be
     # overwritten by another component's upload and a consumer can never fall back to a sibling's identity.
     outputs:
@@ -317,6 +319,12 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Initialize candidate paths
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP "candidate"
+          "CANDIDATE_ROOT=$root" >> $env:GITHUB_ENV
 
       - name: project canonical toolchain from the policy JSON (no SDK or F# needed)
         id: project
