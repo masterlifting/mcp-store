@@ -6,6 +6,10 @@ name: release
 # write-capable publication job alone holds a credential, downloads the exact declared artifact ids through the pinned
 # official transfer action, verifies every file against the publisher job's own independent inventory and only then
 # runs the verified publisher.
+# Every action reference is a reviewed 40-hex commit whose published runtime is node24, so no stage runs on a retired
+# node16/node20 runtime and no floating tag can move a step's behavior.
+# A single artifact requested by id is extracted directly into the exact path this workflow declares, so each verified
+# volume is that declared root itself rather than a discovered child directory named after the artifact.
 # `Participants.json` is the only enrollment authority and each producer's `*/release/Config.json` is the only source
 # of SDK/version/runtime/platform, so no stage restates those values in YAML or global.json.
 
@@ -45,7 +49,7 @@ jobs:
       runtimeInventory: ${{ steps.inventory.outputs.inventory }}
     steps:
       - name: checkout exact event SHA
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
@@ -70,7 +74,7 @@ jobs:
         run: pwsh infrastructure/release/Coherence.ps1 -Components $env:PROJECTED_COMPONENTS
 
       - name: setup .NET SDK from the canonical projection
-        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: ${{ steps.project.outputs.sdk }}
 
@@ -180,7 +184,7 @@ jobs:
 
       - name: upload the trusted publisher runtime transport
         id: upload
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           # Exactly the published runtime directory: the publication job verifies the extracted set against the
           # inventory emitted above and executes only from that verified set.
@@ -314,7 +318,7 @@ jobs:
       candidateArchiveName_workflow: ${{ steps.prepare.outputs.archiveName_workflow }}
     steps:
       - name: checkout exact event SHA
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
@@ -332,7 +336,7 @@ jobs:
         run: pwsh infrastructure/release/Update.ps1 -Project
 
       - name: setup .NET SDK from the canonical projection
-        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: ${{ steps.project.outputs.sdk }}
 
@@ -429,7 +433,7 @@ jobs:
 
       - name: upload the dotnet candidate transport
         id: upload_dotnet
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           # Exactly the two direct members the publisher consumes: the producer archive and its distribution manifest.
           name: release-candidate-dotnet
@@ -440,7 +444,7 @@ jobs:
 
       - name: upload the workflow candidate transport
         id: upload_workflow
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           # Exactly the two direct members the publisher consumes: the producer archive and its distribution manifest.
           name: release-candidate-workflow
@@ -469,7 +473,7 @@ jobs:
       queue: max
     steps:
       - name: checkout the exact event SHA from the trusted control plane
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
@@ -481,7 +485,7 @@ jobs:
         run: pwsh infrastructure/release/Update.ps1 -Project
 
       - name: setup .NET SDK from the canonical projection
-        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: ${{ steps.project.outputs.sdk }}
 
@@ -513,25 +517,29 @@ jobs:
 
       - name: download the declared publisher runtime transport
         id: downloadPublisher
-        # The supported pinned transfer action reads the artifact this run's publisher job declared; the action's own
-        # digest observation is a warning only, so the inventory check below stays the fail-closed proof.
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        # The supported pinned transfer action reads the artifact this run's publisher job declared and, by its
+        # documented default, fails closed on a digest mismatch; the inventory check below remains the independent
+        # proof of the extracted bytes, and this workflow never overrides the transfer's documented default.
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           # The exact numeric artifact id from this run; no name, pattern, latest-run or merge lookup exists.
           artifact-ids: ${{ needs.publisher.outputs.runtimeArtifactId }}
+          # A single artifact id extracts directly into this path, so the verified root is this root, not a child.
           path: ${{ runner.temp }}/runtime
 
       - name: download the declared dotnet candidate transport
         id: downloadCandidateDotnet
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
+          # The exact numeric artifact id from this run; a single id extracts directly into the path below.
           artifact-ids: ${{ needs.preparation.outputs.candidateArtifactId_dotnet }}
           path: ${{ runner.temp }}/candidate-dotnet
 
       - name: download the declared workflow candidate transport
         id: downloadCandidateWorkflow
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
+          # The exact numeric artifact id from this run; a single id extracts directly into the path below.
           artifact-ids: ${{ needs.preparation.outputs.candidateArtifactId_workflow }}
           path: ${{ runner.temp }}/candidate-workflow
 
@@ -579,15 +587,9 @@ jobs:
             return $value
           }
 
-          # Each pinned download extracts exactly one artifact directory under its isolated root, so the verified root
-          # is the single produced directory rather than a name the publication job restates.
-          function Get-SingleArtifactRoot {
-            param([string]$DownloadRoot, [string]$Subject)
-            if (-not (Test-Path -LiteralPath $DownloadRoot -PathType Container)) { throw "the downloaded $Subject transport is missing: $DownloadRoot" }
-            $directories = @(Get-ChildItem -LiteralPath $DownloadRoot -Directory -Force)
-            if ($directories.Count -ne 1) { throw "the downloaded $Subject transport extracted $($directories.Count) directories where exactly one artifact directory is required" }
-            return $directories[0].FullName
-          }
+          # A single artifact requested by id extracts directly into the exact declared path, so each verified root is
+          # that declared root itself. No directory is discovered and no artifact name is restated here; the verifier
+          # below fails closed on the exact membership, so an unexpected nested layout is rejected, not accepted.
 
           $publisher = $env:PUBLISHER_OUTPUTS | ConvertFrom-Json -AsHashtable
           $candidates = $env:CANDIDATE_OUTPUTS | ConvertFrom-Json -AsHashtable
@@ -606,7 +608,7 @@ jobs:
           # Complete membership, path and SHA-256 proof against the publisher job's own inventory, before any
           # downloaded file is executed. The verifier is read-only and reads no credential or platform state.
           $verifier = Join-Path $workspace "infrastructure/release/Verify.ps1"
-          $runtimeRoot = Get-SingleArtifactRoot (Join-Path $temp "runtime") "publisher runtime"
+          $runtimeRoot = Join-Path $temp "runtime"
           & pwsh -NoProfile -File $verifier -Root $runtimeRoot -InventoryJson $runtimeInventory
           if ($LASTEXITCODE -ne 0) { throw "the publisher runtime does not match the inventory declared by the publisher job (exit $LASTEXITCODE)" }
           $runner = Join-Path $runtimeRoot "ReleaseRunner.exe"
@@ -623,7 +625,9 @@ jobs:
             if ($candidateArtifactId -cnotmatch '^[0-9]+$') { throw "the $component candidate artifact id '$candidateArtifactId' is not numeric" }
             if ($candidateDigest -cnotmatch '^(?:sha256:)?[0-9a-f]{64}$') { throw "the $component candidate platform digest is not a SHA-256 digest" }
             if ($archiveName -ne [System.IO.Path]::GetFileName($archiveName) -or $archiveName -notmatch '\.zip$') { throw "the $component archive name '$archiveName' is not a single relative zip name" }
-            $candidateRoot = Get-SingleArtifactRoot (Join-Path $temp "candidate-$component") "$component candidate"
+            # The verified candidate root is this component's own declared transfer root; the exact membership check
+            # below fails closed on a nested or otherwise unexpected layout.
+            $candidateRoot = Join-Path $temp "candidate-$component"
             # The candidate directory is exactly the producer archive and its distribution manifest: no sidecar, no receipt.
             & pwsh -NoProfile -File $verifier -Root $candidateRoot -MembersJson (ConvertTo-Json -Compress @($archiveName, "distribution.json"))
             if ($LASTEXITCODE -ne 0) { throw "the $component candidate directory does not carry exactly '$archiveName' and 'distribution.json' (exit $LASTEXITCODE)" }
@@ -749,7 +753,7 @@ jobs:
 
       - name: upload the release metadata evidence
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           # The verified projections are copied above only when they matched the observed published archive.
           name: release-metadata
