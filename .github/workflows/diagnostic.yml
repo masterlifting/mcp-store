@@ -3,6 +3,14 @@ name: diagnostic-packaged-workflow
 # Temporary read-only diagnostic for the packaged Workflow PersistenceFailure seen on the PR #41 branch. A
 # branch-only push trigger is what makes a new workflow file effective before it reaches the default branch; a
 # workflow_dispatch-only trigger would require this file to already exist on main. Remove this file before promoting.
+#
+# Objective: reproduce the failing preparation path exactly, with the instrumented test. The observed difference
+# between the failing release run and the earlier passing diagnostic run is the entry-resolution path, not a source
+# difference: release.yml's preparation job injects no MCP_WORKFLOW_PACKAGED_DLL, so the gate publishes the repository
+# itself (source=repo-publish), while the passing diagnostic run env-injected workflow/dist. This job therefore runs
+# the same steps the failing preparation job ran before its gate - same three builds, same roster-driven distribution
+# gates - and then the same gate command without any injection. It keeps read-only authority: no upload, no download,
+# no credential binding, no release code, one job, one gate invocation.
 on:
   push:
     branches:
@@ -33,6 +41,7 @@ jobs:
         id: project
         shell: pwsh
         # Participants.json and each producer's release/Config.json stay the only SDK source, so no version is restated here.
+        # The same projection also exports RELEASE_COMPONENTS, so the gates below read the roster instead of restating it.
         run: pwsh infrastructure/release/Update.ps1 -Project
 
       - name: setup .NET SDK from the canonical projection
@@ -40,43 +49,82 @@ jobs:
         with:
           dotnet-version: ${{ steps.project.outputs.sdk }}
 
-      - name: build the actual workflow package (native exit preserved)
+      - name: build the release runner and both producer projects
         shell: pwsh
-        # The same package entrypoint the release pipeline runs, so the DLL under test is the real generated artifact.
+        # The failing preparation job's build prefix, verbatim: same three projects, same order, same native-exit checks.
+        run: |
+          $ErrorActionPreference = "Stop"
+          dotnet build infrastructure/release/Release.fsproj -c Release
+          if ($LASTEXITCODE -ne 0) { throw "release runner build failed (exit $LASTEXITCODE)" }
+          dotnet build dotnet/Mcp.Dotnet.fsproj -c Release
+          if ($LASTEXITCODE -ne 0) { throw "dotnet producer build failed (exit $LASTEXITCODE)" }
+          dotnet build workflow/Mcp.Workflow.fsproj -c Release
+          if ($LASTEXITCODE -ne 0) { throw "workflow producer build failed (exit $LASTEXITCODE)" }
+
+      - name: run both producers' distribution package gates (native exit preserved)
+        shell: pwsh
+        # The failing preparation job's roster-driven gate loop, verbatim: each participant's own package gate runs
+        # first, and the workflow participant's gate is what stages workflow/dist from the same clean tree.
         run: |
           $ErrorActionPreference = "Stop"
           if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
             $PSNativeCommandUseErrorActionPreference = $false
           }
-          & dotnet fsi workflow/release/Build.fsx
-          $code = $LASTEXITCODE
-          if ($code -ne 0) { throw "workflow package build failed (exit $code)" }
+          $components = @(ConvertFrom-Json $env:RELEASE_COMPONENTS)
+          foreach ($component in $components) {
+            $entrypoint = "$component/tests/DistributionTests.fsx"
+            if (-not (Test-Path -LiteralPath $entrypoint)) { throw "producer package gate is missing: $entrypoint" }
+            Write-Host "::group::producer package gate $entrypoint"
+            & dotnet fsi --nologo $entrypoint
+            $code = $LASTEXITCODE
+            Write-Host "::endgroup::"
+            if ($code -ne 0) {
+              Write-Host "::error::producer package gate failed: $entrypoint (exit $code)"
+              exit $code
+            }
+          }
 
       - name: print packaged provenance for this run
         shell: pwsh
-        # Provenance only: the exact event HEAD, the revision the generated manifest stamped, and the entry DLL hash.
+        # Provenance of artifacts the gates above already staged - the event HEAD and the workflow distribution
+        # manifest and entry DLL hash - so the log identifies the commit and the staged payload. No extra build is
+        # added for this print, and the print never fails the job: when the staged package is absent it says so.
+        # The repo-publish payload the coordination gate itself creates under %TEMP% is deleted by the test's own
+        # cleanup, so its hash is reported unavailable instead of being captured; the test is deliberately untouched.
         run: |
           $ErrorActionPreference = "Stop"
           $head = (git rev-parse HEAD).Trim()
-          $manifest = Get-Content -LiteralPath workflow/dist/workflow/distribution.json -Raw | ConvertFrom-Json
-          $entryDll = (Resolve-Path -LiteralPath workflow/dist/workflow/Mcp.Workflow.dll).Path
-          $entryDllSha256 = (Get-FileHash -LiteralPath $entryDll -Algorithm SHA256).Hash.ToLowerInvariant()
           Write-Host "event HEAD: $head"
-          Write-Host "package manifest revision: $($manifest.revision)"
-          Write-Host "package identity: $($manifest.id) $($manifest.version) entryDll=$($manifest.entryDll)"
-          Write-Host "package entry DLL: $entryDll"
-          Write-Host "package entry DLL sha256: $entryDllSha256"
+          $manifestPath = "workflow/dist/workflow/distribution.json"
+          $entryDllPath = "workflow/dist/workflow/Mcp.Workflow.dll"
+          if ((Test-Path -LiteralPath $manifestPath) -and (Test-Path -LiteralPath $entryDllPath)) {
+            $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+            $entryDll = (Resolve-Path -LiteralPath $entryDllPath).Path
+            $entryDllSha256 = (Get-FileHash -LiteralPath $entryDll -Algorithm SHA256).Hash.ToLowerInvariant()
+            Write-Host "staged package manifest revision: $($manifest.revision)"
+            Write-Host "staged package identity: $($manifest.id) $($manifest.version) entryDll=$($manifest.entryDll)"
+            Write-Host "staged package entry DLL: $entryDll"
+            Write-Host "staged package entry DLL sha256: $entryDllSha256"
+            Write-Host "note: this staged package is only the coordination gate's fallback payload; the gate publishes the repository itself in this configuration"
+          } else {
+            Write-Host "staged package absent at $entryDllPath; no staged payload hash is available for this run"
+          }
+          Write-Host "repo-publish payload sha256: not available (the coordination gate publishes under %TEMP% and removes its own directory)"
 
-      - name: run the packaged runtime coordination gate against the built package (native exit preserved)
+      - name: run the Workflow packaged runtime coordination gate (native exit preserved)
         shell: pwsh
-        # One invocation only: no retry, no sleep, no timeout extension and no stress. The test prints the full apply
-        # error, both child stderr snapshots and the sidecar bytes before its assertion, so a failure is self-contained here.
-        env:
-          MCP_WORKFLOW_PACKAGED_DLL: ${{ github.workspace }}/workflow/dist/workflow/Mcp.Workflow.dll
+        # The failing preparation job's gate step minus its entry injection: no MCP_WORKFLOW_PACKAGED_DLL is bound
+        # here and any inherited value is cleared first, so the gate takes its original repo-publish path and answers
+        # the original question - the actual apply error, not a generic byte inventory. One invocation only: no retry,
+        # no sleep, no timeout extension and no stress. The test prints the full apply error, both child stderr
+        # snapshots and the sidecar bytes before its assertion, so a failure is self-contained in this log.
         run: |
           $ErrorActionPreference = "Stop"
           if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
             $PSNativeCommandUseErrorActionPreference = $false
           }
-          & dotnet fsi workflow/tests/PackagedRuntimeCoordinationTests.fsx
+          Remove-Item Env:MCP_WORKFLOW_PACKAGED_DLL -ErrorAction SilentlyContinue
+          $entrypoint = "workflow/tests/PackagedRuntimeCoordinationTests.fsx"
+          if (-not (Test-Path -LiteralPath $entrypoint)) { throw "Workflow packaged coordination gate is missing: $entrypoint" }
+          & dotnet fsi --nologo $entrypoint
           exit $LASTEXITCODE
