@@ -1,7 +1,8 @@
 # role: entrypoint/command
-# Deterministic cross-stage guard: the three workflow jobs, the action pins, the artifact-id bindings, the CLI paths
-# and the enrollment roster must all describe the same participants. Marker checks are anchored and fail closed, so a
-# hand-edited list, a renamed output, a re-enabled credential or a retired CLI path can never pass silently.
+# Deterministic cross-stage guard: the three workflow jobs, the action pins, the artifact-id bindings, the declared
+# transfer roots, the CLI paths and the enrollment roster must all describe the same participants. Marker checks are
+# anchored and fail closed, so a hand-edited list, a renamed output, a re-enabled credential, a retired CLI path or a
+# re-nested artifact root can never pass silently.
 
 [CmdletBinding()]
 param(
@@ -128,10 +129,10 @@ Assert-JobCount -Job "publication" -Name "publication reads the projected compon
 # Every action reference must be a reviewed 40-hex commit; a floating tag would let an upstream change reach the publication boundary.
 Assert-Count -Name "all action references are pinned commits" -Pattern 'uses: [A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+@[0-9a-f]{40} ' -Expected 13
 Assert-Count -Name "no floating or short action reference" -Pattern 'uses: [A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+@(?![0-9a-f]{40})' -Expected 0
-Assert-Count -Name "checkout uses the reviewed pinned commit" -Pattern 'uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262' -Expected 3
-Assert-Count -Name "SDK setup uses the reviewed pinned commit" -Pattern 'uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9' -Expected 3
-Assert-Count -Name "the platform upload action is the reviewed pinned commit" -Pattern 'uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02' -Expected 4
-Assert-Count -Name "the platform download action is the reviewed pinned commit" -Pattern 'uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093' -Expected 3
+Assert-Count -Name "checkout uses the reviewed pinned commit" -Pattern 'uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1' -Expected 3
+Assert-Count -Name "SDK setup uses the reviewed pinned commit" -Pattern 'uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68' -Expected 3
+Assert-Count -Name "the platform upload action is the reviewed pinned commit" -Pattern 'uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9' -Expected 4
+Assert-Count -Name "the platform download action is the reviewed pinned commit" -Pattern 'uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333' -Expected 3
 Assert-Count -Name "no floating artifact download reference exists" -Pattern 'uses: actions/download-artifact@(?![0-9a-f]{40} )' -Expected 0
 Assert-Count -Name "no artifact is selected by a zip wildcard" -Pattern '\*\.zip' -Expected 0
 Assert-Count -Name "no arbitrary artifact name lookup exists" -Pattern 'artifact-name' -Expected 0
@@ -141,6 +142,16 @@ Assert-Count -Name "no artifact transfer selects by name, pattern, run id, repos
 Assert-Count -Name "the publisher runtime is transferred by the pinned action" -Pattern '^ {8}id: downloadPublisher\s*$' -Expected 1
 Assert-Count -Name "the runtime transfer is bound to the publisher job's own artifact id" -Pattern '^ {10}artifact-ids: \$\{\{ needs\.publisher\.outputs\.runtimeArtifactId \}\}\s*$' -Expected 1
 Assert-Count -Name "the runtime transfer lands in its own isolated root" -Pattern '^ {10}path: \$\{\{ runner\.temp \}\}/runtime\s*$' -Expected 1
+# The pinned v8 transfer extracts a single artifact id directly into its declared path, so every verified root is the
+# declared transfer root itself. The retired v4 single-directory discovery wrapper would silently accept a nested
+# artifact-name layout, and an overridden digest or decompression input would weaken the transfer's documented default.
+Assert-Count -Name "no single-directory artifact discovery wrapper survives" -Pattern 'Get-SingleArtifactRoot' -Expected 0
+Assert-Count -Name "no helper scans a transfer root for one artifact directory" -Pattern 'Get-ChildItem -LiteralPath \$DownloadRoot -Directory' -Expected 0
+Assert-Count -Name "no transfer weakens the documented digest check" -Pattern '^ {10}digest-mismatch:' -Expected 0
+Assert-Count -Name "no transfer skips extraction of the declared artifact" -Pattern '^ {10}skip-decompress:' -Expected 0
+Assert-Count -Name "every publication step binds its directories to the runner temp directory" -Pattern '^ {10}\$temp = \$env:RUNNER_TEMP\s*$' -Expected 2
+Assert-Count -Name "the publisher runtime is verified from its own declared transfer root" -Pattern '^ {10}\$runtimeRoot = Join-Path \$temp "runtime"\s*$' -Expected 1
+Assert-Count -Name "each candidate is verified from its own declared transfer root" -Pattern '^ {12}\$candidateRoot = Join-Path \$temp "candidate-\$component"\s*$' -Expected 1
 
 # No repository secret is read: the platform workflow token is the only credential and it stays inside the one publication step.
 Assert-Count -Name "no repository secret is read by the release workflow" -Pattern 'secrets\.' -Expected 0
@@ -219,7 +230,7 @@ Assert-JobCount -Job "publication" -Name "the artifact id guard embeds no workfl
 Assert-JobCount -Job "publication" -Name "the runtime id guard reads the publisher job's own declared output" -Pattern '^ {10}RUNTIME_ARTIFACT_ID: \$\{\{ needs\.publisher\.outputs\.runtimeArtifactId \}\}\s*$' -Expected 1
 Assert-JobCount -Job "publication" -Name "the dotnet id guard reads the preparation job's own declared output" -Pattern '^ {10}CANDIDATE_ARTIFACT_ID_DOTNET: \$\{\{ needs\.preparation\.outputs\.candidateArtifactId_dotnet \}\}\s*$' -Expected 1
 Assert-JobCount -Job "publication" -Name "the workflow id guard reads the preparation job's own declared output" -Pattern '^ {10}CANDIDATE_ARTIFACT_ID_WORKFLOW: \$\{\{ needs\.preparation\.outputs\.candidateArtifactId_workflow \}\}\s*$' -Expected 1
-Assert-JobCount -Job "publication" -Name "publication transfers every transport through the pinned official action" -Pattern '^ {8}uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4\s*$' -Expected 3
+Assert-JobCount -Job "publication" -Name "publication transfers every transport through the pinned official action" -Pattern '^ {8}uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2\s*$' -Expected 3
 Assert-JobCount -Job "publication" -Name "publication addresses every transfer by an exact declared artifact id" -Pattern '^ {10}artifact-ids: \$\{\{ needs\.' -Expected 3
 Assert-JobCount -Job "publication" -Name "publication restates no artifact identity beyond the pinned action" -Pattern '^ {10}(pattern|run-id|repository|github-token|merge-multiple):' -Expected 0
 Assert-JobCount -Job "publication" -Name "no publication step selects an artifact by name" -Pattern '^ {10}name: ' -Expected 1

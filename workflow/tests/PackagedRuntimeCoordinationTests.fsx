@@ -253,14 +253,35 @@ let startMcpProcess (root: string) (catalog: string) (catalogHash: string) =
     Process.Start startInfo
 
 type McpSession(host: Process) =
-    let stderrTask = host.StandardError.ReadToEndAsync()
+    // Diagnostics: capture stderr incrementally so an assertion failure later
+    // in the test never strands the child stderr text inside an unread Task.
+    // The final stderr snapshot is exposed via `Stderr` once the session is
+    // closed; intermediate snapshots are available via `StderrIncremental`
+    // at any point between process start and close. `ErrorDataReceived` fires
+    // with a null Data element after the stream is consumed, which is used to
+    // bound the close-time drain wait.
+    let stderrBuffer = StringBuilder()
+    let stderrLock = obj()
+    let stderrDrained = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
     let mutable closed = false
     let mutable exitCode = -1
     let mutable stderrText = ""
 
+    do
+        host.EnableRaisingEvents <- true
+        host.ErrorDataReceived.Add(fun args ->
+            if isNull args.Data then
+                stderrDrained.TrySetResult() |> ignore
+            else
+                lock stderrLock (fun () -> stderrBuffer.AppendLine(args.Data) |> ignore))
+        host.BeginErrorReadLine()
+
     member _.Id = host.Id
     member _.ExitCode = exitCode
     member _.Stderr = stderrText
+
+    member _.StderrIncremental =
+        lock stderrLock (fun () -> stderrBuffer.ToString())
 
     member _.Write(request: JsonNode) : Async<unit> =
         async {
@@ -286,11 +307,22 @@ type McpSession(host: Process) =
                     with _ ->
                         if not host.HasExited then host.Kill true
                         do! host.WaitForExitAsync() |> Async.AwaitTask
-                let! stderr = stderrTask |> Async.AwaitTask
+                let drainOutcome =
+                    async {
+                        try
+                            do! stderrDrained.Task |> Async.AwaitTask
+                            return Ok()
+                        with error ->
+                            return Error error.Message
+                    }
+                let! drainResult = drainOutcome
                 let! _ = host.StandardOutput.ReadToEndAsync() |> Async.AwaitTask
                 exitCode <- host.ExitCode
-                stderrText <- stderr
+                stderrText <- lock stderrLock (fun () -> stderrBuffer.ToString())
                 host.Dispose()
+                match drainResult with
+                | Error message -> printfn "WARNING: stderr drain failed for pid=%d: %s" host.Id message
+                | Ok () -> ()
         }
 
 let isToolError (response: JsonNode) = response.["result"].["isError"].GetValue<bool>()
@@ -414,8 +446,43 @@ let runRaceTest () : Async<unit> =
         do! second.Write(jobj [ "jsonrpc", jstr "2.0"; "id", jint 2; "method", jstr "tools/call"; "params", jobj [ "name", jstr "task_apply"; "arguments", applyArgs root taskId 0 (blockCommand ()) ] ])
         let! applyStart = first.Read "task_apply start"
         let! applyBlock = second.Read "task_apply block"
-        printfn "apply start: isError=%b code=%s" (isToolError applyStart) (if isToolError applyStart then toolErrorCode applyStart else "-")
-        printfn "apply block: isError=%b code=%s" (isToolError applyBlock) (if isToolError applyBlock then toolErrorCode applyBlock else "-")
+        let describeApply label response =
+            if isToolError response then
+                printfn "%s: isError=%b code=%s message=%s"
+                    label
+                    (isToolError response)
+                    (toolErrorCode response)
+                    (toolErrorMessage response)
+            else
+                printfn "%s: isError=%b" label (isToolError response)
+        describeApply "apply start" applyStart
+        describeApply "apply block" applyBlock
+
+        // Diagnostic: surface child stderr and the apply-sidecar bytes before any
+        // assertion fails so a hosted runner can localize which producer boundary
+        // was hit (mutex acquire, directory handle, sidecar read, or persist).
+        printfn "child A stderr so far: %s" (first.StderrIncremental)
+        printfn "child B stderr so far: %s" (second.StderrIncremental)
+        let sidecarFile = Path.Combine(taskDirectory, "runtime.json")
+        if File.Exists sidecarFile then
+            try
+                let sidecarBytes = File.ReadAllBytes sidecarFile
+                let sidecarText = Encoding.UTF8.GetString sidecarBytes
+                let extractString (field: string) =
+                    try
+                        match JsonNode.Parse(sidecarText) with
+                        | null -> "?"
+                        | doc ->
+                            let fieldNode = doc.[field]
+                            if isNull fieldNode then "?" else fieldNode.ToString()
+                    with _ -> "?"
+                printfn "sidecar after apply %d bytes: stateRevision=%s id=%s"
+                    sidecarBytes.Length
+                    (extractString "stateRevision")
+                    (extractString "id")
+            with error -> printfn "sidecar read failed: %s" error.Message
+        else
+            printfn "sidecar after apply: absent"
         capture "after task_apply" taskDirectory |> ignore
 
         let applyErrors = [ applyStart; applyBlock ] |> List.filter isToolError

@@ -154,10 +154,16 @@ type TempWorkspace() =
         let directory = Path.Combine(root, relativeDirectory)
         Directory.CreateDirectory directory |> ignore
 
-        // Cleared sources force restore to resolve the cached test packages without network.
+        // Cleared sources force restore off parent feed inheritance, then an explicit
+        // nuget.org source satisfies the pinned xunit 17.14.1 / 2.9.3 / 2.5.7 versions
+        // without falling through to the SDK library-packs (which lack them).
         File.WriteAllText(
             Path.Combine(directory, "NuGet.config"),
-            "<?xml version=\"1.0\" encoding=\"utf-8\"?><configuration><packageSources><clear /></packageSources></configuration>"
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>"
+            + "<configuration><packageSources>"
+            + "<clear />"
+            + "<add key=\"nuget.org\" value=\"https://api.nuget.org/v3/index.json\" protocolVersion=\"3\" />"
+            + "</packageSources></configuration>"
         )
 
         let projectPath = Path.Combine(directory, $"{name}.csproj")
