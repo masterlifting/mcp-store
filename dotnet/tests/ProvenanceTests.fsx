@@ -3,7 +3,7 @@
 // distribution tests this runs from a dirty tree because it exercises only manifest
 // revision validation, not packaging or the clean-tree precondition.
 
-#load "../../infrastructure/Provenance.fsx"
+#load "../../infrastructure/Provenance.fs"
 
 open System
 open System.Diagnostics

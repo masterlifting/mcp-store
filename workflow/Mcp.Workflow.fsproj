@@ -10,6 +10,8 @@
     <DebugType>None</DebugType>
     <DebugSymbols>false</DebugSymbols>
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <!-- SDK default re-injects the current commit SHA into AssemblyInformationalVersion and therefore the DLL payload; keep it off so packaging does not embed HEAD. -->
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="domain/ComputationExpressions.fs" />

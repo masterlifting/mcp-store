@@ -4,14 +4,17 @@
 // provenance, publish, staging, manifest, and archive identical across producers.
 module DistributionBuild
 
-#load "Provenance.fsx"
+#load "Provenance.fs"
+#load "release/Policy.fs"
 
 open System
 open System.IO
 open System.IO.Compression
+open System.Text.Json
 open System.Text.Json.Nodes
 open System.Threading
 open BuildProvenance
+open ReleasePolicy
 
 // Everything the shared flow needs; producer release policy stays in the
 // producer script that populates it.
@@ -33,6 +36,12 @@ type DistributionResult =
       ArchiveSha256: string
       ManifestSha256: string
       Revision: string }
+
+// Build and pin entrypoints share the compiled publisher's bounded policy parser.
+let loadConfig (path: string) : PolicyProjection =
+    match ReleasePolicy.parse path with
+    | Ok policy -> policy
+    | Error error -> raise (InvalidDataException(ReleaseError.message error))
 
 let private listFiles (root: string) (searchOption: SearchOption) =
     Directory.EnumerateFiles(root, "*", searchOption)

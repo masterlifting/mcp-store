@@ -1,5 +1,5 @@
 // role: test entrypoint
-#load "../release/Config.fsx"
+#load "../../infrastructure/Distribution.fsx"
 #load "../../infrastructure/Testing.fsx"
 
 open System
@@ -8,9 +8,10 @@ open System.IO
 
 let repoRoot = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", ".."))
 let workflow = Path.Combine(repoRoot, "workflow")
+let config = DistributionBuild.loadConfig (Path.Combine(workflow, "release", "Config.json"))
 let dist = Path.Combine(workflow, "dist")
-let componentId = ReleaseConfig.componentId
-let archiveName = ReleaseConfig.archiveName
+let componentId = config.ComponentId
+let archiveName = config.ArchiveName
 let distributionDirectory = Path.Combine(dist, componentId)
 let archivePath = Path.Combine(dist, archiveName)
 let manifestPath = Path.Combine(distributionDirectory, "distribution.json")
@@ -38,13 +39,13 @@ let runScript path : Async<string> =
     }
 
 let producer: DistributionTestHelper.Producer =
-    { ComponentId = ReleaseConfig.componentId
-      Version = ReleaseConfig.version
-      SdkVersion = ReleaseConfig.sdkVersion
-      EntryDll = ReleaseConfig.entryDll
-      ArchiveName = ReleaseConfig.archiveName
-      AssetUri = ReleaseConfig.assetUri
-      PublishedFiles = ReleaseConfig.publishedFiles }
+    { ComponentId = config.ComponentId
+      Version = config.Version
+      SdkVersion = config.SdkVersion
+      EntryDll = config.EntryDll
+      ArchiveName = config.ArchiveName
+      AssetUri = config.AssetUri
+      PublishedFiles = config.PublishedFiles }
 
 let layout: DistributionTestHelper.Layout =
     { RepoRoot = repoRoot

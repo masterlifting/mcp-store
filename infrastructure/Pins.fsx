@@ -4,7 +4,7 @@
 // shape so producer pins cannot drift.
 module ReleasePins
 
-#load "Provenance.fsx"
+#load "Provenance.fs"
 
 open System
 open System.IO

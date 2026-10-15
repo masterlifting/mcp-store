@@ -1,0 +1,6 @@
+{
+  "participants": [
+    { "componentId": "dotnet", "configPath": "dotnet/release/Config.json" },
+    { "componentId": "workflow", "configPath": "workflow/release/Config.json" }
+  ]
+}

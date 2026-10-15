@@ -1,0 +1,749 @@
+name: release
+
+# Three isolated fresh jobs. The read-only publisher job compiles the release application from the project's own
+# explicit ordered compile list in an isolated stage and runs the complete release regression gate. The read-only
+# preparation job runs both producers' package gates and uploads one candidate transport per producer. The
+# write-capable publication job alone holds a credential, downloads the exact declared artifact ids through the pinned
+# official transfer action, verifies every file against the publisher job's own independent inventory and only then
+# runs the verified publisher.
+# `Participants.json` is the only enrollment authority and each producer's `*/release/Config.json` is the only source
+# of SDK/version/runtime/platform, so no stage restates those values in YAML or global.json.
+
+run-name: release ${{ github.sha }}
+
+# No path filter or dispatch: an unrelated push can still change packaged bytes.
+on:
+  push:
+    branches:
+      - main
+
+# Least privilege: read default; only the publication job elevates to write.
+permissions:
+  contents: read
+
+# queue: max retains pending runs the default single queue would replace; it cannot combine with cancel-in-progress: true.
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+  queue: max
+
+env:
+  DOTNET_NOLOGO: "1"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: "1"
+
+jobs:
+  publisher:
+    name: build-publisher
+    runs-on: windows-latest
+    # Read-only: this job builds the trusted runtime and runs the regression gates; it never holds a credential.
+    permissions:
+      contents: read
+    env:
+      PUBLISHER_STAGE_ROOT: ${{ runner.temp }}/publisher-stage
+    outputs:
+      runtimeArtifactId: ${{ steps.upload.outputs.artifact-id }}
+      runtimeArtifactDigest: ${{ steps.upload.outputs.artifact-digest }}
+      runtimeInventory: ${{ steps.inventory.outputs.inventory }}
+    steps:
+      - name: checkout exact event SHA
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: project canonical toolchain from the policy JSON (no SDK or F# needed)
+        id: project
+        shell: pwsh
+        run: pwsh infrastructure/release/Update.ps1 -Project
+
+      - name: verify cross-stage release coherence
+        shell: pwsh
+        env:
+          # The projection step's own value, because a step-local GITHUB_OUTPUT file holds only that step's writes.
+          PROJECTED_COMPONENTS: ${{ steps.project.outputs.components }}
+        run: pwsh infrastructure/release/Coherence.ps1 -Components $env:PROJECTED_COMPONENTS
+
+      - name: setup .NET SDK from the canonical projection
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: ${{ steps.project.outputs.sdk }}
+
+      - name: verify the executing toolchain against the policy JSON
+        shell: pwsh
+        run: pwsh infrastructure/release/Update.ps1 -Verify
+
+      - name: stage the publisher project from the explicit ordered compile list
+        id: stage
+        shell: pwsh
+        # The stage is generated from the release project's own `<Compile Include>` items in document order, so the
+        # compiled graph is the authored project graph and no second authored source list exists.
+        run: |
+          $ErrorActionPreference = "Stop"
+          $checkoutRoot = (Resolve-Path -LiteralPath ".").Path
+          $projectPath = Join-Path $checkoutRoot "infrastructure/release/Release.fsproj"
+          if (-not (Test-Path -LiteralPath $projectPath -PathType Leaf)) { throw "the release project is missing: $projectPath" }
+          [xml]$project = Get-Content -LiteralPath $projectPath -Raw
+          $compileNodes = @($project.SelectNodes("//Compile[@Include]"))
+          if ($compileNodes.Count -eq 0) { throw "the release project declares no explicit <Compile Include> item" }
+          $stageRoot = Join-Path $env:PUBLISHER_STAGE_ROOT "project"
+          if (Test-Path -LiteralPath $stageRoot) { Remove-Item -LiteralPath $stageRoot -Recurse -Force }
+          $sourceRoot = Join-Path $stageRoot "src"
+          New-Item -ItemType Directory -Path $sourceRoot -Force | Out-Null
+          $projectDirectory = Split-Path -Parent $projectPath
+          $generated = New-Object System.Collections.Generic.List[string]
+          $generated.Add('<Project Sdk="Microsoft.NET.Sdk">')
+          $generated.Add('  <PropertyGroup>')
+          $propertyGroup = $project.SelectSingleNode("//PropertyGroup")
+          if ($null -eq $propertyGroup) { throw "the release project declares no PropertyGroup" }
+          foreach ($property in $propertyGroup.ChildNodes) {
+            if ($property.NodeType -ne [System.Xml.XmlNodeType]::Element) { continue }
+            $generated.Add("    " + $property.OuterXml)
+          }
+          # The staged sources live under `src`, so the SDK's default glob must not add a second unordered item set.
+          $generated.Add('    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>')
+          $generated.Add('  </PropertyGroup>')
+          $generated.Add('  <ItemGroup>')
+          foreach ($node in $compileNodes) {
+            $include = $node.GetAttribute("Include")
+            $absolute = [System.IO.Path]::GetFullPath((Join-Path $projectDirectory $include))
+            if (-not $absolute.StartsWith($checkoutRoot + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::Ordinal)) {
+              throw "the release project compiles '$include', which resolves outside the checkout: $absolute"
+            }
+            $relative = [System.IO.Path]::GetRelativePath($checkoutRoot, $absolute).Replace('\', '/')
+            $destination = Join-Path $sourceRoot $relative.Replace('/', [System.IO.Path]::DirectorySeparatorChar)
+            New-Item -ItemType Directory -Path (Split-Path -Parent $destination) -Force | Out-Null
+            Copy-Item -LiteralPath $absolute -Destination $destination -Force
+            $generated.Add('    <Compile Include="src/' + $relative + '" />')
+          }
+          $generated.Add('  </ItemGroup>')
+          $generated.Add('</Project>')
+          $stageProject = Join-Path $stageRoot "ReleaseRunner.fsproj"
+          Set-Content -LiteralPath $stageProject -Value ($generated -join "`n") -Encoding utf8
+          # The isolated restore can only use the cleared source list below; no repository or machine NuGet.config applies.
+          $nugetConfig = @(
+            '<?xml version="1.0" encoding="utf-8"?>'
+            '<configuration>'
+            '  <packageSources>'
+            '    <clear />'
+            '    <add key="nuget.org" value="https://api.nuget.org/v3/index.json" protocolVersion="3" />'
+            '  </packageSources>'
+            '</configuration>'
+          )
+          Set-Content -LiteralPath (Join-Path $stageRoot "nuget.config") -Value ($nugetConfig -join "`n") -Encoding utf8
+          Write-Host "staged $($compileNodes.Count) ordered compile item(s) into $stageRoot"
+          "stageRoot=$stageRoot" >> $env:GITHUB_OUTPUT
+          "stageProject=$stageProject" >> $env:GITHUB_OUTPUT
+
+      - name: publish the framework-dependent trusted runtime in isolation
+        shell: pwsh
+        # Repository and machine build hooks stay out through the staged location plus explicit import suppression.
+        run: |
+          $ErrorActionPreference = "Stop"
+          if (Test-Path variable:PSNativeCommandUseErrorActionPreference) { $PSNativeCommandUseErrorActionPreference = $false }
+          $stageRoot = "${{ steps.stage.outputs.stageRoot }}"
+          $stageProject = "${{ steps.stage.outputs.stageProject }}"
+          $publishRoot = Join-Path $env:PUBLISHER_STAGE_ROOT "publish"
+          dotnet restore $stageProject --configfile (Join-Path $stageRoot "nuget.config") --packages (Join-Path $env:PUBLISHER_STAGE_ROOT "packages") -p:ImportDirectoryBuildProps=false -p:ImportDirectoryBuildTargets=false
+          if ($LASTEXITCODE -ne 0) { throw "the isolated publisher restore failed (exit $LASTEXITCODE)" }
+          dotnet publish $stageProject -c Release --no-restore -o $publishRoot -p:ImportDirectoryBuildProps=false -p:ImportDirectoryBuildTargets=false
+          if ($LASTEXITCODE -ne 0) { throw "the isolated publisher publish failed (exit $LASTEXITCODE)" }
+          if (-not (Test-Path -LiteralPath (Join-Path $publishRoot "ReleaseRunner.exe") -PathType Leaf)) { throw "the isolated publish produced no ReleaseRunner.exe under $publishRoot" }
+          "publishRoot=$publishRoot" >> $env:GITHUB_OUTPUT
+
+      - name: emit the complete publisher file and SHA-256 inventory
+        id: inventory
+        shell: pwsh
+        # The inventory is this job's own observation of the published bytes; it is published as a job output so the
+        # publication job verifies the downloaded file set against an independent declaration, not artifact content.
+        run: |
+          $ErrorActionPreference = "Stop"
+          $publishRoot = Join-Path $env:PUBLISHER_STAGE_ROOT "publish"
+          if (-not (Test-Path -LiteralPath $publishRoot -PathType Container)) { throw "the publisher publish output is missing: $publishRoot" }
+          $publishFull = (Resolve-Path -LiteralPath $publishRoot).Path
+          $files = @(Get-ChildItem -LiteralPath $publishFull -Recurse -File | Sort-Object FullName)
+          if ($files.Count -eq 0) { throw "the publisher publish output is empty: $publishFull" }
+          $entries = foreach ($file in $files) {
+            [ordered]@{
+              path   = [System.IO.Path]::GetRelativePath($publishFull, $file.FullName).Replace('\', '/')
+              sha256 = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            }
+          }
+          $inventoryJson = ConvertTo-Json -Compress -Depth 4 -InputObject @($entries)
+          Write-Host "publisher inventory: $inventoryJson"
+          "inventory=$inventoryJson" >> $env:GITHUB_OUTPUT
+
+      - name: upload the trusted publisher runtime transport
+        id: upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          # Exactly the published runtime directory: the publication job verifies the extracted set against the
+          # inventory emitted above and executes only from that verified set.
+          name: release-publisher
+          path: ${{ env.PUBLISHER_STAGE_ROOT }}/publish
+          if-no-files-found: error
+
+      - name: build the producer projects and both compiled Expecto projects
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # Build the exact projects the Expecto gates execute; the --no-build runs below then execute that same output.
+          dotnet build dotnet/Mcp.Dotnet.fsproj -c Release
+          if ($LASTEXITCODE -ne 0) { throw "dotnet producer build failed (exit $LASTEXITCODE)" }
+          dotnet build workflow/Mcp.Workflow.fsproj -c Release
+          if ($LASTEXITCODE -ne 0) { throw "workflow producer build failed (exit $LASTEXITCODE)" }
+          dotnet build dotnet/tests/Mcp.Dotnet.Tests/Mcp.Dotnet.Tests.fsproj -c Release
+          if ($LASTEXITCODE -ne 0) { throw "producer Expecto test project build failed (exit $LASTEXITCODE)" }
+          dotnet build infrastructure/release/tests/Tests.fsproj -c Release
+          if ($LASTEXITCODE -ne 0) { throw "compiled release Expecto project build failed (exit $LASTEXITCODE)" }
+
+      - name: run the producer Expecto gate (native exit preserved)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # Actual compiled Expecto entrypoint: no --ignore, no filter, no result rewriting; the native failure exit blocks the release job.
+          dotnet run --project dotnet/tests/Mcp.Dotnet.Tests/Mcp.Dotnet.Tests.fsproj -c Release --no-build
+          exit $LASTEXITCODE
+
+      - name: run the non-packaging Workflow test entrypoints (native exit preserved)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # Read the native exit code instead of letting a native-command error preference throw before it is captured.
+          if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
+            $PSNativeCommandUseErrorActionPreference = $false
+          }
+          # Explicit deterministic selection of the twelve Workflow suites that need no built distribution; never globbed.
+          $entrypoints = @(
+            "workflow/tests/AuthorityMetadataTests.fsx",
+            "workflow/tests/EphemeralLockInvariantTests.fsx",
+            "workflow/tests/SchemaParityGuardTests.fsx",
+            "workflow/tests/TaskContractTests.fsx",
+            "workflow/tests/TaskPathSafetyTests.fsx",
+            "workflow/tests/TaskProfileTests.fsx",
+            "workflow/tests/TaskScratchCompatibilityTests.fsx",
+            "workflow/tests/TaskSupportingArtifactTests.fsx",
+            "workflow/tests/WorkflowMcpFindingTests.fsx",
+            "workflow/tests/WorkflowMcpNativeCompatTests.fsx",
+            "workflow/tests/WorkflowMcpTests.fsx",
+            "workflow/tests/WorkflowTests.fsx"
+          )
+          foreach ($entrypoint in $entrypoints) {
+            if (-not (Test-Path -LiteralPath $entrypoint)) { throw "Workflow test entrypoint is missing: $entrypoint" }
+            Write-Host "::group::workflow test $entrypoint"
+            & dotnet fsi --nologo $entrypoint
+            $code = $LASTEXITCODE
+            Write-Host "::endgroup::"
+            if ($code -ne 0) {
+              Write-Host "::error::Workflow test entrypoint failed: $entrypoint (exit $code)"
+              exit $code
+            }
+          }
+
+      - name: provision the pinned historical regression fixtures (read-only release assets)
+        shell: pwsh
+        env:
+          RELEASE_COMPONENTS: ${{ steps.project.outputs.components }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          # Fixtures.json is the single pin table, so the URIs, sizes and hashes are read rather than restated.
+          $descriptorPath = Join-Path (Get-Location) "infrastructure/release/tests/Fixtures.json"
+          if (-not (Test-Path -LiteralPath $descriptorPath -PathType Leaf)) { throw "the historical fixture descriptor is missing: $descriptorPath" }
+          $descriptor = Get-Content -LiteralPath $descriptorPath -Raw | ConvertFrom-Json
+          if ([int]$descriptor.schemaVersion -ne 1) { throw "descriptor schemaVersion is '$($descriptor.schemaVersion)', not 1" }
+          $entries = @($descriptor.fixtures)
+          if ($entries.Count -ne 2) { throw "the descriptor declares $($entries.Count) fixture entries where exactly two are required" }
+          $components = @(ConvertFrom-Json $env:RELEASE_COMPONENTS)
+          # Component identity still comes from the roster projection: the descriptor pins data, never participation.
+          $descriptorComponents = @($entries | ForEach-Object { "$($_.componentId)" }) | Sort-Object
+          if (($descriptorComponents -join ',') -cne (($components | Sort-Object) -join ',')) { throw "descriptor components [$($descriptorComponents -join ', ')] do not equal the roster projection [$($components -join ', ')]" }
+          $root = Join-Path $env:RUNNER_TEMP "mcp-historical-fixtures"
+          New-Item -ItemType Directory -Path $root -Force | Out-Null
+          foreach ($entry in $entries) {
+            $component = "$($entry.componentId)"
+            $archiveFile = "$($entry.archiveFile)"
+            $assetName = "$($entry.assetName)"
+            $assetUri = "$($entry.assetUri)"
+            $expectedSize = [int64]$entry.size
+            $expectedSha = "$($entry.sha256)"
+            if ([string]::IsNullOrWhiteSpace($archiveFile) -or $archiveFile -ne [System.IO.Path]::GetFileName($archiveFile) -or $archiveFile.Contains("..")) { throw "descriptor archiveFile '$archiveFile' is not a contained basename" }
+            if ([string]::IsNullOrWhiteSpace($assetName) -or $assetName -match '[\\/]') { throw "descriptor assetName '$assetName' is not a single relative asset name" }
+            $canonicalUri = "https://github.com/masterlifting/mcp-store/releases/download/$component/$assetName"
+            if ($assetUri -cne $canonicalUri) { throw "descriptor assetUri '$assetUri' is not the fixed public asset URL '$canonicalUri'" }
+            if ($expectedSize -le 0) { throw "descriptor size for '$component' must be a positive byte count" }
+            if ($expectedSha -cnotmatch '^[0-9a-f]{64}$') { throw "descriptor sha256 for '$component' is not 64 lowercase hex characters" }
+            # The published asset is public: the request carries no credential, cookie or authorization header.
+            $staged = Join-Path $root ($archiveFile + ".staged")
+            Invoke-WebRequest -Uri $assetUri -OutFile $staged -MaximumRetryCount 3 -RetryIntervalSec 5
+            $observedSize = (Get-Item -LiteralPath $staged).Length
+            if ($observedSize -ne $expectedSize) { throw "fetched '$assetName' is $observedSize bytes, not the pinned $expectedSize bytes" }
+            $observedSha = (Get-FileHash -LiteralPath $staged -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($observedSha -cne $expectedSha) { throw "fetched '$assetName' hashed to $observedSha, not the pinned $expectedSha" }
+            Move-Item -LiteralPath $staged -Destination (Join-Path $root $archiveFile) -Force
+          }
+          "MCP_RELEASE_HISTORICAL_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: run the complete compiled release regression gate
+        shell: pwsh
+        # Suite.ps1 fails closed without MCP_RELEASE_HISTORICAL_ROOT, runs the complete compiled suite with a case-count check, and never excludes or rewrites a case.
+        run: pwsh infrastructure/release/Suite.ps1
+
+      - name: strict FCS typecheck of the retained release scripts
+        shell: pwsh
+        run: pwsh infrastructure/release/Typecheck.ps1 -SdkVersion "${{ steps.project.outputs.sdk }}"
+
+  preparation:
+    name: prepare-candidates
+    runs-on: windows-latest
+    # Read-only: this job runs both producers' package gates and builds candidates; it never holds write authority.
+    permissions:
+      contents: read
+    env:
+      CANDIDATE_ROOT: ${{ runner.temp }}/candidate
+    # Static producer-specific keys: each candidate is uploaded by its own step, so one common key can never be
+    # overwritten by another component's upload and a consumer can never fall back to a sibling's identity.
+    outputs:
+      candidateArtifactId_dotnet: ${{ steps.upload_dotnet.outputs.artifact-id }}
+      candidateArtifactDigest_dotnet: ${{ steps.upload_dotnet.outputs.artifact-digest }}
+      candidateArchiveName_dotnet: ${{ steps.prepare.outputs.archiveName_dotnet }}
+      candidateArtifactId_workflow: ${{ steps.upload_workflow.outputs.artifact-id }}
+      candidateArtifactDigest_workflow: ${{ steps.upload_workflow.outputs.artifact-digest }}
+      candidateArchiveName_workflow: ${{ steps.prepare.outputs.archiveName_workflow }}
+    steps:
+      - name: checkout exact event SHA
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: project canonical toolchain from the policy JSON (no SDK or F# needed)
+        id: project
+        shell: pwsh
+        run: pwsh infrastructure/release/Update.ps1 -Project
+
+      - name: setup .NET SDK from the canonical projection
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: ${{ steps.project.outputs.sdk }}
+
+      - name: verify the executing toolchain against the policy JSON
+        shell: pwsh
+        run: pwsh infrastructure/release/Update.ps1 -Verify
+
+      - name: build the release runner and both producer projects
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          dotnet build infrastructure/release/Release.fsproj -c Release
+          if ($LASTEXITCODE -ne 0) { throw "release runner build failed (exit $LASTEXITCODE)" }
+          dotnet build dotnet/Mcp.Dotnet.fsproj -c Release
+          if ($LASTEXITCODE -ne 0) { throw "dotnet producer build failed (exit $LASTEXITCODE)" }
+          dotnet build workflow/Mcp.Workflow.fsproj -c Release
+          if ($LASTEXITCODE -ne 0) { throw "workflow producer build failed (exit $LASTEXITCODE)" }
+
+      - name: run both producers' distribution package gates (native exit preserved)
+        shell: pwsh
+        # Each participant's package gate is read from its own roster-registered component root and must pass before any candidate is uploaded.
+        run: |
+          $ErrorActionPreference = "Stop"
+          if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
+            $PSNativeCommandUseErrorActionPreference = $false
+          }
+          $components = @(ConvertFrom-Json $env:RELEASE_COMPONENTS)
+          foreach ($component in $components) {
+            $entrypoint = "$component/tests/DistributionTests.fsx"
+            if (-not (Test-Path -LiteralPath $entrypoint)) { throw "producer package gate is missing: $entrypoint" }
+            Write-Host "::group::producer package gate $entrypoint"
+            & dotnet fsi --nologo $entrypoint
+            $code = $LASTEXITCODE
+            Write-Host "::endgroup::"
+            if ($code -ne 0) {
+              Write-Host "::error::producer package gate failed: $entrypoint (exit $code)"
+              exit $code
+            }
+          }
+
+      - name: run the Workflow packaged runtime coordination gate (native exit preserved)
+        shell: pwsh
+        # Producer-owned and roster-independent: it exercises the packaged runtime against the clean built distribution.
+        run: |
+          $ErrorActionPreference = "Stop"
+          if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
+            $PSNativeCommandUseErrorActionPreference = $false
+          }
+          $entrypoint = "workflow/tests/PackagedRuntimeCoordinationTests.fsx"
+          if (-not (Test-Path -LiteralPath $entrypoint)) { throw "Workflow packaged coordination gate is missing: $entrypoint" }
+          & dotnet fsi --nologo $entrypoint
+          exit $LASTEXITCODE
+
+      - name: prepare each enrolled candidate from its canonical policy
+        id: prepare
+        shell: pwsh
+        # One job, one explicit loop over the projection: the retired matrix leg published a shared output key whose
+        # last writer won, so each component now writes only its own static keys.
+        run: |
+          $ErrorActionPreference = "Stop"
+          if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
+            $PSNativeCommandUseErrorActionPreference = $false
+          }
+          $runnerDirectory = Join-Path (Get-Location) "infrastructure/release/bin/Release/net11.0"
+          $runner = Join-Path $runnerDirectory "ReleaseRunner.exe"
+          if (-not (Test-Path -LiteralPath $runner -PathType Leaf)) { throw "compiled release runner not found at $runner" }
+          $components = @(ConvertFrom-Json $env:RELEASE_COMPONENTS)
+          if ($components.Count -eq 0) { throw "the projection declares no enrolled component" }
+          foreach ($component in $components) {
+            # The policy path is the roster-registered canonical config; the config reader itself is the compiled one.
+            $configPath = Join-Path (Get-Location) "$component/release/Config.json"
+            if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) { throw "canonical policy is missing for '$component': $configPath" }
+            $candidate = Join-Path $env:CANDIDATE_ROOT $component
+            $stdout = (& $runner prepare $configPath $candidate | Out-String)
+            $code = $LASTEXITCODE
+            Write-Host $stdout
+            if ($code -ne 0) { throw "$component candidate preparation failed (exit $code)" }
+            $document = $stdout | ConvertFrom-Json
+            if ("$($document.status)" -cne "prepared") { throw "$component preparation reported status '$($document.status)', not 'prepared'" }
+            $archiveName = "$($document.relativeArchiveName)"
+            if ([string]::IsNullOrWhiteSpace($archiveName) -or $archiveName -ne [System.IO.Path]::GetFileName($archiveName) -or $archiveName -notmatch '\.zip$') {
+              throw "$component preparation reported an unusable relative archive name '$archiveName'"
+            }
+            # The candidate directory is exactly the producer archive and its distribution manifest: no sidecar, no receipt.
+            $members = @(Get-ChildItem -LiteralPath $candidate -Recurse -Force | ForEach-Object { [System.IO.Path]::GetRelativePath($candidate, $_.FullName).Replace('\', '/') } | Sort-Object)
+            $expectedMembers = @($archiveName, "distribution.json") | Sort-Object
+            if (($members -join ',') -cne ($expectedMembers -join ',')) {
+              throw "$component candidate directory carries [$($members -join ', ')] where exactly the archive '$archiveName' and 'distribution.json' are required"
+            }
+            "archiveName_$component=$archiveName" >> $env:GITHUB_OUTPUT
+            "CANDIDATE_ARCHIVE_NAME_$(($component).ToUpperInvariant())=$archiveName" >> $env:GITHUB_ENV
+            Write-Host "prepared $component candidate in $candidate with archive $archiveName"
+          }
+
+      - name: upload the dotnet candidate transport
+        id: upload_dotnet
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          # Exactly the two direct members the publisher consumes: the producer archive and its distribution manifest.
+          name: release-candidate-dotnet
+          path: |
+            ${{ env.CANDIDATE_ROOT }}/dotnet/${{ env.CANDIDATE_ARCHIVE_NAME_DOTNET }}
+            ${{ env.CANDIDATE_ROOT }}/dotnet/distribution.json
+          if-no-files-found: error
+
+      - name: upload the workflow candidate transport
+        id: upload_workflow
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          # Exactly the two direct members the publisher consumes: the producer archive and its distribution manifest.
+          name: release-candidate-workflow
+          path: |
+            ${{ env.CANDIDATE_ROOT }}/workflow/${{ env.CANDIDATE_ARCHIVE_NAME_WORKFLOW }}
+            ${{ env.CANDIDATE_ROOT }}/workflow/distribution.json
+          if-no-files-found: error
+
+  publication:
+    name: publish
+    # The single write boundary: this job installs the canonical SDK so the framework-dependent runtime can execute,
+    # downloads the exact artifact ids declared by the two read-only jobs through the pinned official download action,
+    # verifies every downloaded member against the publisher job's independent inventory, and only then runs the
+    # verified publisher. It runs no build, restore, FSI or test work.
+    needs:
+      - publisher
+      - preparation
+    runs-on: windows-latest
+    permissions:
+      contents: write
+      actions: read
+    # Both components publish sequentially inside this one job, and a pending run is never replaced.
+    concurrency:
+      group: release-publication
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - name: checkout the exact event SHA from the trusted control plane
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: project canonical toolchain from the policy JSON (no SDK or F# needed)
+        id: project
+        shell: pwsh
+        run: pwsh infrastructure/release/Update.ps1 -Project
+
+      - name: setup .NET SDK from the canonical projection
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: ${{ steps.project.outputs.sdk }}
+
+      - name: verify the executing toolchain against the policy JSON
+        shell: pwsh
+        run: pwsh infrastructure/release/Update.ps1 -Verify
+
+      - name: reject an unusable declared artifact id before any transfer
+        id: validateArtifacts
+        # WHY: the pinned download action falls back to every artifact in the run when an `artifact-ids` value is blank.
+        shell: pwsh
+        env:
+          RUNTIME_ARTIFACT_ID: ${{ needs.publisher.outputs.runtimeArtifactId }}
+          CANDIDATE_ARTIFACT_ID_DOTNET: ${{ needs.preparation.outputs.candidateArtifactId_dotnet }}
+          CANDIDATE_ARTIFACT_ID_WORKFLOW: ${{ needs.preparation.outputs.candidateArtifactId_workflow }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          function Assert-ArtifactId {
+            param([string]$Label, [string]$Value)
+            $parsed = [uint64]0
+            if ($Value -cnotmatch '^[1-9][0-9]*$' -or -not [uint64]::TryParse($Value, [System.Globalization.NumberStyles]::None, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$parsed)) {
+              throw "$Label artifact id '$Value' is not a bounded positive decimal platform artifact id"
+            }
+          }
+          Assert-ArtifactId "publisher runtime" $env:RUNTIME_ARTIFACT_ID
+          Assert-ArtifactId "dotnet candidate" $env:CANDIDATE_ARTIFACT_ID_DOTNET
+          Assert-ArtifactId "workflow candidate" $env:CANDIDATE_ARTIFACT_ID_WORKFLOW
+          Write-Host "validated the three declared artifact ids before any transfer"
+
+      - name: download the declared publisher runtime transport
+        id: downloadPublisher
+        # The supported pinned transfer action reads the artifact this run's publisher job declared; the action's own
+        # digest observation is a warning only, so the inventory check below stays the fail-closed proof.
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          # The exact numeric artifact id from this run; no name, pattern, latest-run or merge lookup exists.
+          artifact-ids: ${{ needs.publisher.outputs.runtimeArtifactId }}
+          path: ${{ runner.temp }}/runtime
+
+      - name: download the declared dotnet candidate transport
+        id: downloadCandidateDotnet
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          artifact-ids: ${{ needs.preparation.outputs.candidateArtifactId_dotnet }}
+          path: ${{ runner.temp }}/candidate-dotnet
+
+      - name: download the declared workflow candidate transport
+        id: downloadCandidateWorkflow
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          artifact-ids: ${{ needs.preparation.outputs.candidateArtifactId_workflow }}
+          path: ${{ runner.temp }}/candidate-workflow
+
+      - name: verify the declared transports and publish each enrolled component
+        id: publish
+        shell: pwsh
+        # This single step is the only credential holder: it rechecks the control plane, verifies every downloaded
+        # member against the two read-only jobs' independent declarations, and only then invokes the verified
+        # publisher once per enrolled component.
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          MCP_RELEASE_DO_UPLOAD: "true"
+          PUBLISHER_OUTPUTS: ${{ toJSON(needs.publisher.outputs) }}
+          CANDIDATE_OUTPUTS: ${{ toJSON(needs.preparation.outputs) }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          if (Test-Path variable:PSNativeCommandUseErrorActionPreference) { $PSNativeCommandUseErrorActionPreference = $false }
+          $repo = "${{ github.repository }}"
+          $eventSha = "${{ github.sha }}"
+          $workspace = $env:GITHUB_WORKSPACE
+          $temp = $env:RUNNER_TEMP
+
+          # Fresh control-plane proof: this step is the only credential holder, so the ancestry check runs here,
+          # immediately before the final native call.
+          $head = (git rev-parse HEAD).Trim()
+          if ($head -ne $eventSha) { throw "checked out HEAD '$head' does not equal the event SHA '$eventSha'" }
+          $mainSha = (gh api "repos/$repo/commits/main" --jq ".sha").Trim()
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($mainSha)) { throw "could not resolve the origin/main tip through the GitHub API" }
+          if ($eventSha -eq $mainSha) {
+            Write-Host "event SHA '$eventSha' is still the origin/main tip"
+          } else {
+            $compare = (gh api "repos/$repo/compare/$eventSha...$mainSha" | Out-String) | ConvertFrom-Json
+            if ($LASTEXITCODE -ne 0) { throw "could not compare the event SHA against origin/main" }
+            $status = "$($compare.status)"
+            if ($status -ne "ahead" -and $status -ne "identical") { throw "event SHA '$eventSha' is not a safe ancestor of origin/main '$mainSha' (compare status '$status')" }
+            if ("$($compare.merge_base_commit.sha)" -ne $eventSha) { throw "the merge base of '$eventSha' and origin/main is not the event SHA" }
+            Write-Host "::warning::event SHA '$eventSha' is a proven ancestor of origin/main '$mainSha' (stale but safe)"
+          }
+
+          function Read-DeclaredOutput {
+            param([System.Collections.IDictionary]$Map, [string]$Key, [string]$Producer)
+            if (-not $Map.Contains($Key)) { throw "the $Producer job declares no output '$Key'; no artifact lookup may substitute for it" }
+            $value = "$($Map[$Key])"
+            if ([string]::IsNullOrWhiteSpace($value)) { throw "the $Producer job published an empty output '$Key'" }
+            return $value
+          }
+
+          # Each pinned download extracts exactly one artifact directory under its isolated root, so the verified root
+          # is the single produced directory rather than a name the publication job restates.
+          function Get-SingleArtifactRoot {
+            param([string]$DownloadRoot, [string]$Subject)
+            if (-not (Test-Path -LiteralPath $DownloadRoot -PathType Container)) { throw "the downloaded $Subject transport is missing: $DownloadRoot" }
+            $directories = @(Get-ChildItem -LiteralPath $DownloadRoot -Directory -Force)
+            if ($directories.Count -ne 1) { throw "the downloaded $Subject transport extracted $($directories.Count) directories where exactly one artifact directory is required" }
+            return $directories[0].FullName
+          }
+
+          $publisher = $env:PUBLISHER_OUTPUTS | ConvertFrom-Json -AsHashtable
+          $candidates = $env:CANDIDATE_OUTPUTS | ConvertFrom-Json -AsHashtable
+          $runtimeArtifactId = Read-DeclaredOutput $publisher "runtimeArtifactId" "publisher"
+          $runtimeDigest = Read-DeclaredOutput $publisher "runtimeArtifactDigest" "publisher"
+          $runtimeInventory = Read-DeclaredOutput $publisher "runtimeInventory" "publisher"
+          if ($runtimeArtifactId -cnotmatch '^[0-9]+$') { throw "the publisher artifact id '$runtimeArtifactId' is not a numeric platform artifact id" }
+          # The platform digest is the uploaded artifact's own declared identity; the fail-closed proof is the inventory below.
+          if ($runtimeDigest -cnotmatch '^(?:sha256:)?[0-9a-f]{64}$') { throw "the publisher platform digest '$runtimeDigest' is not a SHA-256 digest" }
+          $inventoryEntries = @($runtimeInventory | ConvertFrom-Json)
+          if ($inventoryEntries.Count -eq 0) { throw "the publisher job declared an empty runtime inventory" }
+          if (-not ($inventoryEntries | Where-Object { "$($_.path)" -ceq "ReleaseRunner.exe" })) { throw "the declared runtime inventory carries no ReleaseRunner.exe" }
+          $components = @(ConvertFrom-Json $env:RELEASE_COMPONENTS)
+          if ($components.Count -eq 0) { throw "the projection declares no enrolled component" }
+
+          # Complete membership, path and SHA-256 proof against the publisher job's own inventory, before any
+          # downloaded file is executed. The verifier is read-only and reads no credential or platform state.
+          $verifier = Join-Path $workspace "infrastructure/release/Verify.ps1"
+          $runtimeRoot = Get-SingleArtifactRoot (Join-Path $temp "runtime") "publisher runtime"
+          & pwsh -NoProfile -File $verifier -Root $runtimeRoot -InventoryJson $runtimeInventory
+          if ($LASTEXITCODE -ne 0) { throw "the publisher runtime does not match the inventory declared by the publisher job (exit $LASTEXITCODE)" }
+          $runner = Join-Path $runtimeRoot "ReleaseRunner.exe"
+          if (-not (Test-Path -LiteralPath $runner -PathType Leaf)) { throw "the verified publisher runtime carries no ReleaseRunner.exe" }
+
+          $firstFailure = 0
+          foreach ($component in $components) {
+            # The policy comes from this fresh trusted checkout, never from candidate data.
+            $configPath = Join-Path $workspace "$component/release/Config.json"
+            if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) { throw "the trusted checkout carries no policy for '$component': $configPath" }
+            $candidateArtifactId = Read-DeclaredOutput $candidates "candidateArtifactId_$component" "preparation"
+            $candidateDigest = Read-DeclaredOutput $candidates "candidateArtifactDigest_$component" "preparation"
+            $archiveName = Read-DeclaredOutput $candidates "candidateArchiveName_$component" "preparation"
+            if ($candidateArtifactId -cnotmatch '^[0-9]+$') { throw "the $component candidate artifact id '$candidateArtifactId' is not numeric" }
+            if ($candidateDigest -cnotmatch '^(?:sha256:)?[0-9a-f]{64}$') { throw "the $component candidate platform digest is not a SHA-256 digest" }
+            if ($archiveName -ne [System.IO.Path]::GetFileName($archiveName) -or $archiveName -notmatch '\.zip$') { throw "the $component archive name '$archiveName' is not a single relative zip name" }
+            $candidateRoot = Get-SingleArtifactRoot (Join-Path $temp "candidate-$component") "$component candidate"
+            # The candidate directory is exactly the producer archive and its distribution manifest: no sidecar, no receipt.
+            & pwsh -NoProfile -File $verifier -Root $candidateRoot -MembersJson (ConvertTo-Json -Compress @($archiveName, "distribution.json"))
+            if ($LASTEXITCODE -ne 0) { throw "the $component candidate directory does not carry exactly '$archiveName' and 'distribution.json' (exit $LASTEXITCODE)" }
+            $statusLog = Join-Path $temp "publish-stdout-$component.json"
+            $exitLog = Join-Path $temp "publish-exit-$component.txt"
+            if ((git rev-parse HEAD).Trim() -ne $eventSha) { throw "the workspace HEAD moved before the $component native invocation" }
+            & $runner publish $configPath $candidateRoot "--workspace-root=$workspace" "--event-sha=$eventSha" "--repo=$repo" | Tee-Object -FilePath $statusLog
+            $code = $LASTEXITCODE
+            Set-Content -LiteralPath $exitLog -Value "$code" -Encoding ascii
+            Write-Host "native publisher exit for ${component}: $code"
+            # Every enrolled component is attempted, as the retired non-fail-fast matrix did; the first native failure is the job's exit code.
+            if ($code -ne 0 -and $firstFailure -eq 0) { $firstFailure = $code }
+          }
+          exit $firstFailure
+
+      - name: record the structured release results
+        id: result
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $temp = $env:RUNNER_TEMP
+          $components = @(ConvertFrom-Json $env:RELEASE_COMPONENTS)
+          $evidenceRoot = Join-Path $temp "release-evidence"
+          New-Item -ItemType Directory -Path $evidenceRoot -Force | Out-Null
+          foreach ($component in $components) {
+            $statusLog = Join-Path $temp "publish-stdout-$component.json"
+            $exitLog = Join-Path $temp "publish-exit-$component.txt"
+            $exitCode = $null
+            if (Test-Path -LiteralPath $exitLog -PathType Leaf) {
+              $rawExit = (Get-Content -LiteralPath $exitLog -Raw).Trim()
+              if ($rawExit -cmatch '^-?[0-9]+$') { $exitCode = [int]$rawExit }
+            }
+            $stdout = if (Test-Path -LiteralPath $statusLog -PathType Leaf) { Get-Content -LiteralPath $statusLog -Raw } else { "" }
+            $document = $null
+            $structured = $false
+            if (-not [string]::IsNullOrWhiteSpace($stdout)) {
+              try { $document = $stdout | ConvertFrom-Json -ErrorAction Stop; $structured = $true } catch { $structured = $false }
+            }
+            $status = if ($structured) { "$($document.status)" } else { "unavailable" }
+            $reason = if ($structured) { "$($document.reason)" } else { "the runner emitted no structured result" }
+            $phase = if ($structured) { "$($document.phase)" } else { $null }
+            $published = $null
+            $projectionKind = "status-evidence-only"
+            $verified = $false
+            $diagnostics = @()
+            # Published hashes and revision are taken from the runner's canonical summary; candidate values are never presented as published.
+            if ($status -eq "published" -or $status -eq "unchanged") {
+              $published = [ordered]@{
+                archiveSha256  = "$($document.publishedArchiveSha256)"
+                manifestSha256 = "$($document.publishedManifestSha256)"
+                metadataSha256 = "$($document.publishedMetadataSha256)"
+                revision       = "$($document.publishedRevision)"
+              }
+              $projectionPath = "$($document.metadataLocalPath)"
+              $projectionIsUsable = $false
+              if (-not [string]::IsNullOrWhiteSpace($projectionPath) -and [System.IO.Path]::IsPathRooted($projectionPath) -and (Test-Path -LiteralPath $projectionPath -PathType Leaf)) {
+                $workspaceFull = [System.IO.Path]::GetFullPath($env:GITHUB_WORKSPACE).TrimEnd([System.IO.Path]::DirectorySeparatorChar)
+                $projectionFull = [System.IO.Path]::GetFullPath($projectionPath)
+                $projectionIsUsable = $projectionFull.StartsWith($workspaceFull + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::Ordinal)
+              }
+              if ($projectionIsUsable) {
+                $projection = Get-Content -LiteralPath $projectionPath -Raw | ConvertFrom-Json
+                $projectionArchive = "$($projection.archiveSha256)"
+                if (-not [string]::IsNullOrWhiteSpace($projectionArchive) -and $projectionArchive -ceq $published.archiveSha256 -and -not [string]::IsNullOrWhiteSpace("$($projection.manifestSha256)") -and -not [string]::IsNullOrWhiteSpace("$($projection.publishedRevision)")) {
+                  Copy-Item -LiteralPath $projectionPath -Destination (Join-Path $evidenceRoot "published-metadata-$component.json") -Force
+                  $projectionKind = "verified-projection"
+                  $verified = $true
+                } else {
+                  $diagnostics += "the projection at '$projectionPath' does not carry the verified published archive hash, manifest hash and revision"
+                }
+              } else {
+                $diagnostics += "no verified projection file was present inside the workspace root"
+              }
+            } elseif ($structured) {
+              $diagnostics += "the runner reported '$status' with reason '$reason'"
+            } else {
+              $diagnostics += "no structured release result was observed"
+            }
+            $record = [ordered]@{
+              componentId             = $component
+              exitCode                = $exitCode
+              structuredResult        = $structured
+              status                  = $status
+              reason                  = $reason
+              phase                   = $phase
+              verified                = $verified
+              projectionKind          = $projectionKind
+              version                 = if ($structured) { "$($document.version)" } else { $null }
+              archiveName             = if ($structured) { "$($document.archiveName)" } else { $null }
+              assetUri                = if ($structured) { "$($document.assetUri)" } else { $null }
+              candidateArchiveSha256  = if ($structured) { "$($document.candidateArchiveSha256)" } else { $null }
+              candidateManifestSha256 = if ($structured) { "$($document.candidateManifestSha256)" } else { $null }
+              candidateRevision       = if ($structured) { "$($document.candidateRevision)" } else { $null }
+              currentEvaluatedHead    = if ($structured) { "$($document.currentEvaluatedHead)" } else { $null }
+              published               = $published
+              diagnostics             = $diagnostics
+            }
+            $recordPath = Join-Path $evidenceRoot "release-status-$component.json"
+            Set-Content -LiteralPath $recordPath -Value (($record | ConvertTo-Json -Depth 8)) -Encoding utf8
+
+            $summary = [System.Text.StringBuilder]::new()
+            [void]$summary.AppendLine("### release result: $component")
+            [void]$summary.AppendLine("")
+            [void]$summary.AppendLine("| field | value |")
+            [void]$summary.AppendLine("| --- | --- |")
+            [void]$summary.AppendLine("| status | $status |")
+            [void]$summary.AppendLine("| exitCode | $exitCode |")
+            [void]$summary.AppendLine("| verified projection | $verified ($projectionKind) |")
+            if ($null -ne $published) {
+              [void]$summary.AppendLine("| published archive sha256 | $($published.archiveSha256) |")
+              [void]$summary.AppendLine("| published manifest sha256 | $($published.manifestSha256) |")
+              [void]$summary.AppendLine("| published revision | $($published.revision) |")
+            } else {
+              [void]$summary.AppendLine("| published | none: no published hash is reported for this exit |")
+            }
+            [void]$summary.AppendLine("")
+            [void]$summary.AppendLine("reason: $reason")
+            foreach ($diagnostic in $diagnostics) { [void]$summary.AppendLine("- $diagnostic") }
+            Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value $summary.ToString()
+          }
+          "evidenceRoot=$evidenceRoot" >> $env:GITHUB_OUTPUT
+
+      - name: upload the release metadata evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          # The verified projections are copied above only when they matched the observed published archive.
+          name: release-metadata
+          path: ${{ runner.temp }}/release-evidence
+          if-no-files-found: warn

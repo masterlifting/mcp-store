@@ -1,11 +1,11 @@
 // role: release/build entrypoint
-#load "Config.fsx"
 #load "../../infrastructure/Distribution.fsx"
 
 open System.IO
 open BuildProvenance
 
 let root = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", ".."))
+let config = DistributionBuild.loadConfig (Path.Combine(__SOURCE_DIRECTORY__, "Config.json"))
 
 // Framework-dependent publish of this producer; the allowlist is the runtime
 // contract and the shared builder rejects any extra publish output.
@@ -14,12 +14,12 @@ let run () =
         { Root = root
           ProjectPath = "dotnet/Mcp.Dotnet.fsproj"
           OutputRoot = Path.Combine(root, "dotnet", "dist")
-          ComponentId = ReleaseConfig.componentId
-          Version = ReleaseConfig.version
-          SdkVersion = ReleaseConfig.sdkVersion
-          EntryDll = ReleaseConfig.entryDll
-          ArchiveName = ReleaseConfig.archiveName
-          PublishedFiles = ReleaseConfig.publishedFiles
+          ComponentId = config.ComponentId
+          Version = config.Version
+          SdkVersion = config.SdkVersion
+          EntryDll = config.EntryDll
+          ArchiveName = config.ArchiveName
+          PublishedFiles = config.PublishedFiles
           ExtraPublishProperties = [ "-p:GenerateDocumentationFile=false" ]
           Notice = "mcp-store dotnet MCP distribution\n" }
 

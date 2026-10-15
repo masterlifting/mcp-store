@@ -877,10 +877,34 @@ test "current repository discovery and typecheck pass from the compiled CLI" (fu
             requireExit 0 (inventoryCode, inventory, inventoryError)
             if not (containsLine "infrastructure/scripts/tests/Regression.fsx" inventory) then
                 failwith "new regression script was not in repository discovery"
-            let! validateCode, validateOutput, validateError = runCli "validate" repoRoot other
+
+            // Reconcile against the live discovery count instead of a hardcoded literal.
+            let inventoryCount =
+                inventory.Split([| '\r'; '\n' |], StringSplitOptions.RemoveEmptyEntries)
+                |> Array.length
+
+            let! validateResult = execute analyzer [ "validate"; "--repo-root"; repoRoot ] other
+            let (validateCode, validateOutput, validateError) = validateResult
             requireExit 0 (validateCode, validateOutput, validateError)
-            if not (validateOutput.Contains("OK 30 scripts validated", StringComparison.Ordinal)) then
-                failwithf "unexpected live inventory result: %s" validateOutput
+            let validatedLineResolved =
+                validateOutput.Split([| '\r'; '\n' |], StringSplitOptions.RemoveEmptyEntries)
+                |> Array.tryFind (fun l -> l.StartsWith("OK ", StringComparison.Ordinal) && l.Contains "scripts validated")
+            match validatedLineResolved with
+            | None ->
+                failwithf "validate did not emit an 'OK N scripts validated' line: %s" validateOutput
+            | Some line ->
+                let tokens = line.Split(' ')
+                if tokens.Length < 3 then
+                    failwithf "validate status line malformed: '%s'" line
+                else
+                    let declared = tokens.[1]
+                    let declaredInt =
+                        match System.Int32.TryParse declared with
+                        | true, n -> n
+                        | _ -> failwithf "validate declared non-integer count '%s'" declared
+                    if declaredInt <> inventoryCount then
+                        failwithf "validate count %d disagrees with inventory count %d" declaredInt inventoryCount
+
             let! typecheckCode, typecheckOutput, typecheckError = runCli "typecheck" repoRoot other
             requireExit 0 (typecheckCode, typecheckOutput, typecheckError)
         finally

@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net11.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>ReleaseRunner</AssemblyName>
+    <RootNamespace>Release</RootNamespace>
+    <LangVersion>9.0</LangVersion>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <DebugType>None</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../infrastructure/Provenance.fs" />
+    <Compile Include="Archive.fs" />
+    <Compile Include="Compare.fs" />
+    <Compile Include="Metadata.fs" />
+    <Compile Include="Publish.fs" />
+    <Compile Include="Capture.fs" />
+    <Compile Include="Enrollment.fs" />
+    <Compile Include="Policy.fs" />
+    <Compile Include="Handoff.fs" />
+    <Compile Include="Evaluate.fs" />
+    <Compile Include="Transaction.fs" />
+    <Compile Include="Orchestration.fs" />
+    <Compile Include="Runner.fs" />
+  </ItemGroup>
+</Project>
