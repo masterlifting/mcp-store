@@ -1,8 +1,5 @@
 // role: reusable module/helper
-// Canonical immutable distribution contract shared by every producer: schema-v2
-// types, strict parser, canonical renderer, semantic validation, and the bounded
-// arbitrary-root resolution a consumer needs. Pure decision logic only: no
-// processes, filesystem writes, network, credentials, or producer-ID dispatch.
+// Keep consumer lifecycle and side effects outside the immutable producer contract.
 module DistributionContract
 
 open System
