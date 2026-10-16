@@ -50,8 +50,9 @@ Invariants enforced by `parse`/`validate`:
 - `runtime.framework` is `Microsoft.NETCore.App`, and `runtime.config` must be the
   packaged runtime configuration of `launch.entrypoint`
   (`Path.ChangeExtension(entrypoint, ".runtimeconfig.json")`).
-  `runtimeRequirementFromConfig` derives framework and version from those bytes,
-  so the manifest never assumes an SDK-to-runtime correspondence.
+  `runtimeRequirementFromConfig` derives framework and version from those bytes
+  and rejects duplicate keys first, so the derived prerequisite never depends on
+  property order and the manifest never assumes an SDK-to-runtime correspondence.
 - `files` covers **every non-manifest archive member**, including `NOTICE.txt`,
   sorted ordinally. Archive membership is exactly `files ∪ {manifest}`;
   `archiveMemberNames` and `trustedArchiveMemberNames` own that derivation.

@@ -62,8 +62,7 @@ function Read-Policy {
         throw "policy '$ConfigPath' must declare at least one non-empty publishedFiles entry"
     }
 
-    # A launch descriptor the compiled reader would reject must fail here, before any SDK exists. Flag and input
-    # uniqueness is ordinal in the compiled reader, so the comparison below is ordinal rather than case-insensitive.
+    # Reject descriptors before SDK setup so bootstrap and compiled policy validation cannot disagree.
     $launchArguments = $document.launchArguments
     if ($null -eq $launchArguments -or $launchArguments -isnot [System.Array] -or $launchArguments.Count -eq 0) {
         throw "policy '$ConfigPath' must declare at least one launchArguments entry"
@@ -78,16 +77,16 @@ function Read-Policy {
         }
 
         $names = @($argument.PSObject.Properties.Name)
-        $unknown = @($names | Where-Object { $script:LaunchArgumentFields -notcontains $_ })
+        $unknown = @($names | Where-Object { $script:LaunchArgumentFields -cnotcontains $_ })
         if ($unknown.Count -gt 0) {
             throw "policy '$ConfigPath' launchArguments[$index] declares unknown field(s): $($unknown -join ', ')"
         }
 
         foreach ($name in $script:LaunchArgumentFields) {
-            if ($names -notcontains $name) { throw "policy '$ConfigPath' launchArguments[$index] is missing field '$name'" }
+            if ($names -cnotcontains $name) { throw "policy '$ConfigPath' launchArguments[$index] is missing field '$name'" }
             if ([string]::IsNullOrWhiteSpace("$($argument.$name)")) { throw "policy '$ConfigPath' launchArguments[$index] has an empty '$name'" }
         }
-        if ($script:LaunchArgumentTypes -notcontains "$($argument.type)") {
+        if ($script:LaunchArgumentTypes -cnotcontains "$($argument.type)") {
             throw "policy '$ConfigPath' launchArguments[$index] type '$($argument.type)' must be one of $($script:LaunchArgumentTypes -join ', ')"
         }
         if (-not $argumentFlags.Add("$($argument.flag)")) { throw "policy '$ConfigPath' launchArguments[$index] repeats the flag '$($argument.flag)'" }

@@ -137,6 +137,42 @@ let private stringMemberOrNull (element: JsonElement) (name: string) : string =
     | Some value when value.ValueKind = JsonValueKind.String -> value.GetString()
     | _ -> null
 
+// A duplicate key anywhere in the document is rejected so two readers cannot silently disagree.
+let private rejectDuplicateKeys (root: JsonElement) : Result<unit, string> =
+    let rec walk (element: JsonElement) : Result<unit, string> =
+        match element.ValueKind with
+        | JsonValueKind.Object ->
+            let seen = HashSet<string>(StringComparer.Ordinal)
+            let mutable failure = None
+
+            for property in element.EnumerateObject() do
+                if failure.IsNone then
+                    if not (seen.Add property.Name) then
+                        failure <- Some $"duplicate JSON key '{property.Name}'"
+                    else
+                        match walk property.Value with
+                        | Error message -> failure <- Some message
+                        | Ok () -> ()
+
+            match failure with
+            | Some message -> Error message
+            | None -> Ok()
+        | JsonValueKind.Array ->
+            let mutable failure = None
+
+            for item in element.EnumerateArray() do
+                if failure.IsNone then
+                    match walk item with
+                    | Error message -> failure <- Some message
+                    | Ok () -> ()
+
+            match failure with
+            | Some message -> Error message
+            | None -> Ok()
+        | _ -> Ok()
+
+    walk root
+
 // Derives the runtime prerequisite from the packaged runtime configuration bytes,
 // so the manifest never assumes an SDK-to-runtime correspondence.
 let runtimeRequirementFromConfig (configName: string) (bytes: byte[]) : Result<RuntimeRequirement, ReleaseError> =
@@ -154,24 +190,28 @@ let runtimeRequirementFromConfig (configName: string) (bytes: byte[]) : Result<R
         if root.ValueKind <> JsonValueKind.Object then
             malformed "the packaged runtime configuration is not a JSON object"
         else
-            match tryProperty root "runtimeOptions" with
-            | Some options when options.ValueKind = JsonValueKind.Object ->
-                match tryProperty options "framework" with
-                | Some framework when framework.ValueKind = JsonValueKind.Object ->
-                    let name = stringMemberOrNull framework "name"
-                    let version = stringMemberOrNull framework "version"
+            // A duplicate key would otherwise make the derived prerequisite depend on property order.
+            match rejectDuplicateKeys root with
+            | Error detail -> malformed detail
+            | Ok () ->
+                match tryProperty root "runtimeOptions" with
+                | Some options when options.ValueKind = JsonValueKind.Object ->
+                    match tryProperty options "framework" with
+                    | Some framework when framework.ValueKind = JsonValueKind.Object ->
+                        let name = stringMemberOrNull framework "name"
+                        let version = stringMemberOrNull framework "version"
 
-                    if String.IsNullOrWhiteSpace name then
-                        malformed "the packaged runtime configuration is missing 'runtimeOptions.framework.name'"
-                    elif String.IsNullOrWhiteSpace version then
-                        malformed "the packaged runtime configuration is missing 'runtimeOptions.framework.version'"
-                    else
-                        Ok
-                            { Framework = name
-                              Version = version
-                              Config = configName }
-                | _ -> malformed "the packaged runtime configuration declares no 'runtimeOptions.framework' object"
-            | _ -> malformed "the packaged runtime configuration declares no 'runtimeOptions' object"
+                        if String.IsNullOrWhiteSpace name then
+                            malformed "the packaged runtime configuration is missing 'runtimeOptions.framework.name'"
+                        elif String.IsNullOrWhiteSpace version then
+                            malformed "the packaged runtime configuration is missing 'runtimeOptions.framework.version'"
+                        else
+                            Ok
+                                { Framework = name
+                                  Version = version
+                                  Config = configName }
+                    | _ -> malformed "the packaged runtime configuration declares no 'runtimeOptions.framework' object"
+                | _ -> malformed "the packaged runtime configuration declares no 'runtimeOptions' object"
     with :? JsonException as error ->
         malformed $"the packaged runtime configuration is not valid JSON: {error.Message}"
 
@@ -312,42 +352,6 @@ let validate (manifest: DistributionManifest) : Result<unit, ReleaseError> =
     match failure with
     | Some detail -> malformed detail
     | None -> Ok()
-
-// A duplicate key anywhere in the document is rejected so two parses cannot silently disagree.
-let private rejectDuplicateKeys (root: JsonElement) : Result<unit, string> =
-    let rec walk (element: JsonElement) : Result<unit, string> =
-        match element.ValueKind with
-        | JsonValueKind.Object ->
-            let seen = HashSet<string>(StringComparer.Ordinal)
-            let mutable failure = None
-
-            for property in element.EnumerateObject() do
-                if failure.IsNone then
-                    if not (seen.Add property.Name) then
-                        failure <- Some $"duplicate JSON key '{property.Name}'"
-                    else
-                        match walk property.Value with
-                        | Error message -> failure <- Some message
-                        | Ok () -> ()
-
-            match failure with
-            | Some message -> Error message
-            | None -> Ok()
-        | JsonValueKind.Array ->
-            let mutable failure = None
-
-            for item in element.EnumerateArray() do
-                if failure.IsNone then
-                    match walk item with
-                    | Error message -> failure <- Some message
-                    | Ok () -> ()
-
-            match failure with
-            | Some message -> Error message
-            | None -> Ok()
-        | _ -> Ok()
-
-    walk root
 
 // One typed reader over a JSON object; the first failure wins so a malformed
 // document reports exactly one deterministic diagnostic.

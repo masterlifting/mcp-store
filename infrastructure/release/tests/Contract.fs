@@ -8,6 +8,7 @@ open Release.Tests
 
 open System
 open System.IO
+open System.Text
 open System.Text.Json.Nodes
 open BuildProvenance
 open DistributionContract
@@ -252,10 +253,72 @@ let exactFailureClasses () =
             Fixture.safeDeleteDir root
     }
 
+// A duplicate key anywhere in the packaged runtime configuration would make the derived prerequisite order-dependent.
+let private assertDuplicateRuntimeConfigKey name key (text: string) =
+    let expected = sprintf "duplicate JSON key '%s'" key
+
+    match runtimeRequirementFromConfig Fixture.canonicalRuntimeConfig (Encoding.UTF8.GetBytes text) with
+    | Error(MalformedArtifact(path, detail)) when path = Fixture.canonicalRuntimeConfig && detail.Contains(expected, StringComparison.Ordinal) ->
+        passed <- passed + 1
+    | Error error -> recordFailure name (sprintf "expected '%s' got '%s'" expected (ReleaseError.message error))
+    | Ok requirement -> recordFailure name (sprintf "expected '%s' got %A" expected requirement)
+
+let runtimeRequirementDerivation () =
+    match
+        runtimeRequirementFromConfig Fixture.canonicalRuntimeConfig (Fixture.runtimeConfigPayloadFor Fixture.canonicalRuntime)
+    with
+    | Ok requirement ->
+        assertEqual "a valid packaged runtime configuration derives the framework" runtimeFramework requirement.Framework
+        assertEqual "a valid packaged runtime configuration derives the version" Fixture.canonicalRuntime requirement.Version
+        assertEqual "a derived prerequisite keeps the packaged configuration name" Fixture.canonicalRuntimeConfig requirement.Config
+    | Error error -> recordFailure "a valid packaged runtime configuration derives its prerequisite" (ReleaseError.message error)
+
+    assertDuplicateRuntimeConfigKey
+        "a duplicate runtimeOptions key is rejected"
+        "runtimeOptions"
+        """{"runtimeOptions":{"framework":{"name":"Microsoft.NETCore.App","version":"9.9.9"}},"runtimeOptions":{"framework":{"name":"Microsoft.NETCore.App","version":"11.0.0"}}}"""
+
+    assertDuplicateRuntimeConfigKey
+        "a duplicate framework key is rejected"
+        "framework"
+        """{"runtimeOptions":{"framework":{"name":"Microsoft.NETCore.App","version":"9.9.9"},"framework":{"name":"Microsoft.NETCore.App","version":"11.0.0"}}}"""
+
+    assertDuplicateRuntimeConfigKey
+        "a duplicate framework name key is rejected"
+        "name"
+        """{"runtimeOptions":{"framework":{"name":"Microsoft.NETCore.App","name":"Microsoft.NETCore.App","version":"11.0.0"}}}"""
+
+    assertDuplicateRuntimeConfigKey
+        "a duplicate framework version key is rejected"
+        "version"
+        """{"runtimeOptions":{"framework":{"name":"Microsoft.NETCore.App","version":"9.9.9","version":"11.0.0"}}}"""
+
+    assertDuplicateRuntimeConfigKey
+        "a duplicate key outside the derived path is rejected"
+        "configProperties"
+        """{"runtimeOptions":{"framework":{"name":"Microsoft.NETCore.App","version":"11.0.0"}},"configProperties":{"a":1},"configProperties":{"b":2}}"""
+
+    let expectRuntimeDiagnostic (name: string) (detail: string) (text: string) =
+        match runtimeRequirementFromConfig Fixture.canonicalRuntimeConfig (Encoding.UTF8.GetBytes text) with
+        | Error(MalformedArtifact(_, actual)) when actual = detail -> passed <- passed + 1
+        | Error error -> recordFailure name (sprintf "expected '%s' got '%s'" detail (ReleaseError.message error))
+        | Ok requirement -> recordFailure name (sprintf "expected '%s' got %A" detail requirement)
+
+    expectRuntimeDiagnostic
+        "a non-object packaged runtime configuration keeps its diagnostic"
+        "the packaged runtime configuration is not a JSON object"
+        "[]"
+
+    expectRuntimeDiagnostic
+        "a packaged runtime configuration without runtimeOptions keeps its diagnostic"
+        "the packaged runtime configuration declares no 'runtimeOptions' object"
+        """{"configProperties":{}}"""
+
 let tests =
     testCaseAsync "shared distribution contract assertions" <| async {
         arbitraryRootResolution ()
         bothProducerPolicies ()
+        runtimeRequirementDerivation ()
         do! exactFailureClasses ()
         printfn "contract-tests summary: passed=%d failed=%d" passed failed
         Expect.equal 0 failed (String.concat Environment.NewLine failures)
