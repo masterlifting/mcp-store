@@ -148,7 +148,8 @@ let private writeReleaseResolution
     (archiveName: string)
     (archiveSha: string)
     (manifestSha: string)
-    (publishedRevision: string) =
+    (publishedRevision: string)
+    (metadataSha: string) =
     let document = JsonObject()
     document["status"] <- JsonValue.Create "published"
     document["reason"] <- JsonValue.Create "fixture resolution"
@@ -160,7 +161,8 @@ let private writeReleaseResolution
     document["publishedArchiveSha256"] <- JsonValue.Create archiveSha
     document["publishedManifestSha256"] <- JsonValue.Create manifestSha
     document["publishedRevision"] <- JsonValue.Create publishedRevision
-    document["publishedMetadataSha256"] <- JsonValue.Create (String.replicate 64 "0")
+    // The accept path proves the projection bytes against this digest, so the fixture must carry the writer's own hash.
+    document["publishedMetadataSha256"] <- JsonValue.Create metadataSha
     File.WriteAllText(Path.Combine(temp, $"publish-stdout-{componentId}.json"), document.ToJsonString())
     File.WriteAllText(Path.Combine(temp, $"publish-exit-{componentId}.txt"), "0")
 
@@ -546,12 +548,18 @@ let private metadataBoundaryAndRecordStepShareTheTrustedPublicationPath =
 
                     let! writeResult = ReleaseMetadata.writeToFileAsync metadataPath projection
                     Expect.isTrue (Result.isOk writeResult) $"the production metadata writer emits the trusted projection: {writeResult}"
+                    // The runner reports the digest of the bytes it published, so the accept fixture must carry the
+                    // production writer's own hash of the persisted projection rather than a synthetic value.
+                    let metadataSha =
+                        match writeResult with
+                        | Ok digest -> digest
+                        | Error error -> failtestf "the production metadata writer returned no trusted digest: %s" (ReleaseError.message error)
 
                     // dotnet reports the trusted runner-temp path; workflow reports a checkout path, which the
                     // retired workspace rule accepted and the corrected step must refuse.
                     let workflowMetadataPath = Path.Combine(workspace, "publication", ReleaseMetadata.metadataAssetName "workflow" "1.0.5")
-                    writeReleaseResolution runnerTemp "dotnet" "1.0.4" metadataPath assetUri archiveName archiveSha manifestSha publishedRevision
-                    writeReleaseResolution runnerTemp "workflow" "1.0.5" workflowMetadataPath "https://example.test/releases/download/workflow/v1.0.5.zip" "v1.0.5.zip" archiveSha manifestSha publishedRevision
+                    writeReleaseResolution runnerTemp "dotnet" "1.0.4" metadataPath assetUri archiveName archiveSha manifestSha publishedRevision metadataSha
+                    writeReleaseResolution runnerTemp "workflow" "1.0.5" workflowMetadataPath "https://example.test/releases/download/workflow/v1.0.5.zip" "v1.0.5.zip" archiveSha manifestSha publishedRevision metadataSha
 
                     let scriptPath = Path.Combine(root, "record-step.ps1")
                     File.WriteAllText(scriptPath, extractWorkflowStep (baselineWorkflow ()) "record the structured release results")
@@ -602,6 +610,15 @@ let private metadataBoundaryAndRecordStepShareTheTrustedPublicationPath =
                     let rereadMalformed = readRecordJson metadataPath
                     Expect.equal (rereadMalformed["schemaVersion"].GetValue<string>()) "1" "the malformed variant carries schemaVersion as a JSON string at the trusted path"
 
+                    // The mutated bytes hash differently, so the fixture must carry the mutated digest or the hash guard
+                    // would fault beside the type guard and the assertion below would not isolate the type failure.
+                    let! malformedHash = ReleaseMetadata.sha256OfFileAsync metadataPath
+                    let malformedSha =
+                        match malformedHash with
+                        | Ok digest -> digest
+                        | Error error -> failtestf "the malformed variant could not be hashed: %s" (ReleaseError.message error)
+                    writeReleaseResolution runnerTemp "dotnet" "1.0.4" metadataPath assetUri archiveName archiveSha manifestSha publishedRevision malformedSha
+
                     // The positive run above already copied this test-owned evidence file; clear exactly that one
                     // copy so the absence assertion below proves the refused projection was not re-copied.
                     if File.Exists copied then File.Delete copied
@@ -620,6 +637,35 @@ let private metadataBoundaryAndRecordStepShareTheTrustedPublicationPath =
                         (malformedDiagnostics.Contains("the verified projection 'schemaVersion' is a JSON string, not the JSON integer '1'", StringComparison.Ordinal))
                         $"the type fault is named exactly: {malformedDiagnostics}"
                     Expect.isFalse (File.Exists copied) "the refused projection is not copied into the evidence set"
+
+                    // A projection whose eight typed fields all match is still not verified evidence when its bytes do not
+                    // hash to the runner's published metadata digest: restore the writer's exact bytes so every field
+                    // still matches, then report a canonical but different digest and expect the hash guard alone.
+                    let! restoredWrite = ReleaseMetadata.writeToFileAsync metadataPath projection
+                    let restoredSha =
+                        match restoredWrite with
+                        | Ok digest -> digest
+                        | Error error -> failtestf "the trusted publication bytes could not be restored: %s" (ReleaseError.message error)
+                    Expect.equal restoredSha metadataSha "restoring the fixture rewrites the same trusted projection bytes"
+                    let wrongMetadataSha = String.replicate 64 "0"
+                    Expect.notEqual wrongMetadataSha metadataSha "the fixture reports a digest that differs from the trusted bytes"
+                    writeReleaseResolution runnerTemp "dotnet" "1.0.4" metadataPath assetUri archiveName archiveSha manifestSha publishedRevision wrongMetadataSha
+                    if File.Exists copied then File.Delete copied
+
+                    let! mismatchCode, mismatchStdout, mismatchStderr = runRecordStep root scriptPath runnerTemp workspace summaryPath outputPath
+                    Expect.equal mismatchCode 0 $"the record step completes on a digest-mismatched projection: {mismatchStdout}{mismatchStderr}"
+
+                    let mismatchRecord = readRecordJson (Path.Combine(evidenceRoot, "release-status-dotnet.json"))
+                    Expect.equal (mismatchRecord["verified"].GetValue<bool>()) false "a projection whose bytes miss the published digest is not verified evidence"
+                    Expect.equal (mismatchRecord["projectionKind"].GetValue<string>()) "status-evidence-only" "a digest-mismatched projection stays status-only evidence"
+                    let mismatchDiagnostics =
+                        mismatchRecord["diagnostics"].AsArray()
+                        |> Seq.map (fun node -> node.GetValue<string>())
+                        |> String.concat " "
+                    Expect.isTrue
+                        (mismatchDiagnostics.Contains($"hashes to {metadataSha}, not the verified published metadata SHA-256 {wrongMetadataSha}", StringComparison.Ordinal))
+                        $"the digest mismatch is named exactly: {mismatchDiagnostics}"
+                    Expect.isFalse (File.Exists copied) "the digest-mismatched projection is not copied into the evidence set"
 
                     // The same public seam fails closed when the publication path is already occupied by a plain
                     // file: the runner's typed mkdir refusal, which the record step never sees.

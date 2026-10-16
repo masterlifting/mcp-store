@@ -731,8 +731,15 @@ jobs:
                 $unverified += $component
               } else {
                 $projection = $null
+                $projectionBytes = $null
                 $parsedProjection = $false
-                try { $projection = Get-Content -LiteralPath $expectedPath -Raw | ConvertFrom-Json -ErrorAction Stop; $parsedProjection = $true } catch { $parsedProjection = $false }
+                # The exact projection bytes are read once and are the only bytes this step parses, hashes and copies, so
+                # the evidence copy cannot differ from the bytes the trusted digest proves and no read/copy race exists.
+                try {
+                  $projectionBytes = [System.IO.File]::ReadAllBytes($expectedPath)
+                  $projection = ([System.Text.Encoding]::UTF8.GetString($projectionBytes) | ConvertFrom-Json -ErrorAction Stop)
+                  $parsedProjection = $true
+                } catch { $parsedProjection = $false }
                 if (-not $parsedProjection) {
                   $diagnostics += "the verified projection at '$expectedPath' is not parseable JSON"
                   $unverified += $component
@@ -790,8 +797,28 @@ jobs:
                       $projectionFaults += "the verified projection '$field' is '$observedValue', not the verified '$expectedValue'"
                     }
                   }
+                  # The eight typed fields above prove the projection's declared content, not that these exact bytes are
+                  # the bytes the runner published: the runner's publishedMetadataSha256 is the remote-verified digest
+                  # of the published metadata asset, so it is the only trusted statement about those bytes and this
+                  # projection must hash to it. The bytes read once above are hashed as they are on disk; nothing is
+                  # reserialized between this proof and the evidence write below, so changed, extra or stale local bytes
+                  # are never recorded as verified evidence. The digest is required in the bare lowercase form the runner
+                  # emits (Convert.ToHexString of the SHA-256, lower-cased), never a prefixed or upper-cased platform
+                  # digest, so a non-canonical value is refused instead of normalized.
+                  $trustedMetadataSha = $published.metadataSha256
+                  if ([string]::IsNullOrWhiteSpace($trustedMetadataSha)) {
+                    $projectionFaults += "the verified publisher result carries no 'publishedMetadataSha256' value to prove the verified projection bytes at '$expectedPath'"
+                  } elseif ($trustedMetadataSha -cnotmatch '^[0-9a-f]{64}$') {
+                    $projectionFaults += "the verified publisher result carries the malformed 'publishedMetadataSha256' value '$trustedMetadataSha', not a bare lowercase SHA-256"
+                  } else {
+                    $observedMetadataSha = [System.Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($projectionBytes)).ToLowerInvariant()
+                    if ($observedMetadataSha -cne $trustedMetadataSha) {
+                      $projectionFaults += "the verified projection at '$expectedPath' hashes to $observedMetadataSha, not the verified published metadata SHA-256 $trustedMetadataSha"
+                    }
+                  }
                   if ($projectionFaults.Count -eq 0) {
-                    Copy-Item -LiteralPath $expectedPath -Destination (Join-Path $evidenceRoot "published-metadata-$component.json") -Force
+                    # One read, one hash, one write of the same byte array: the evidence copy is exactly the proved bytes.
+                    [System.IO.File]::WriteAllBytes((Join-Path $evidenceRoot "published-metadata-$component.json"), $projectionBytes)
                     $projectionKind = "verified-projection"
                     $verified = $true
                   } else {
