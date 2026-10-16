@@ -9,7 +9,6 @@ open System.IO
 open System.IO.Compression
 open System.Net
 open System.Net.Http
-open System.Net.Http.Headers
 open System.Security.Cryptography
 open System.Text
 open System.Text.Json
@@ -164,8 +163,6 @@ type RecordingHandler(allowHost: string) =
     }
 
 let private setApiHeaders (client: HttpClient) =
-    client.DefaultRequestHeaders.Accept.Clear()
-    client.DefaultRequestHeaders.Accept.Add(MediaTypeWithQualityHeaderValue("application/vnd.github+json"))
     client.DefaultRequestHeaders.UserAgent.ParseAdd("mcp-store-release")
     client.DefaultRequestHeaders.Add("X-GitHub-Api-Version", "2022-11-28")
 
@@ -380,6 +377,13 @@ let uploadCandidateIdempotentNoPost () = async {
     assertEqual "idempotent issues zero POSTs" 0 posts
     let gets = handler.Captured |> Array.filter (fun c -> c.Method = "GET") |> Array.length
     assertEqual "idempotent issues GET release + GET asset" 2 gets
+    let assetGets =
+        handler.Captured
+        |> Array.filter (fun c -> c.Method = "GET" && c.Url.Contains("/releases/assets/", StringComparison.Ordinal))
+    assertEqual "asset download issues exactly one asset GET" 1 (Array.length assetGets)
+    match assetGets |> Array.tryHead with
+    | Some req -> assertEqual "asset GET Accept is exactly application/octet-stream" "application/octet-stream" req.Accept
+    | None -> ()
 }
 let uploadCandidateRefusesOverwrite () = async {
     use handler = new RecordingHandler("api.github.com")
@@ -717,8 +721,10 @@ let releaseGetUsesSingleVendorJsonAccept () = async {
     do! withUploadFlag (Some "true") (fun _ -> async {
         let auth = { Token = "sentinel" }
         let observer = gitHubObserver auth tempRoot transport
-        let! _ = observer.Observe { Owner = "x"; Repository = "y"; Tag = "dotnet" } "v1.0.4.zip"
-        return ()
+        match! observer.Observe { Owner = "x"; Repository = "y"; Tag = "dotnet" } "v1.0.4.zip" with
+        | Ok Absent -> passed <- passed + 1
+        | Ok state -> failed <- failed + 1; failures.Add(sprintf "release GET: expected Absent got %A" state)
+        | Error error -> failed <- failed + 1; failures.Add(sprintf "release GET: %s" (ReleaseError.message error))
     })
     let releaseGets =
         handler.Captured
