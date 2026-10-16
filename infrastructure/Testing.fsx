@@ -252,9 +252,10 @@ let assertDistributionContract (producer: Producer) (layout: Layout) : Async<uni
         let! pinsText = File.ReadAllTextAsync layout.PinsPath |> Async.AwaitTask
         let pin = JsonNode.Parse(pinsText).AsObject()
 
+        // The producer emitter writes the three optional provenance fields, so the generated pin carries all eleven keys.
         assertExactKeys
             "pin declares exactly the canonical release-metadata fields"
-            [ "schemaVersion"; "componentId"; "version"; "assetUri"; "archiveName"; "archiveSha256"; "manifestSha256"; "publishedRevision" ]
+            [ "schemaVersion"; "componentId"; "version"; "assetUri"; "archiveName"; "archiveSha256"; "manifestSha256"; "publishedRevision"; "producerSdk"; "producerRuntime"; "producerPlatform" ]
             (keysOf pin)
 
         assertEqual "pin schemaVersion" 1 (pin["schemaVersion"].GetValue<int>())
