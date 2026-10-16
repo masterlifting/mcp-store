@@ -709,6 +709,26 @@ let archiveSuccessThenMetadataFailure () = async {
     })
 }
 
+// WHY: GHI 24 -- a release-tag GET must carry only the vendor JSON media type; the OLD helper also sent application/octet-stream.
+let releaseGetUsesSingleVendorJsonAccept () = async {
+    use handler = new RecordingHandler("api.github.com")
+    let transport = transportFromHandler handler
+    handler.Queue(Reply(200, [], releaseJson (Some 99L) false []))
+    do! withUploadFlag (Some "true") (fun _ -> async {
+        let auth = { Token = "sentinel" }
+        let observer = gitHubObserver auth tempRoot transport
+        let! _ = observer.Observe { Owner = "x"; Repository = "y"; Tag = "dotnet" } "v1.0.4.zip"
+        return ()
+    })
+    let releaseGets =
+        handler.Captured
+        |> Array.filter (fun c -> c.Method = "GET" && c.Url.Contains("/releases/tags/", StringComparison.Ordinal))
+    assertEqual "release GET issues exactly one release-tag request" 1 (Array.length releaseGets)
+    match releaseGets |> Array.tryHead with
+    | Some req -> assertEqual "release GET Accept is exactly application/vnd.github+json" "application/vnd.github+json" req.Accept
+    | None -> ()
+}
+
 let runSuite () = async {
     do! observerUnsafeRedirectRejected ()
     do! observerSafeRedirectObservedAsset ()
@@ -730,6 +750,7 @@ let runSuite () = async {
     do! uploadMetadataTargetsMetadataAssetName ()
     do! uploadMetadataUsesProducerOwnedToolchains ()
     do! archiveSuccessThenMetadataFailure ()
+    do! releaseGetUsesSingleVendorJsonAccept ()
 
     printfn "publish summary: passed=%d failed=%d" passed failed
     Fixture.safeDeleteDir tempRoot

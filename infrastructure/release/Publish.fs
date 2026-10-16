@@ -78,8 +78,6 @@ let defaultHttpTransport () : HttpTransport =
         handler
 
     let setApiHeaders (client: HttpClient) =
-        client.DefaultRequestHeaders.Accept.Clear()
-        client.DefaultRequestHeaders.Accept.Add(MediaTypeWithQualityHeaderValue("application/vnd.github+json"))
         client.DefaultRequestHeaders.UserAgent.ParseAdd("mcp-store-release")
         client.DefaultRequestHeaders.Add("X-GitHub-Api-Version", "2022-11-28")
 
@@ -153,6 +151,7 @@ let private sendGetWithRedirects
     (auth: AuthToken)
     (initialUri: Uri)
     (allowAssetCdn: bool)
+    (accept: string)
     : Async<Result<HttpResponseMessage, ReleaseError>> =
     let permitted (uri: Uri) = isTokenOrigin uri || (allowAssetCdn && isAssetCdnOrigin uri)
 
@@ -164,7 +163,7 @@ let private sendGetWithRedirects
                 let useToken = isTokenOrigin uri
                 let client = if useToken then transport.CreateApiClient() else transport.CreateRedirectClient()
                 let request = new HttpRequestMessage(HttpMethod.Get, uri)
-                request.Headers.Accept.Add(MediaTypeWithQualityHeaderValue("application/octet-stream"))
+                request.Headers.Accept.Add(MediaTypeWithQualityHeaderValue(accept))
 
                 if useToken then
                     request.Headers.Authorization <- AuthenticationHeaderValue("Bearer", auth.Token)
@@ -313,7 +312,7 @@ let private getRelease (transport: HttpTransport) (auth: AuthToken) (locator: Re
     async {
         let uri = apiUrl $"repos/{locator.Owner}/{locator.Repository}/releases/tags/{locator.Tag}"
 
-        match! sendGetWithRedirects transport auth uri false with
+        match! sendGetWithRedirects transport auth uri false "application/vnd.github+json" with
         | Error error -> return Error error
         | Ok message ->
             use response = message
@@ -344,7 +343,7 @@ let private downloadAssetBytes
     async {
         let uri = apiUrl $"repos/{locator.Owner}/{locator.Repository}/releases/assets/{assetId}"
 
-        match! sendGetWithRedirects transport auth uri true with
+        match! sendGetWithRedirects transport auth uri true "application/octet-stream" with
         | Error error -> return Error error
         | Ok message ->
             use response = message
@@ -373,6 +372,7 @@ let private postAsset
         else
             let request = new HttpRequestMessage(HttpMethod.Post, uri)
             request.Headers.Authorization <- AuthenticationHeaderValue("Bearer", auth.Token)
+            request.Headers.Accept.Add(MediaTypeWithQualityHeaderValue("application/vnd.github+json"))
             let content = new ByteArrayContent(bytes)
             content.Headers.ContentType <- MediaTypeHeaderValue(contentType)
             content.Headers.ContentLength <- int64 bytes.Length
