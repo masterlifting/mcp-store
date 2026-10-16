@@ -79,20 +79,20 @@ let private embeddedManifestSha256 (archivePath: string) : Async<Result<string, 
                     match failure with
                     | Some _ -> ()
                     | None ->
-                        if entry.Name = "distribution.json" then
+                        if entry.Name = DistributionContract.manifestEntryName then
                             manifestCount <- manifestCount + 1
                             match ReleaseArchive.decompress entry with
                             | Error error -> failure <- Some error
                             | Ok payload ->
                                 if manifestCount > 1 then
-                                    failure <- Some(MalformedArtifact(archivePath, "the archive contains more than one distribution.json entry"))
+                                    failure <- Some(MalformedArtifact(archivePath, $"the archive contains more than one {DistributionContract.manifestEntryName} entry"))
                                 else
                                     manifestBytes <- Some payload
 
                 match failure, manifestBytes with
                 | Some error, _ -> return Error error
                 | None, None ->
-                    return Error(MalformedArtifact(archivePath, "the archive is missing the canonical distribution.json entry"))
+                    return Error(MalformedArtifact(archivePath, $"the archive is missing the canonical {DistributionContract.manifestEntryName} entry"))
                 | None, Some payload ->
                     let sha =
                         System.Security.Cryptography.SHA256.HashData payload
@@ -116,8 +116,38 @@ let private fileSize (path: string) : Result<int, ReleaseError> =
     | :? UnauthorizedAccessException as error -> Error(FileFailure("stat", path, error.Message))
 
 let private entryAllowlistFor (projection: ReleasePolicy.PolicyProjection) : string list =
-    (projection.PublishedFiles @ [ "NOTICE.txt"; "distribution.json" ])
-    |> List.sort
+    DistributionContract.trustedArchiveMemberNames projection.PublishedFiles
+
+// Before the candidate leaves preparation it must already agree with the trusted
+// policy and the evaluated HEAD: identity, source repository, launch descriptor,
+// build provenance, and the committed revision are re-derived from Config.json
+// rather than accepted from the manifest bytes alone.
+let private validateStandaloneManifest
+    (projection: ReleasePolicy.PolicyProjection)
+    (evaluatedHead: string)
+    (manifestText: string)
+    : Result<unit, ReleaseError> =
+    match DistributionContract.parse manifestText with
+    | Error error -> Error error
+    | Ok manifest ->
+        if manifest.Revision <> evaluatedHead then
+            Error(RevisionMismatch(evaluatedHead, manifest.Revision))
+        else
+            match ReleaseCompare.contractFromPolicy projection projection.ArchiveName with
+            | Error error -> Error error
+            | Ok contract ->
+                let checks =
+                    [ manifest.Id = contract.ComponentId, "id"
+                      manifest.Version = contract.Version, "version"
+                      manifest.Archive = contract.ArchiveName, "archive"
+                      manifest.SourceRepository = contract.SourceRepository, "sourceRepository"
+                      manifest.Producer = contract.Producer, "producer"
+                      manifest.Launch = contract.Launch, "launch" ]
+
+                match checks |> List.tryFind (fun (matches, _) -> not matches) with
+                | Some (_, field) ->
+                    Error(IdentityMismatch(field, "the trusted producer policy", "the prepared manifest"))
+                | None -> Ok()
 
 let private emitPreparedFailure (phase: string) (reason: string) (componentId: string) (version: string) (archiveName: string) (assetUri: string) : string =
     let node = JsonObject()
@@ -259,7 +289,7 @@ let private prepareInternal (root: string) (configPath: string) : Async<Result<P
                             let dist = Path.Combine(root, componentId, "dist")
                             let distributionDirectory = Path.Combine(dist, componentId)
                             let archivePath = Path.Combine(dist, projection.ArchiveName)
-                            let manifestPath = Path.Combine(distributionDirectory, "distribution.json")
+                            let manifestPath = Path.Combine(distributionDirectory, DistributionContract.manifestEntryName)
                             let configAbsolute = Path.GetFullPath(Path.Combine(root, configPath))
 
                             let! buildResult = runProducerScript root "build" (Path.Combine(componentId, "release", "Build.fsx")) configPath
@@ -307,29 +337,37 @@ let private prepareInternal (root: string) (configPath: string) : Async<Result<P
                                                                 | Ok evaluatedHead ->
                                                                     let manifestBytesEqual = standaloneManifestSha256 = embeddedManifestSha256
 
-                                                                    if manifestBytesEqual then
-                                                                        let data : PreparedData =
-                                                                            { Projection = projection
-                                                                              ConfigPath = configPath
-                                                                              ConfigSha256 = configSha256
-                                                                              EvaluatedHead = evaluatedHead
-                                                                              ArchivePath = archivePath
-                                                                              ArchiveSize = archiveSize
-                                                                              ArchiveSha256 = archiveSha256
-                                                                              StandaloneManifestPath = manifestPath
-                                                                              StandaloneManifestSha256 = standaloneManifestSha256
-                                                                              StandaloneManifestSize = standaloneManifestSize
-                                                                              EmbeddedManifestSha256 = embeddedManifestSha256
-                                                                              ManifestBytesEqual = manifestBytesEqual
-                                                                              EntryAllowlist = entryAllowlistFor projection }
-
-                                                                        return Ok data
-                                                                    else
+                                                                    if not manifestBytesEqual then
                                                                         return
                                                                             Error(
                                                                                 MalformedArtifact(
                                                                                     manifestPath,
                                                                                     $"the standalone manifest SHA '{standaloneManifestSha256}' differs from the embedded manifest SHA '{embeddedManifestSha256}'; refusing to publish a candidate whose standalone and embedded manifests disagree"))
+                                                                    else
+                                                                        let! standaloneManifestText = BuildProvenance.readAllTextAsync manifestPath
+
+                                                                        match standaloneManifestText with
+                                                                        | Error error -> return Error error
+                                                                        | Ok manifestText ->
+                                                                            match validateStandaloneManifest projection evaluatedHead manifestText with
+                                                                            | Error error -> return Error error
+                                                                            | Ok () ->
+                                                                                let data : PreparedData =
+                                                                                    { Projection = projection
+                                                                                      ConfigPath = configPath
+                                                                                      ConfigSha256 = configSha256
+                                                                                      EvaluatedHead = evaluatedHead
+                                                                                      ArchivePath = archivePath
+                                                                                      ArchiveSize = archiveSize
+                                                                                      ArchiveSha256 = archiveSha256
+                                                                                      StandaloneManifestPath = manifestPath
+                                                                                      StandaloneManifestSha256 = standaloneManifestSha256
+                                                                                      StandaloneManifestSize = standaloneManifestSize
+                                                                                      EmbeddedManifestSha256 = embeddedManifestSha256
+                                                                                      ManifestBytesEqual = manifestBytesEqual
+                                                                                      EntryAllowlist = entryAllowlistFor projection }
+
+                                                                                return Ok data
     }
 
 // Prepare a data-only candidate directory containing exactly the archive and manifest.
@@ -360,7 +398,7 @@ let prepare (root: string) (configPath: string) (candidateDirectory: string) : A
                     if not (Directory.Exists candidateDirectory) then Directory.CreateDirectory candidateDirectory |> ignore
                     let archiveName = data.Projection.ArchiveName
                     let portableArchivePath = Path.Combine(candidateDirectory, archiveName)
-                    let portableManifestPath = Path.Combine(candidateDirectory, "distribution.json")
+                    let portableManifestPath = Path.Combine(candidateDirectory, DistributionContract.manifestEntryName)
                     File.Copy(data.ArchivePath, portableArchivePath, true)
                     File.Copy(data.StandaloneManifestPath, portableManifestPath, true)
                     let node = JsonObject()
@@ -371,7 +409,7 @@ let prepare (root: string) (configPath: string) (candidateDirectory: string) : A
                     node["version"] <- JsonValue.Create data.Projection.Version
                     node["candidateDirectory"] <- JsonValue.Create candidateDirectory
                     node["relativeArchiveName"] <- JsonValue.Create archiveName
-                    node["relativeManifestName"] <- JsonValue.Create "distribution.json"
+                    node["relativeManifestName"] <- JsonValue.Create DistributionContract.manifestEntryName
                     let payload = node.ToJsonString(JsonSerializerOptions(WriteIndented = true))
                     do! Console.Out.WriteLineAsync(payload) |> Async.AwaitTask
                     return 0

@@ -2,7 +2,7 @@
 // Process-boundary proof for the packaged Workflow distribution: the packaged
 // runtime coordinates cross-process work with an OS mutex, so a task directory
 // stays free of runtime.lock while two processes race and an owner is killed.
-// The test never mutates the installed MCP; it only reads it.
+// The packaged entry is the repository build or an externally supplied override; no installed copy is read.
 
 open System
 open System.Collections.Concurrent
@@ -54,9 +54,6 @@ let sha256File path =
 
 
 let repoRoot = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", ".."))
-let userProfile = Environment.GetFolderPath Environment.SpecialFolder.UserProfile
-let installedDirectory = Path.Combine(userProfile, ".config", "opencode", "mcp", "workflow")
-let installedEntry = Path.Combine(installedDirectory, "Mcp.Workflow.dll")
 let helperScript = Path.Combine(__SOURCE_DIRECTORY__, "MutexAbandonmentHelper.fsx")
 
 let mutexNamePattern = "Mcp.Workflow.Runtime."
@@ -166,9 +163,6 @@ let initializePackage () : Async<unit> =
         | value when not (String.IsNullOrWhiteSpace value) ->
             entryDll <- Path.GetFullPath value
             entrySource <- "env:MCP_WORKFLOW_PACKAGED_DLL"
-        | _ when hasFreshCoordination installedEntry ->
-            entryDll <- installedEntry
-            entrySource <- "installed"
         | _ ->
             let! dirty = repositoryIsDirty ()
             if dirty then
@@ -637,33 +631,10 @@ let runAbandonedOwnerTest () : Async<unit> =
 async {
     do! initializePackage ()
     printfn "packaged entry: %s (source=%s)" entryDll entrySource
-
-    let installedStatus =
-        if File.Exists installedEntry then
-            let bytes = File.ReadAllBytes installedEntry
-            let mutexCount = occurrencesUtf16 mutexNamePattern bytes
-            let lockCount = occurrencesUtf16 lockArtifact bytes
-            printfn "installed package: %s" installedEntry
-            printfn "  mutex-name utf16=%d runtime.lock utf16=%d" mutexCount lockCount
-
-            if mutexCount = 0 || lockCount > 0 then
-                printfn "WARNING STALE-INSTALL: the local install predates the ephemeral-mutex coordination."
-                printfn "  this run verified the repo-built package instead."
-                Some false
-            else
-                Some true
-        else
-            printfn "installed package: not present at %s" installedEntry
-            None
-
     verifyPackagedBinary entryDll
     do! runRaceTest ()
     do! runAbandonedOwnerTest ()
     printfn "OK packaged runtime coordination proof: ephemeral mutex, no runtime.lock, cross-process serialization, abandoned-owner recovery"
-
-    match installedStatus with
-    | Some false -> printfn "NOTE: installed-package verification skipped for the stale local install."
-    | _ -> ()
 
     for directory in cleanupDirectories do
         if Directory.Exists directory

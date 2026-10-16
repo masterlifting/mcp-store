@@ -66,13 +66,7 @@ let private makeProjection (archiveSha: string) (manifestSha: string) (revision:
         (Some Fixture.canonicalRuntime)
         (Some Fixture.canonicalPlatform)
 
-let private contract =
-    {
-        ComponentId = Fixture.contractComponentId
-        Version = Fixture.contractVersion
-        ArchiveName = Fixture.contractArchiveName
-        EntryAllowlist = Fixture.contractEntryAllowlist
-    }
+let private contract = Fixture.canonicalContract
 
 let private tempRoot = Path.Combine(Path.GetTempPath(), "mcp-release-evaluate-tests-" + Guid.NewGuid().ToString("N"))
 
@@ -163,7 +157,7 @@ let validateCanonicalAssetUriEmptyRejection () = async {
 }
 let validateCanonicalAssetUriWrongOwnerRejection () = async {
     let dto = dtoFrom "unused-archive.zip" "unused-manifest.json"
-    let dto = { dto with AssetUri = "https://github.com/somebodyelse/mcp-store/releases/download/dotnet/v1.0.4.zip" }
+    let dto = { dto with AssetUri = "https://github.com/somebodyelse/mcp-store/releases/download/dotnet/v1.0.5.zip" }
 
     match ReleaseEvaluate.validateCanonicalAssetUri dto contract with
     | Ok () ->
@@ -388,7 +382,7 @@ let failedOnObservedMetadataFieldMismatch () = async {
     let projection =
         ReleaseMetadata.makeProjection
             Fixture.contractComponentId
-            "1.0.5"
+            "9.9.9"
             Fixture.canonicalAssetUri
             Fixture.contractArchiveName
             observation.ArchiveSha256

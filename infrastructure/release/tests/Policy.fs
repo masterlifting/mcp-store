@@ -25,7 +25,7 @@ let private sha256Hex (bytes: byte[]) =
 //   helper so the bound SourceSha256 is computed from the same bytes the parser observes.
 let private requiredFields =
     [ "componentId"; "version"; "entryDll"; "sdkVersion"; "runtimeVersion"
-      "platform"; "archiveName"; "assetUri"; "publishedFiles" ]
+      "platform"; "archiveName"; "assetUri"; "publishedFiles"; "launchArguments" ]
 
 let private expectMalformed (name: string) (sourcePath: string) (input: string) =
     testCase name (fun () ->
@@ -80,7 +80,7 @@ let private projectionTests =
          Expect.equal actual.SourceSha256 snapshot.ConfigSha256 $"{componentId} hash of exact canonical bytes returns the helper observation"
          let mutable parsedVersion: Version = Unchecked.defaultof<Version>
          Expect.isTrue (Version.TryParse(actual.Version, &parsedVersion)) $"canonical {componentId} version parses as semver"
-         Expect.isTrue (actual.Version = "1.0.4" || actual.Version = "1.0.5") $"canonical {componentId} version is the current pinned release value"))
+         Expect.isTrue (actual.Version = "1.0.5" || actual.Version = "1.0.6") $"canonical {componentId} version is the current pinned release value"))
 
 let private strictJsonGrammarTests =
     let canonical = readCanonicalConfig repositoryRoot "dotnet"
@@ -143,6 +143,27 @@ let private strictJsonGrammarTests =
           mutated (fun node -> node.Remove "assetUri" |> ignore) |> bytes)
       expectMalformedBytes "missing required field publishedFiles is rejected" "Config.json" (
           mutated (fun node -> node.Remove "publishedFiles" |> ignore) |> bytes)
+      expectMalformedBytes "missing required field launchArguments is rejected" "Config.json" (
+          mutated (fun node -> node.Remove "launchArguments" |> ignore) |> bytes)
+      expectMalformedBytes "an unsupported launch argument type is rejected" "Config.json" (
+          mutated (fun node ->
+              let argument = node["launchArguments"].AsArray().[0].AsObject()
+              argument["type"] <- JsonValue.Create "relative-file") |> bytes)
+      expectMalformedBytes "a launch argument with an unknown member is rejected" "Config.json" (
+          mutated (fun node ->
+              let argument = node["launchArguments"].AsArray().[0].AsObject()
+              argument["rogue"] <- JsonValue.Create "rogue") |> bytes)
+      expectMalformedBytes "an empty launchArguments array is rejected" "Config.json" (
+          mutated (fun node -> node["launchArguments"] <- JsonArray()) |> bytes)
+      expectMalformedBytes "a duplicate launch argument flag is rejected" "Config.json" (
+          mutated (fun node ->
+              let array = node["launchArguments"].AsArray()
+              let first = array.[0].AsObject()
+              let clone = first.DeepClone().AsObject()
+              clone["input"] <- JsonValue.Create "otherInput"
+              array.Add clone) |> bytes)
+      expectMalformedBytes "a launch argument that is not an object is rejected" "Config.json" (
+          mutated (fun node -> node["launchArguments"] <- JsonArray(JsonValue.Create "raw")) |> bytes)
       expectMalformedBytes "an unknown field is rejected" "Config.json" (
           mutated (fun node -> node["rogueField"] <- JsonValue.Create "rogue") |> bytes)
       expectMalformedBytes "a non-string componentId is rejected" "Config.json" (
@@ -194,12 +215,12 @@ let private semanticGrammarTests =
                   Expect.isFalse (name.Contains "\\") $"{componentId} published file {name} contains no backslash"
                   Expect.isTrue (name = Path.GetFileName name) $"{componentId} published file {name} is a bare name"
                   Expect.isFalse (name.Contains "..") $"{componentId} published file {name} contains no relative-traversal segment")
-      testCase "the canonical Config.json contains exactly the nine required fields and no others" (fun () ->
+      testCase "the canonical Config.json contains exactly the required fields and no others" (fun () ->
           for componentId in canonicalComponentIds do
               let snapshot = readCanonicalConfig repositoryRoot componentId
               let node = JsonNode.Parse(Encoding.UTF8.GetString snapshot.ConfigBytes).AsObject()
               let keys = node |> Seq.map (fun property -> property.Key) |> Seq.toList |> List.sort
-              Expect.equal keys (requiredFields |> List.sort) $"{componentId} Config.json has exactly the nine required fields") ]
+              Expect.equal keys (requiredFields |> List.sort) $"{componentId} Config.json has exactly the required fields") ]
 
 let private snapshotTests =
     [ testCase "projection and source hash remain bound to the bytes observed before file mutation" (fun () ->

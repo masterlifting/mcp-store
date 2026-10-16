@@ -321,8 +321,26 @@ let private coherenceGuardChecksActualRosterAndWorkflowMarkers =
                     let! matrixCode, matrixOut, matrixErr = runCoherence root hardcodedMatrix correctProjection
                     Expect.isTrue (matrixCode <> 0) "a hardcoded workflow matrix fails the actual guard"
                     Expect.isTrue
-                        ((matrixOut + matrixErr).Contains("publisher reads the projected components", StringComparison.Ordinal))
-                        "the hardcoded projection is identified by the publisher's projection-source check"
+                        ((matrixOut + matrixErr).Contains("every stage reads the projection instead of a literal participant list", StringComparison.Ordinal))
+                        "the hardcoded projection is identified by the projection-source check"
+
+                    let leakedHistoricalFixture = workflowFixture + (Environment.NewLine + "# leaked Fixtures.json descriptor" + Environment.NewLine)
+                    let! leakCode, leakOut, leakErr = runCoherence root leakedHistoricalFixture correctProjection
+                    Expect.isTrue (leakCode <> 0) "a surviving historical fixture descriptor fails the actual guard"
+                    Expect.isTrue
+                        ((leakOut + leakErr).Contains("no historical fixture download or descriptor survives", StringComparison.Ordinal))
+                        "the retired fixture descriptor is identified"
+
+                    let removedStageContainment =
+                            workflowFixture.Replace(
+                            "resolves outside the checkout",
+                            "containment removed"
+                        )
+                    let! containmentCode, containmentOut, containmentErr = runCoherence root removedStageContainment correctProjection
+                    Expect.isTrue (containmentCode <> 0) "a stage step without the checkout-containment guard fails the actual guard"
+                    Expect.isTrue
+                        ((containmentOut + containmentErr).Contains("publisher stages only compile items that resolve inside the checkout", StringComparison.Ordinal))
+                        "the missing stage containment guard is identified"
 
                     let renamedBootstrapOutput =
                             workflowFixture.Replace(

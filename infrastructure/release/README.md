@@ -23,11 +23,24 @@ exact `MCP_RELEASE_DO_UPLOAD=true` opt-in and `GITHUB_TOKEN`. There is no local-
 fallback. Remote archive and metadata observations, immutable assets, and recovery
 remain owned by `ReleaseEvaluate` and `ReleaseTransaction`.
 
-The project compile order is explicit in `Release.fsproj`, and the pre-SDK toolchain
-projection is plain PowerShell over each producer's canonical `Config.json`, so nothing
-here evaluates F# before an SDK exists. Once the SDK is available, producer F# scripts
-reuse the compiled `ReleasePolicy` parser; PowerShell remains the minimal bootstrap
-projection because it must run before that parser can be built.
+The project compile order is explicit in `Release.fsproj`, and that ordered
+`<Compile Include>` list is the single authored source list: the release workflow
+stages the publisher from it verbatim. It compiles the shared, pure distribution
+contract first — `infrastructure/distribution/Contract.fs` (manifest types, strict
+parser/renderer, semantic validation, bounded root resolution) and
+`infrastructure/distribution/Pin.fs` (canonical consumer pin / release metadata) —
+then `Policy.fs`, which parses a producer's canonical `Config.json` and nothing
+else. `ReleaseCompare.contractFromPolicy` projects that policy into the trusted
+`ComponentContract` so identity, member allowlist, source repository, launch
+descriptor, and build provenance are re-derived rather than re-implemented by each
+caller. See `infrastructure/distribution/README.md` for the schema and its
+invariants.
+
+The pre-SDK toolchain projection is plain PowerShell over each producer's canonical
+`Config.json`, so nothing here evaluates F# before an SDK exists. Once the SDK is
+available, producer F# scripts reuse the compiled `ReleasePolicy` parser;
+PowerShell remains the minimal bootstrap projection because it must run before that
+parser can be built.
 
 ## Retained scripts
 

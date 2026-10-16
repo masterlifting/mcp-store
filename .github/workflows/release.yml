@@ -249,52 +249,10 @@ jobs:
             }
           }
 
-      - name: provision the pinned historical regression fixtures (read-only release assets)
-        shell: pwsh
-        env:
-          RELEASE_COMPONENTS: ${{ steps.project.outputs.components }}
-        run: |
-          $ErrorActionPreference = "Stop"
-          # Fixtures.json is the single pin table, so the URIs, sizes and hashes are read rather than restated.
-          $descriptorPath = Join-Path (Get-Location) "infrastructure/release/tests/Fixtures.json"
-          if (-not (Test-Path -LiteralPath $descriptorPath -PathType Leaf)) { throw "the historical fixture descriptor is missing: $descriptorPath" }
-          $descriptor = Get-Content -LiteralPath $descriptorPath -Raw | ConvertFrom-Json
-          if ([int]$descriptor.schemaVersion -ne 1) { throw "descriptor schemaVersion is '$($descriptor.schemaVersion)', not 1" }
-          $entries = @($descriptor.fixtures)
-          if ($entries.Count -ne 2) { throw "the descriptor declares $($entries.Count) fixture entries where exactly two are required" }
-          $components = @(ConvertFrom-Json $env:RELEASE_COMPONENTS)
-          # Component identity still comes from the roster projection: the descriptor pins data, never participation.
-          $descriptorComponents = @($entries | ForEach-Object { "$($_.componentId)" }) | Sort-Object
-          if (($descriptorComponents -join ',') -cne (($components | Sort-Object) -join ',')) { throw "descriptor components [$($descriptorComponents -join ', ')] do not equal the roster projection [$($components -join ', ')]" }
-          $root = Join-Path $env:RUNNER_TEMP "mcp-historical-fixtures"
-          New-Item -ItemType Directory -Path $root -Force | Out-Null
-          foreach ($entry in $entries) {
-            $component = "$($entry.componentId)"
-            $archiveFile = "$($entry.archiveFile)"
-            $assetName = "$($entry.assetName)"
-            $assetUri = "$($entry.assetUri)"
-            $expectedSize = [int64]$entry.size
-            $expectedSha = "$($entry.sha256)"
-            if ([string]::IsNullOrWhiteSpace($archiveFile) -or $archiveFile -ne [System.IO.Path]::GetFileName($archiveFile) -or $archiveFile.Contains("..")) { throw "descriptor archiveFile '$archiveFile' is not a contained basename" }
-            if ([string]::IsNullOrWhiteSpace($assetName) -or $assetName -match '[\\/]') { throw "descriptor assetName '$assetName' is not a single relative asset name" }
-            $canonicalUri = "https://github.com/masterlifting/mcp-store/releases/download/$component/$assetName"
-            if ($assetUri -cne $canonicalUri) { throw "descriptor assetUri '$assetUri' is not the fixed public asset URL '$canonicalUri'" }
-            if ($expectedSize -le 0) { throw "descriptor size for '$component' must be a positive byte count" }
-            if ($expectedSha -cnotmatch '^[0-9a-f]{64}$') { throw "descriptor sha256 for '$component' is not 64 lowercase hex characters" }
-            # The published asset is public: the request carries no credential, cookie or authorization header.
-            $staged = Join-Path $root ($archiveFile + ".staged")
-            Invoke-WebRequest -Uri $assetUri -OutFile $staged -MaximumRetryCount 3 -RetryIntervalSec 5
-            $observedSize = (Get-Item -LiteralPath $staged).Length
-            if ($observedSize -ne $expectedSize) { throw "fetched '$assetName' is $observedSize bytes, not the pinned $expectedSize bytes" }
-            $observedSha = (Get-FileHash -LiteralPath $staged -Algorithm SHA256).Hash.ToLowerInvariant()
-            if ($observedSha -cne $expectedSha) { throw "fetched '$assetName' hashed to $observedSha, not the pinned $expectedSha" }
-            Move-Item -LiteralPath $staged -Destination (Join-Path $root $archiveFile) -Force
-          }
-          "MCP_RELEASE_HISTORICAL_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-
       - name: run the complete compiled release regression gate
         shell: pwsh
-        # Suite.ps1 fails closed without MCP_RELEASE_HISTORICAL_ROOT, runs the complete compiled suite with a case-count check, and never excludes or rewrites a case.
+        # Suite.ps1 runs the complete compiled suite with a case-count check and never excludes or rewrites a case; its
+        # retained baseline regression reads canonical fixtures, so no stage downloads or stages a fixture transport.
         run: pwsh infrastructure/release/Suite.ps1
 
       - name: strict FCS typecheck of the retained release scripts

@@ -7,30 +7,22 @@ open System.IO
 open BuildProvenance
 
 let root = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", ".."))
-let config = DistributionBuild.loadConfig (Path.Combine(__SOURCE_DIRECTORY__, "Config.json"))
+let configPath = Path.Combine(__SOURCE_DIRECTORY__, "Config.json")
+let config = DistributionBuild.loadConfig configPath
 let dist = Path.Combine(root, "workflow", "dist")
 let output = Path.Combine(dist, "consumer-pins.json")
 let componentId = config.ComponentId
-let version = config.Version
 let archiveName = config.ArchiveName
-let assetUri = config.AssetUri
 
 let manifestPath = Path.Combine(dist, componentId, "distribution.json")
 let archivePath = Path.Combine(dist, archiveName)
 
 let run () : Async<Result<string * string * string, ReleaseError>> =
     if not (File.Exists archivePath) || not (File.Exists manifestPath) then
-        async { return Error(MissingArtifact "run workflow/release/Build.fsx before preparing workflow v1 pins") }
+        async { return Error(MissingArtifact "run workflow/release/Build.fsx before preparing the workflow consumer pin") }
     else
-        releaseResult {
-            do!
-                ReleasePins.validateManifestIdentity
-                    manifestPath
-                    [ "id", componentId; "version", version; "archive", archiveName ]
-
-            return!
-                ReleasePins.writeConsumerPins root manifestPath archivePath output componentId archiveName assetUri
-        }
+        // Only the canonical config path crosses this boundary: each FSI load chain compiles its own policy type.
+        ReleasePins.writeConsumerPins root configPath manifestPath archivePath output
 
 // Standalone entry bridge: the only synchronous wait in this script's flow.
 let archiveSha256, manifestSha256, revision =

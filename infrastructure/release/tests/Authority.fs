@@ -35,6 +35,7 @@ open Expecto
 open Microsoft.FSharp.Core
 
 open BuildProvenance
+open DistributionContract
 
 type private CapturedRequest =
     { Method: string
@@ -77,9 +78,6 @@ let private runPublishPipelineMethod =
         failwith "ReleaseRunner.runPublishPipelineWithTransportFactory is not reachable via reflection"
     method
 
-let private sha256Hex (bytes: byte[]) =
-    SHA256.HashData bytes |> Convert.ToHexString |> fun value -> value.ToLowerInvariant()
-
 // WHY: the inner producer archive must use the canonical Deflate (method 8) the strict
 //   ReleaseArchive.parse accepts; one helper, one shape.
 let private zipBytes (level: CompressionLevel) (entries: (string * byte[]) list) =
@@ -116,39 +114,13 @@ let private releasePolicy componentId =
 //   is what ReleaseHandoff.readCandidate consumes; no outer transport / prep / evidence
 //   wrappers exist outside the production code path.
 let private buildInner (policy: ReleasePolicy.PolicyProjection) (revision: string) =
-    let payloads =
-        policy.PublishedFiles
-        |> List.map (fun name -> name, Encoding.UTF8.GetBytes $"authority-fixture:{policy.ComponentId}:{name}")
-        |> fun files -> files @ [ "NOTICE.txt", Encoding.UTF8.GetBytes "authority fixture payload" ]
-
-    let manifest = JsonObject()
-    manifest["schemaVersion"] <- JsonValue.Create 1
-    manifest["id"] <- JsonValue.Create policy.ComponentId
-    manifest["version"] <- JsonValue.Create policy.Version
-    manifest["revision"] <- JsonValue.Create revision
-    manifest["sdk"] <- JsonValue.Create policy.SdkVersion
-    manifest["entryDll"] <- JsonValue.Create policy.EntryDll
-    manifest["archive"] <- JsonValue.Create policy.ArchiveName
-
-    let files = JsonArray()
-    for name, payload in payloads do
-        if name <> "NOTICE.txt" then
-            let entry = JsonObject()
-            entry["path"] <- JsonValue.Create name
-            entry["sha256"] <- JsonValue.Create(sha256Hex payload)
-            files.Add entry
-    manifest["files"] <- files
-
-    let archiveFiles = JsonArray()
-    for name in policy.PublishedFiles @ [ "NOTICE.txt"; "distribution.json" ] do
-        archiveFiles.Add(JsonValue.Create name)
-    manifest["archiveFiles"] <- archiveFiles
-
-    let manifestBytes = Encoding.UTF8.GetBytes(manifest.ToJsonString())
+    let payloads = Fixture.policyPayloads policy "authority-fixture"
+    let manifestText = Fixture.policyManifestFor policy revision payloads
+    let manifestBytes = Encoding.UTF8.GetBytes manifestText
     let innerBytes =
         zipBytes CompressionLevel.Optimal
             (payloads
-             @ [ "distribution.json", manifestBytes ])
+             @ [ DistributionContract.manifestEntryName, manifestBytes ])
     innerBytes, manifestBytes
 
 let private readCandidateSnapshot (policy: ReleasePolicy.PolicyProjection) (revision: string) =

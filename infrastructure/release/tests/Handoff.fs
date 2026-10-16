@@ -18,6 +18,7 @@ open System.Text
 open System.Text.Json.Nodes
 open Expecto
 open BuildProvenance
+open DistributionContract
 
 let private repositoryRoot = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "../../../"))
 
@@ -50,43 +51,10 @@ let private releasePolicy componentId =
     | Error error -> failtestf "canonical %s policy was rejected: %A" componentId error
 
 let private portableCandidateArchive (policy: ReleasePolicy.PolicyProjection) =
-    let payloads =
-        policy.PublishedFiles
-        |> List.map (fun name -> name, Encoding.UTF8.GetBytes($"candidate-payload:{policy.ComponentId}:{name}"))
-
-    let manifest = JsonObject()
-    manifest["schemaVersion"] <- JsonValue.Create 1
-    manifest["id"] <- JsonValue.Create policy.ComponentId
-    manifest["version"] <- JsonValue.Create policy.Version
-    manifest["revision"] <- JsonValue.Create "0123456789abcdef0123456789abcdef01234567"
-    manifest["sdk"] <- JsonValue.Create policy.SdkVersion
-    manifest["entryDll"] <- JsonValue.Create policy.EntryDll
-    manifest["archive"] <- JsonValue.Create policy.ArchiveName
-
-    let files = JsonArray()
-
-    for name, payload in payloads do
-        let file = JsonObject()
-        file["path"] <- JsonValue.Create name
-        file["sha256"] <- JsonValue.Create(sha256Hex payload)
-        files.Add file
-
-    manifest["files"] <- files
-
-    let archiveFiles = JsonArray()
-
-    for name in policy.PublishedFiles @ [ "NOTICE.txt"; "distribution.json" ] do
-        archiveFiles.Add(JsonValue.Create name)
-
-    manifest["archiveFiles"] <- archiveFiles
-    let manifestBytes = Encoding.UTF8.GetBytes(manifest.ToJsonString())
-
-    let producerArchive =
-        zipBytes
-            (payloads
-             @ [ "NOTICE.txt", Encoding.UTF8.GetBytes "candidate notice"
-                 "distribution.json", manifestBytes ])
-
+    let payloads = Fixture.policyPayloads policy "candidate-payload"
+    let manifestText = Fixture.policyManifestFor policy "0123456789abcdef0123456789abcdef01234567" payloads
+    let manifestBytes = Encoding.UTF8.GetBytes manifestText
+    let producerArchive = zipBytes (payloads @ [ DistributionContract.manifestEntryName, manifestBytes ])
     producerArchive, manifestBytes
 
 let private prepareCandidateDirectory (componentId: string) (policy: ReleasePolicy.PolicyProjection) =
@@ -102,40 +70,16 @@ let private prepareCandidateDirectory (componentId: string) (policy: ReleasePoli
 //   inside an otherwise-valid producer ZIP and keep the outer 2-entry candidate directory
 //   (producer archive + distribution.json) so `readCandidate` exercises its own validator.
 let private innerArchiveWithUnsafeEntry (policy: ReleasePolicy.PolicyProjection) (unsafeName: string) =
-    let payloads =
-        policy.PublishedFiles
-        |> List.map (fun name -> name, Encoding.UTF8.GetBytes($"candidate-payload:{policy.ComponentId}:{name}"))
-
-    let manifest = JsonObject()
-    manifest["schemaVersion"] <- JsonValue.Create 1
-    manifest["id"] <- JsonValue.Create policy.ComponentId
-    manifest["version"] <- JsonValue.Create policy.Version
-    manifest["revision"] <- JsonValue.Create "0123456789abcdef0123456789abcdef01234567"
-    manifest["sdk"] <- JsonValue.Create policy.SdkVersion
-    manifest["entryDll"] <- JsonValue.Create policy.EntryDll
-    manifest["archive"] <- JsonValue.Create policy.ArchiveName
-
-    let files = JsonArray()
-    for name, payload in payloads do
-        let file = JsonObject()
-        file["path"] <- JsonValue.Create name
-        file["sha256"] <- JsonValue.Create(sha256Hex payload)
-        files.Add file
-    manifest["files"] <- files
-
-    let archiveFiles = JsonArray()
-    for name in policy.PublishedFiles @ [ "NOTICE.txt"; "distribution.json" ] do
-        archiveFiles.Add(JsonValue.Create name)
-    manifest["archiveFiles"] <- archiveFiles
-
-    let manifestBytes = Encoding.UTF8.GetBytes(manifest.ToJsonString())
+    let payloads = Fixture.policyPayloads policy "candidate-payload"
+    let manifestText = Fixture.policyManifestFor policy "0123456789abcdef0123456789abcdef01234567" payloads
+    let manifestBytes = Encoding.UTF8.GetBytes manifestText
 
     let innerBytes =
         zipBytes
             (payloads
-             @ [ "NOTICE.txt", Encoding.UTF8.GetBytes "candidate notice"
-                 unsafeName, Encoding.UTF8.GetBytes "unsafe"
-                 "distribution.json", manifestBytes ])
+             @ [ unsafeName, Encoding.UTF8.GetBytes "unsafe"
+                 DistributionContract.manifestEntryName, manifestBytes ])
+
     innerBytes, manifestBytes
 
 let private unsafePathRejected (name: string) =

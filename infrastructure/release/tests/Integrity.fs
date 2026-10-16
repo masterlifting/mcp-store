@@ -22,6 +22,7 @@ open System.Text.Json
 open System.Text.Json.Nodes
 
 open BuildProvenance
+open DistributionContract
 open ReleaseCompare
 open ReleaseEvaluate
 open ReleaseMetadata
@@ -168,36 +169,10 @@ let private zipBytes (entries: (string * byte[]) list) =
 
 let private writeCandidate (root: string) (producer: Producer) (revision: string) : Async<Candidate> =
     async {
-        let payloads =
-            producer.EntryAllowlist
-            |> List.filter (fun name -> name <> "NOTICE.txt" && name <> "distribution.json")
-            |> List.map (fun name -> name, Encoding.UTF8.GetBytes($"candidate:{producer.ComponentId}:{name}"))
-            |> fun files -> files @ [ "NOTICE.txt", Encoding.UTF8.GetBytes "release integrity fixture" ]
-
-        let manifest = JsonObject()
-        manifest["schemaVersion"] <- JsonValue.Create 1
-        manifest["id"] <- JsonValue.Create producer.ComponentId
-        manifest["version"] <- JsonValue.Create producer.Version
-        manifest["revision"] <- JsonValue.Create revision
-        manifest["sdk"] <- JsonValue.Create producer.Sdk
-        manifest["entryDll"] <- JsonValue.Create producer.EntryDll
-        manifest["archive"] <- JsonValue.Create producer.ArchiveName
-
-        let files = JsonArray()
-        for name, bytes in payloads do
-            if name <> "NOTICE.txt" then
-                let entry = JsonObject()
-                entry["path"] <- JsonValue.Create name
-                entry["sha256"] <- JsonValue.Create(sha256 bytes)
-                files.Add entry
-        manifest["files"] <- files
-
-        let archiveFiles = JsonArray()
-        for name in producer.EntryAllowlist do archiveFiles.Add(JsonValue.Create name)
-        manifest["archiveFiles"] <- archiveFiles
-
-        let manifestBytes = Encoding.UTF8.GetBytes(manifest.ToJsonString(JsonSerializerOptions(WriteIndented = true)))
-        let archiveBytes = zipBytes (payloads @ [ "distribution.json", manifestBytes ])
+        let payloads = Fixture.policyPayloads producer.Policy "candidate"
+        let manifestText = Fixture.policyManifestFor producer.Policy revision payloads
+        let manifestBytes = Encoding.UTF8.GetBytes manifestText
+        let archiveBytes = zipBytes (payloads @ [ DistributionContract.manifestEntryName, manifestBytes ])
         let archiveSha = sha256 archiveBytes
         let manifestSha = sha256 manifestBytes
 

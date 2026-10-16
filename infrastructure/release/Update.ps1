@@ -26,8 +26,12 @@ $rosterPath = Join-Path $Root "infrastructure\release\Participants.json"
 
 # The exact policy field set the compiled reader also accepts; a drift here fails before any SDK install.
 $script:PolicyFields = @(
-    "componentId"; "version"; "entryDll"; "sdkVersion"; "runtimeVersion"; "platform"; "archiveName"; "assetUri"; "publishedFiles")
+    "componentId"; "version"; "entryDll"; "sdkVersion"; "runtimeVersion"; "platform"; "archiveName"; "assetUri"; "publishedFiles"; "launchArguments")
 $script:ToolchainFields = @("sdkVersion"; "runtimeVersion"; "platform")
+# The launch descriptors are authored policy with the same closed shape the compiled reader accepts: an ordered
+# non-empty list of flag/input/type triples, a closed input-type set, and unique flags and input names.
+$script:LaunchArgumentFields = @("flag"; "input"; "type")
+$script:LaunchArgumentTypes = @("absolute-file"; "absolute-directory"; "sha256")
 
 function Read-Policy {
     param([Parameter(Mandatory = $true)][string]$ConfigPath)
@@ -56,6 +60,37 @@ function Read-Policy {
     $publishedFiles = @($document.publishedFiles)
     if ($publishedFiles.Count -eq 0 -or @($publishedFiles | Where-Object { [string]::IsNullOrWhiteSpace("$_") }).Count -gt 0) {
         throw "policy '$ConfigPath' must declare at least one non-empty publishedFiles entry"
+    }
+
+    # Reject descriptors before SDK setup so bootstrap and compiled policy validation cannot disagree.
+    $launchArguments = $document.launchArguments
+    if ($null -eq $launchArguments -or $launchArguments -isnot [System.Array] -or $launchArguments.Count -eq 0) {
+        throw "policy '$ConfigPath' must declare at least one launchArguments entry"
+    }
+    $argumentFlags = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    $argumentInputs = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    for ($index = 0; $index -lt $launchArguments.Count; $index++) {
+        $argument = $launchArguments[$index]
+
+        if ($null -eq $argument -or $argument -isnot [System.Management.Automation.PSCustomObject]) {
+            throw "policy '$ConfigPath' launchArguments[$index] must be an object"
+        }
+
+        $names = @($argument.PSObject.Properties.Name)
+        $unknown = @($names | Where-Object { $script:LaunchArgumentFields -cnotcontains $_ })
+        if ($unknown.Count -gt 0) {
+            throw "policy '$ConfigPath' launchArguments[$index] declares unknown field(s): $($unknown -join ', ')"
+        }
+
+        foreach ($name in $script:LaunchArgumentFields) {
+            if ($names -cnotcontains $name) { throw "policy '$ConfigPath' launchArguments[$index] is missing field '$name'" }
+            if ([string]::IsNullOrWhiteSpace("$($argument.$name)")) { throw "policy '$ConfigPath' launchArguments[$index] has an empty '$name'" }
+        }
+        if ($script:LaunchArgumentTypes -cnotcontains "$($argument.type)") {
+            throw "policy '$ConfigPath' launchArguments[$index] type '$($argument.type)' must be one of $($script:LaunchArgumentTypes -join ', ')"
+        }
+        if (-not $argumentFlags.Add("$($argument.flag)")) { throw "policy '$ConfigPath' launchArguments[$index] repeats the flag '$($argument.flag)'" }
+        if (-not $argumentInputs.Add("$($argument.input)")) { throw "policy '$ConfigPath' launchArguments[$index] repeats the input '$($argument.input)'" }
     }
 
     return $document

@@ -28,7 +28,8 @@ let private forbiddenFields =
       "assetUri"
       "entryAllowlist"
       "publishedFiles"
-      "entryDll" ]
+      "entryDll"
+      "launchArguments" ]
 
 // Mandatory AC-06: the current release transaction supports exactly Dotnet and Workflow. The supported set is an explicit validation constraint, not a roster mirror, and is not versioned, mirrored, or duplicated into the roster file. A roster that contains a different componentId (or omits one) is rejected as drift.
 let supportedComponentIds : Set<string> =
@@ -98,7 +99,7 @@ let private parseRoster (text: string) (sourcePath: string) : Result<Roster, Rel
 
                             match forbidden with
                             | Some field ->
-                                failure <- Some(MalformedArtifact(sourcePath, $"the enrollment roster entry at index {index - 1} has forbidden field '{field}'; versions, SDKs, allowlists, and URIs must stay in each producer's Config.json"))
+                                failure <- Some(MalformedArtifact(sourcePath, $"the enrollment roster entry at index {index - 1} has forbidden field '{field}'; versions, SDKs, allowlists, URIs, and launch descriptors must stay in each producer's Config.json"))
                             | None ->
                                 match requireStringField entry "componentId" sourcePath, requireStringField entry "configPath" sourcePath with
                                 | Error error, _ -> failure <- Some error

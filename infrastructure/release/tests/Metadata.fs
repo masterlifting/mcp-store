@@ -50,7 +50,7 @@ let assertErrorMatches name fragment (result: Result<'a, ReleaseError>) =
             failures.Add(sprintf "%s: expected fragment '%s' got '%s'" name fragment message)
 
 let private tempRoot = Path.Combine(Path.GetTempPath(), "mcp-release-metadata-tests-" + Guid.NewGuid().ToString("N"))
-let private completeProjection = {
+let private completeProjection: ProducerMetadataProjection = {
     SchemaVersion = metadataSchemaVersion
     ComponentId = "dotnet"
     Version = "1.0.4"
@@ -152,6 +152,47 @@ let parseRejectsEmptyRequiredField () =
     let node = System.Text.Json.Nodes.JsonNode.Parse(render completeProjection).AsObject()
     node.["publishedRevision"] <- System.Text.Json.Nodes.JsonValue.Create ""
     assertErrorMatches "parse rejects empty publishedRevision" "empty required fields" (parse (node.ToJsonString()))
+// An asset name that is not a single file name must be rejected as a typed malformed value.
+let parseRejectsUnsafeArchiveName () =
+    let result = parse (render ({ completeProjection with ArchiveName = "../../outside.zip" }))
+
+    match result with
+    | Error(MalformedArtifact(location, detail)) when
+        location = "metadata"
+        && detail = "the metadata projection 'archiveName' is not a safe slash-free single file name"
+        ->
+        passed <- passed + 1
+    | Error error ->
+        failed <- failed + 1
+        failures.Add(sprintf "parse unsafe archiveName: expected the basename diagnostic, got '%s'" (ReleaseError.message error))
+    | Ok _ ->
+        failed <- failed + 1
+        failures.Add "parse unsafe archiveName: expected Error got Ok"
+// The renderer cannot emit a duplicate key, so the duplicate is supplied as raw document text.
+let parseRejectsDuplicateArchiveSha256 () =
+    let duplicated =
+        """{
+  "schemaVersion": 1,
+  "componentId": "dotnet",
+  "version": "1.0.4",
+  "assetUri": "https://github.com/masterlifting/mcp-store/releases/download/dotnet/v1.0.4.zip",
+  "archiveName": "v1.0.4.zip",
+  "archiveSha256": "df9a32648067f2ec5c454e3402f8ca50bfc98151936ba662316df5163b5f58c7",
+  "archiveSha256": "df9a32648067f2ec5c454e3402f8ca50bfc98151936ba662316df5163b5f58c7",
+  "manifestSha256": "e445474acf4abdb27a809a75213929fd37b1a2f43d56b09320f0919deb0681b1",
+  "publishedRevision": "3612e8e6dd4655543e6d4b9dc0edee9c24b82bf1"
+}"""
+
+    match parse duplicated with
+    | Error(MalformedArtifact(location, detail)) when location = "metadata" && detail = "duplicate JSON key 'archiveSha256'" ->
+        passed <- passed + 1
+    | Error error ->
+        failed <- failed + 1
+        failures.Add(sprintf "parse duplicate archiveSha256: expected the duplicate-key diagnostic, got '%s'" (ReleaseError.message error))
+    | Ok _ ->
+        failed <- failed + 1
+        failures.Add "parse duplicate archiveSha256: expected Error got Ok"
+
 let writeToFileDeterministic () = async {
     let path = Path.Combine(tempRoot, "metadata.json")
     let! firstDigest = writeToFileAsync path completeProjection
@@ -246,6 +287,8 @@ let runSuite () = async {
     parseRejectsMissingRequiredFields ()
     parseRejectsMalformedJson ()
     parseRejectsEmptyRequiredField ()
+    parseRejectsUnsafeArchiveName ()
+    parseRejectsDuplicateArchiveSha256 ()
     do! writeToFileDeterministic ()
     do! sha256OfFileAsyncDeterministic ()
     do! writeToFileTwiceDeterministic ()

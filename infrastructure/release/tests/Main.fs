@@ -16,6 +16,7 @@ let private suites =
             [ Enrollment.tests
               Coherence.tests
               Compare.tests
+              Contract.tests
               Evaluate.tests
               Historical.tests
               Invocation.tests

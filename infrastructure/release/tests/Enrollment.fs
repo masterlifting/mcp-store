@@ -7,6 +7,7 @@ open System.Text.Json.Nodes
 open System.Text.RegularExpressions
 open Expecto
 open BuildProvenance
+open DistributionContract
 open ReleaseCompare
 open ReleaseEvaluate
 open ReleaseMetadata
@@ -78,6 +79,13 @@ let private configText (componentId: string) (version: string) (entryDll: string
     let files = System.Text.Json.Nodes.JsonArray()
     files.Add(System.Text.Json.Nodes.JsonValue.Create entryDll) |> ignore
     node["publishedFiles"] <- files
+    let launchArguments = System.Text.Json.Nodes.JsonArray()
+    let argument = System.Text.Json.Nodes.JsonObject()
+    argument["flag"] <- System.Text.Json.Nodes.JsonValue.Create "--fixture-input"
+    argument["input"] <- System.Text.Json.Nodes.JsonValue.Create "fixtureInput"
+    argument["type"] <- System.Text.Json.Nodes.JsonValue.Create "absolute-file"
+    launchArguments.Add argument
+    node["launchArguments"] <- launchArguments
     node.ToJsonString(System.Text.Json.JsonSerializerOptions(WriteIndented = true))
 
 let private writeConfig root configPath componentId version entryDll sdk runtime platform =
@@ -339,7 +347,8 @@ let private rosterLoaderAndValidationRejectDuplicatesIncompleteMembershipAndPoli
                           "assetUri"
                           "entryAllowlist"
                           "publishedFiles"
-                          "entryDll" ]
+                          "entryDll"
+                          "launchArguments" ]
 
                     for field in forbiddenFields do
                         writeRoster root [ "dotnet", "dotnet/release/Config.json" ] (Some (field, "copied-policy")) |> ignore
@@ -417,6 +426,15 @@ let private genericIdentityAndMetadataUseProducerOwnedToolchains =
                 { ComponentId = componentId
                   Version = version
                   ArchiveName = archiveName
+                  SourceRepository = "https://github.com/masterlifting/mcp-store"
+                  Producer =
+                    { Sdk = sdk
+                      Runtime = runtime
+                      Platform = platform }
+                  Launch =
+                    { Kind = launchKindDotnetExec
+                      Entrypoint = entryDll
+                      Arguments = [ { Flag = "--fixture-input"; Input = "fixtureInput"; Type = AbsoluteFile } ] }
                   EntryAllowlist = [] }
             let dto: CandidateDto =
                 { Contract = contract

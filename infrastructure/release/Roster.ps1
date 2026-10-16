@@ -4,7 +4,7 @@
 
 $script:ReleaseSupportedComponentIds = @("dotnet", "workflow")
 $script:ReleaseForbiddenRosterFields = @(
-    "version"; "sdkVersion"; "runtimeVersion"; "platform"; "archiveName"; "assetUri"; "entryAllowlist"; "publishedFiles"; "entryDll")
+    "version"; "sdkVersion"; "runtimeVersion"; "platform"; "archiveName"; "assetUri"; "entryAllowlist"; "publishedFiles"; "entryDll"; "launchArguments")
 
 function Get-ReleaseRoster {
     [CmdletBinding()]
@@ -39,7 +39,7 @@ function Get-ReleaseRoster {
 
         foreach ($field in $script:ReleaseForbiddenRosterFields) {
             if ($entry.PSObject.Properties.Name -contains $field) {
-                throw "the enrollment roster entry at index $($index - 1) has forbidden field '$field'; versions, SDKs, allowlists, and URIs must stay in each producer's Config.json"
+                throw "the enrollment roster entry at index $($index - 1) has forbidden field '$field'; versions, SDKs, allowlists, URIs, and launch descriptors must stay in each producer's Config.json"
             }
         }
 

@@ -191,29 +191,6 @@ let private writeCanonicalCandidate (label: string) : string * string =
     let sha = Fixture.sha256Hex (File.ReadAllBytes archivePath)
     archivePath, sha
 
-let private canonicalPayload (manifestBytes: byte[]) =
-    [
-        "FSharp.Core.dll", Encoding.UTF8.GetBytes "fsharp-core-fixture"
-        "Mcp.Dotnet.deps.json", Encoding.UTF8.GetBytes "{\"runtimeOptions\":{\"tfm\":\"net11.0\"}}"
-        "Mcp.Dotnet.dll", Encoding.UTF8.GetBytes "dotnet-dll-fixture"
-        "Mcp.Dotnet.runtimeconfig.json", Encoding.UTF8.GetBytes "{\"runtimeOptions\":{\"tfm\":\"net11.0\"}}"
-        "NOTICE.txt", Encoding.UTF8.GetBytes "mcp-store notice"
-        "distribution.json", manifestBytes
-    ]
-
-let private manifestJson (revision: string) =
-    let manifest = JsonObject()
-    manifest.["schemaVersion"] <- JsonValue.Create 1
-    manifest.["id"] <- JsonValue.Create "dotnet"
-    manifest.["version"] <- JsonValue.Create "1.0.4"
-    manifest.["revision"] <- JsonValue.Create revision
-    manifest.["sdk"] <- JsonValue.Create "11.0.100-rc.1.26425.128"
-    manifest.["entryDll"] <- JsonValue.Create "Mcp.Dotnet.dll"
-    manifest.["archive"] <- JsonValue.Create "v1.0.4.zip"
-    manifest.["files"] <- JsonArray()
-    manifest.["archiveFiles"] <- JsonArray()
-    manifest.ToJsonString(JsonSerializerOptions())
-
 let private sha256Hex (bytes: byte[]) =
     SHA256.HashData bytes |> Convert.ToHexString |> fun v -> v.ToLowerInvariant()
 
