@@ -205,7 +205,7 @@ let compare (existing: ProducerMetadataProjection) (expected: ProducerMetadataPr
 let sha256OfFileAsync (path: string) : Async<Result<string, ReleaseError>> =
     async {
         try
-            let! bytes = File.ReadAllBytesAsync(path) |> Async.AwaitTask
+            let! bytes = awaitOperational (File.ReadAllBytesAsync path)
             let digest = SHA256.HashData bytes |> Convert.ToHexString |> fun v -> v.ToLowerInvariant()
             return Ok digest
         with
@@ -218,7 +218,7 @@ let sha256OfFileAsync (path: string) : Async<Result<string, ReleaseError>> =
 let readFromFile (path: string) : Async<Result<ProducerMetadataProjection, ReleaseError>> =
     async {
         try
-            let! text = File.ReadAllTextAsync(path) |> Async.AwaitTask
+            let! text = awaitOperational (File.ReadAllTextAsync path)
             return parse text
         with
         | :? IOException as error -> return Error(FileFailure("read", path, error.Message))
@@ -232,7 +232,7 @@ let writeToFileAsync (path: string) (projection: ProducerMetadataProjection) : A
         let bytes = Encoding.UTF8.GetBytes rendered
 
         try
-            do! File.WriteAllBytesAsync(path, bytes) |> Async.AwaitTask
+            do! awaitComplete (File.WriteAllBytesAsync(path, bytes))
             let digest = SHA256.HashData bytes |> Convert.ToHexString |> fun v -> v.ToLowerInvariant()
             return Ok digest
         with

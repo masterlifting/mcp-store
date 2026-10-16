@@ -7,6 +7,7 @@ open System.Text.RegularExpressions
 open System.Text.Json.Nodes
 open Expecto
 open ReleaseTestProcess
+open BuildProvenance
 
 let private repoRoot = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "..", ".."))
 let private currentParticipants = [ "dotnet", "dotnet/release/Config.json"; "workflow", "workflow/release/Config.json" ]
@@ -135,6 +136,76 @@ let private runPowerShellScript (workingDirectory: string) (scriptPath: string) 
         | Ok result -> return result
         | Error error -> return failwith error
     }
+
+// The workflow record step consumes the runner's canonical summary; the fixture writes exactly the field
+// names the step reads so the step's own parsing and comparison run instead of a stub.
+let private writeReleaseResolution
+    (temp: string)
+    (componentId: string)
+    (version: string)
+    (metadataLocalPath: string)
+    (assetUri: string)
+    (archiveName: string)
+    (archiveSha: string)
+    (manifestSha: string)
+    (publishedRevision: string) =
+    let document = JsonObject()
+    document["status"] <- JsonValue.Create "published"
+    document["reason"] <- JsonValue.Create "fixture resolution"
+    document["componentId"] <- JsonValue.Create componentId
+    document["version"] <- JsonValue.Create version
+    document["archiveName"] <- JsonValue.Create archiveName
+    document["assetUri"] <- JsonValue.Create assetUri
+    document["metadataLocalPath"] <- JsonValue.Create metadataLocalPath
+    document["publishedArchiveSha256"] <- JsonValue.Create archiveSha
+    document["publishedManifestSha256"] <- JsonValue.Create manifestSha
+    document["publishedRevision"] <- JsonValue.Create publishedRevision
+    document["publishedMetadataSha256"] <- JsonValue.Create (String.replicate 64 "0")
+    File.WriteAllText(Path.Combine(temp, $"publish-stdout-{componentId}.json"), document.ToJsonString())
+    File.WriteAllText(Path.Combine(temp, $"publish-exit-{componentId}.txt"), "0")
+
+// The record step starts no external process, so it needs only its own runner environment, not the stub PATH
+// the Workflow CI step uses.
+let private runRecordStep
+    (workingDirectory: string)
+    (scriptPath: string)
+    (runnerTemp: string)
+    (workspace: string)
+    (summaryPath: string)
+    (outputPath: string) =
+    async {
+        let info = ProcessStartInfo("pwsh")
+        info.WorkingDirectory <- workingDirectory
+        info.UseShellExecute <- false
+        info.RedirectStandardOutput <- true
+        info.RedirectStandardError <- true
+        [ "-NoProfile"; "-File"; scriptPath ] |> List.iter info.ArgumentList.Add
+        [ "GITHUB_TOKEN"; "GH_TOKEN"; "MCP_RELEASE_DO_UPLOAD" ]
+        |> List.iter (fun name -> info.EnvironmentVariables.Remove name |> ignore)
+        info.EnvironmentVariables["RUNNER_TEMP"] <- runnerTemp
+        info.EnvironmentVariables["GITHUB_WORKSPACE"] <- workspace
+        info.EnvironmentVariables["GITHUB_STEP_SUMMARY"] <- summaryPath
+        info.EnvironmentVariables["GITHUB_OUTPUT"] <- outputPath
+        info.EnvironmentVariables["RELEASE_COMPONENTS"] <- "[\"dotnet\",\"workflow\"]"
+        info.EnvironmentVariables["RELEASE_DOTNET_VERSION"] <- "1.0.4"
+        info.EnvironmentVariables["RELEASE_WORKFLOW_VERSION"] <- "1.0.5"
+
+        match! ReleaseTestProcess.capture 60000 info with
+        | Ok result -> return result
+        | Error error -> return failwith error
+    }
+
+let private readRecordJson (path: string) =
+    JsonNode.Parse(File.ReadAllText path).AsObject()
+
+let private expectTypedFileFailure (label: string) (expectedOperation: string) (expectedPath: string) (result: Result<'a, ReleaseError>) =
+    match result with
+    | Ok _ -> failtestf "%s returned Ok where the absent publication directory must stay a typed failure" label
+    | Error(FileFailure(operation, path, detail)) ->
+        Expect.equal operation expectedOperation $"{label} names its operation"
+        Expect.equal path expectedPath $"{label} names the file it could not use"
+        Expect.isTrue (not (String.IsNullOrWhiteSpace detail)) $"{label} carries the underlying diagnostic"
+    | Error error -> failtestf "%s returned an unexpected error case: %s" label (ReleaseError.message error)
 
 let private containsDiagnostic (fragment: string) (text: string) =
     let withoutAnsi = Regex.Replace(text, "\u001b\\[[0-9;]*m", "")
@@ -430,6 +501,140 @@ let private releaseWorkflowStopsBeforePublicationWhenWorkflowTestsFail =
                 })
     }
 
+// One trusted publication path is shared by the runner's public ensurePublicationDirectory seam, its metadata
+// boundary, and the workflow record step: the runner creates the runner-temp publication directory, and every
+// later writer, reader, and consumer of the projection must resolve exactly that path.
+let private metadataBoundaryAndRecordStepShareTheTrustedPublicationPath =
+    testCaseAsync "the record step verifies only the runner's trusted publication projection" <| async {
+        do!
+            withRoot (fun root ->
+                async {
+                    let runnerTemp = Path.Combine(root, "runner-temp")
+                    let workspace = Path.Combine(root, "workspace")
+                    let publication = Path.Combine(runnerTemp, "publication")
+                    Directory.CreateDirectory runnerTemp |> ignore
+                    Directory.CreateDirectory workspace |> ignore
+
+                    let assetUri = "https://example.test/releases/download/dotnet/v1.0.4.zip"
+                    let archiveName = "v1.0.4.zip"
+                    let archiveSha = String.replicate 64 "1"
+                    let manifestSha = String.replicate 64 "2"
+                    let publishedRevision = String.replicate 40 "4"
+                    let projection =
+                        ReleaseMetadata.makeProjection
+                            "dotnet" "1.0.4" assetUri archiveName archiveSha manifestSha publishedRevision
+                            (Some "11.0.100-rc.1.26425.128") (Some "11.0.0-rc.1.26425.128") (Some "win-x64")
+                    let metadataPath = Path.Combine(publication, ReleaseMetadata.metadataAssetName "dotnet" "1.0.4")
+
+                    // While the private publication directory is absent, every metadata file operation must stay
+                    // the typed FileFailure instead of escaping as an AggregateException.
+                    let! absentWrite = ReleaseMetadata.writeToFileAsync metadataPath projection
+                    let! absentRead = ReleaseMetadata.readFromFile metadataPath
+                    let! absentHash = ReleaseMetadata.sha256OfFileAsync metadataPath
+                    Expect.isFalse (Directory.Exists publication) "the private publication directory starts absent"
+                    expectTypedFileFailure "the metadata write" "write" metadataPath absentWrite
+                    expectTypedFileFailure "the metadata read" "read" metadataPath absentRead
+                    expectTypedFileFailure "the metadata hash" "hash" metadataPath absentHash
+
+                    // The production runner owns the creation of its private directory; the candidate root is a
+                    // fresh path inside RUNNER_TEMP, so the case exercises that creation instead of pre-creating it.
+                    match ReleaseRunner.ensurePublicationDirectory (Path.Combine(runnerTemp, "candidate-dotnet")) with
+                    | Ok directory ->
+                        Expect.equal directory publication "the runner creates and returns its runner-temp publication directory"
+                        Expect.isTrue (Directory.Exists directory) "the runner's publication directory exists after creation"
+                    | Error error -> failtestf "the runner failed to create its publication directory: %s" (ReleaseError.message error)
+
+                    let! writeResult = ReleaseMetadata.writeToFileAsync metadataPath projection
+                    Expect.isTrue (Result.isOk writeResult) $"the production metadata writer emits the trusted projection: {writeResult}"
+
+                    // dotnet reports the trusted runner-temp path; workflow reports a checkout path, which the
+                    // retired workspace rule accepted and the corrected step must refuse.
+                    let workflowMetadataPath = Path.Combine(workspace, "publication", ReleaseMetadata.metadataAssetName "workflow" "1.0.5")
+                    writeReleaseResolution runnerTemp "dotnet" "1.0.4" metadataPath assetUri archiveName archiveSha manifestSha publishedRevision
+                    writeReleaseResolution runnerTemp "workflow" "1.0.5" workflowMetadataPath "https://example.test/releases/download/workflow/v1.0.5.zip" "v1.0.5.zip" archiveSha manifestSha publishedRevision
+
+                    let scriptPath = Path.Combine(root, "record-step.ps1")
+                    File.WriteAllText(scriptPath, extractWorkflowStep (baselineWorkflow ()) "record the structured release results")
+                    let summaryPath = Path.Combine(root, "step-summary.md")
+                    let outputPath = Path.Combine(root, "step-output.txt")
+                    File.WriteAllText(summaryPath, "")
+                    File.WriteAllText(outputPath, "")
+
+                    let! code, stdout, stderr = runRecordStep root scriptPath runnerTemp workspace summaryPath outputPath
+                    Expect.equal code 0 $"the record step completes on every enrolled component: {stdout}{stderr}"
+
+                    let evidenceRoot = Path.Combine(runnerTemp, "release-evidence")
+                    let dotnetRecord = readRecordJson (Path.Combine(evidenceRoot, "release-status-dotnet.json"))
+                    Expect.equal (dotnetRecord["verified"].GetValue<bool>()) true "the trusted publication projection is verified evidence"
+                    Expect.equal (dotnetRecord["projectionKind"].GetValue<string>()) "verified-projection" "the trusted publication projection is the verified kind"
+                    Expect.equal (dotnetRecord["diagnostics"].AsArray().Count) 0 "a verified projection records no diagnostic"
+                    let copied = Path.Combine(evidenceRoot, "published-metadata-dotnet.json")
+                    Expect.isTrue (File.Exists copied) "the verified projection is copied into the evidence set"
+                    Expect.equal (Convert.ToHexString (File.ReadAllBytes metadataPath)) (Convert.ToHexString (File.ReadAllBytes copied)) "the copied projection is byte-equal to the runner's written projection"
+                    let copiedProjection = readRecordJson copied
+                    Expect.equal (copiedProjection["schemaVersion"].GetValue<int>()) 1 "the copied projection carries schemaVersion 1"
+                    Expect.equal (copiedProjection["componentId"].GetValue<string>()) "dotnet" "the copied projection carries the looped component"
+                    Expect.equal (copiedProjection["version"].GetValue<string>()) "1.0.4" "the copied projection carries the trusted version"
+                    Expect.equal (copiedProjection["assetUri"].GetValue<string>()) assetUri "the copied projection carries the resolution assetUri"
+                    Expect.equal (copiedProjection["archiveName"].GetValue<string>()) archiveName "the copied projection carries the resolution archiveName"
+                    Expect.equal (copiedProjection["archiveSha256"].GetValue<string>()) archiveSha "the copied projection carries the published archive hash"
+                    Expect.equal (copiedProjection["manifestSha256"].GetValue<string>()) manifestSha "the copied projection carries the published manifest hash"
+                    Expect.equal (copiedProjection["publishedRevision"].GetValue<string>()) publishedRevision "the copied projection carries the published revision"
+
+                    let workflowRecord = readRecordJson (Path.Combine(evidenceRoot, "release-status-workflow.json"))
+                    Expect.equal (workflowRecord["verified"].GetValue<bool>()) false "a checkout projection path is not verified evidence"
+                    Expect.equal (workflowRecord["projectionKind"].GetValue<string>()) "status-evidence-only" "an unexpected location stays unverified"
+                    let workflowDiagnostics =
+                        workflowRecord["diagnostics"].AsArray()
+                        |> Seq.map (fun node -> node.GetValue<string>())
+                        |> String.concat " "
+                    Expect.isTrue
+                        (workflowDiagnostics.Contains("inside the checkout", StringComparison.Ordinal))
+                        $"the checkout location is named as the refusal: {workflowDiagnostics}"
+
+                    // D1: the trusted location alone is not proof; the projection must also carry the declared JSON
+                    // types. Re-run the same record block over the still-trusted path, reusing the runner-written
+                    // projection bytes and flipping only schemaVersion to a JSON string, so the type guard is the
+                    // single faulting check while every hash, revision and other field stays exact.
+                    let malformed = readRecordJson metadataPath
+                    malformed["schemaVersion"] <- JsonValue.Create "1"
+                    File.WriteAllText(metadataPath, malformed.ToJsonString())
+                    let rereadMalformed = readRecordJson metadataPath
+                    Expect.equal (rereadMalformed["schemaVersion"].GetValue<string>()) "1" "the malformed variant carries schemaVersion as a JSON string at the trusted path"
+
+                    // The positive run above already copied this test-owned evidence file; clear exactly that one
+                    // copy so the absence assertion below proves the refused projection was not re-copied.
+                    if File.Exists copied then File.Delete copied
+
+                    let! malformedCode, malformedStdout, malformedStderr = runRecordStep root scriptPath runnerTemp workspace summaryPath outputPath
+                    Expect.equal malformedCode 0 $"the record step completes on a type-invalid projection: {malformedStdout}{malformedStderr}"
+
+                    let malformedRecord = readRecordJson (Path.Combine(evidenceRoot, "release-status-dotnet.json"))
+                    Expect.equal (malformedRecord["verified"].GetValue<bool>()) false "a JSON string schemaVersion is not verified evidence"
+                    Expect.equal (malformedRecord["projectionKind"].GetValue<string>()) "status-evidence-only" "a type-invalid projection stays status-only evidence"
+                    let malformedDiagnostics =
+                        malformedRecord["diagnostics"].AsArray()
+                        |> Seq.map (fun node -> node.GetValue<string>())
+                        |> String.concat " "
+                    Expect.isTrue
+                        (malformedDiagnostics.Contains("the verified projection 'schemaVersion' is a JSON string, not the JSON integer '1'", StringComparison.Ordinal))
+                        $"the type fault is named exactly: {malformedDiagnostics}"
+                    Expect.isFalse (File.Exists copied) "the refused projection is not copied into the evidence set"
+
+                    // The same public seam fails closed when the publication path is already occupied by a plain
+                    // file: the runner's typed mkdir refusal, which the record step never sees.
+                    let blockedRoot = Path.Combine(root, "blocked-runner-temp")
+                    Directory.CreateDirectory blockedRoot |> ignore
+                    let blockedPublication = Path.Combine(blockedRoot, "publication")
+                    File.WriteAllText(blockedPublication, "occupied")
+                    expectTypedFileFailure
+                        "the blocked publication creation"
+                        "mkdir"
+                        blockedPublication
+                        (ReleaseRunner.ensurePublicationDirectory (Path.Combine(blockedRoot, "candidate-dotnet")))
+                })
+    }
+
 let tests =
     testList
         "cross-stage coherence"
@@ -437,4 +642,5 @@ let tests =
           coherenceGuardRejectsRosterPolicyAndInventoryDrift
           coherenceGuardUsesExplicitProjectionAcrossStepOutputs
           releaseWorkflowStopsBeforePublicationWhenWorkflowTestsFail
-          releaseWorkflowRequiresFreshPreparationBuilderAndPublisherJobs ]
+          releaseWorkflowRequiresFreshPreparationBuilderAndPublisherJobs
+          metadataBoundaryAndRecordStepShareTheTrustedPublicationPath ]
