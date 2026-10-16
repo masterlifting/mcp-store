@@ -134,8 +134,8 @@ let private stringMemberOrNull (element: JsonElement) (name: string) : string =
     | Some value when value.ValueKind = JsonValueKind.String -> value.GetString()
     | _ -> null
 
-// A duplicate key anywhere in the document is rejected so two readers cannot silently disagree.
-let private rejectDuplicateKeys (root: JsonElement) : Result<unit, string> =
+// A duplicate key anywhere in the document is rejected so two readers cannot silently disagree; the pin parser reuses this routine.
+let rejectDuplicateKeys (root: JsonElement) : Result<unit, string> =
     let rec walk (element: JsonElement) : Result<unit, string> =
         match element.ValueKind with
         | JsonValueKind.Object ->
@@ -376,16 +376,20 @@ type private MemberReader(ownerName: string) =
                 text
 
     member _.Int(owner: JsonElement, name: string) : int =
+        let notAnInteger () =
+            failure <- Some $"{ownerName} field '{name}' is not an integer"
+            0
+
         match tryProperty owner name with
         | None ->
             failure <- Some $"{ownerName} is missing required field '{name}'"
             0
-        | Some value ->
+        // TryGetInt32 throws instead of returning false for a non-Number kind, so the kind guard comes first.
+        | Some value when value.ValueKind = JsonValueKind.Number ->
             match value.TryGetInt32() with
             | true, parsed -> parsed
-            | _ ->
-                failure <- Some $"{ownerName} field '{name}' is not an integer"
-                0
+            | _ -> notAnInteger ()
+        | Some _ -> notAnInteger ()
 
     member _.Object(owner: JsonElement, name: string) : JsonElement option =
         match tryProperty owner name with

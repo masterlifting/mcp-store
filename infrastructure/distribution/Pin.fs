@@ -71,8 +71,8 @@ let toJsonNode (pin: Pin) : JsonNode =
 let render (pin: Pin) : string =
     (toJsonNode pin).ToJsonString(JsonSerializerOptions(WriteIndented = true))
 
-// Unknown fields, mismatched schema versions, missing fields, malformed JSON, and
-// malformed hashes or revisions fail closed.
+// Unknown fields, duplicate keys, mismatched schema versions, missing fields,
+// malformed JSON, and malformed hashes or revisions fail closed.
 let parse (text: string) : Result<Pin, ReleaseError> =
     let mutable failure: ReleaseError option = None
 
@@ -83,60 +83,72 @@ let parse (text: string) : Result<Pin, ReleaseError> =
     let mutable result: Pin option = None
 
     try
-        let document = JsonNode.Parse text
+        use document =
+            JsonDocument.Parse(
+                text,
+                JsonDocumentOptions(AllowTrailingCommas = false, CommentHandling = JsonCommentHandling.Disallow, MaxDepth = 8)
+            )
 
-        if isNull document then
+        let root = document.RootElement
+
+        if root.ValueKind = JsonValueKind.Null then
             failure <- Some(MalformedArtifact("metadata", "the document is empty"))
+        elif root.ValueKind <> JsonValueKind.Object then
+            failure <- Some(MalformedArtifact("metadata", "the metadata projection is not a JSON object"))
         else
-            let root = document.AsObject()
-            let unknown = root |> Seq.map (fun pair -> pair.Key) |> Seq.tryFind (fun name -> not (List.contains name (requiredFields @ optionalFields)))
+            let tryField (name: string) : JsonElement option =
+                let mutable value = Unchecked.defaultof<JsonElement>
 
-            match unknown with
-            | Some name -> failure <- Some(MalformedArtifact("metadata", $"the metadata projection contains unknown field '{name}'"))
-            | None ->
+                if root.TryGetProperty(name, &value) then Some value else None
+
+            let unknown =
+                root.EnumerateObject()
+                |> Seq.map (fun property -> property.Name)
+                |> Seq.tryFind (fun name -> not (List.contains name (requiredFields @ optionalFields)))
+
+            // Duplicate keys surface only when the object is materialized, so the shared strict check runs first.
+            match DistributionContract.rejectDuplicateKeys root, unknown with
+            | Error detail, _ -> failure <- Some(MalformedArtifact("metadata", detail))
+            | Ok (), Some name -> failure <- Some(MalformedArtifact("metadata", $"the metadata projection contains unknown field '{name}'"))
+            | Ok (), None ->
 
                 let readStr (name: string) : Result<string, ReleaseError> =
-                    if not (root.ContainsKey name) then
-                        fail(MalformedArtifact("metadata", $"the metadata projection is missing required field '{name}'"))
-                    else
-                        let valueNode = root.[name]
-
-                        if isNull valueNode then
-                            fail(MalformedArtifact("metadata", $"the metadata projection field '{name}' is null"))
-                        else
-                            try
-                                Ok(valueNode.GetValue<string>())
-                            with
-                            | :? InvalidOperationException as error ->
-                                fail(MalformedArtifact("metadata", $"the metadata projection field '{name}' is not a string: {error.Message}"))
+                    match tryField name with
+                    | None -> fail(MalformedArtifact("metadata", $"the metadata projection is missing required field '{name}'"))
+                    | Some value when value.ValueKind = JsonValueKind.Null ->
+                        fail(MalformedArtifact("metadata", $"the metadata projection field '{name}' is null"))
+                    | Some value when value.ValueKind <> JsonValueKind.String ->
+                        fail(MalformedArtifact("metadata", $"the metadata projection field '{name}' is not a string"))
+                    | Some value -> Ok(value.GetString())
 
                 // An optional field may be omitted, but a present field must be a
                 // non-empty string; null or a wrong type is malformed, not absent.
                 let readOptional (name: string) : Result<string option, ReleaseError> =
-                    if not (root.ContainsKey name) then
-                        Ok None
-                    else
-                        let valueNode = root.[name]
+                    match tryField name with
+                    | None -> Ok None
+                    | Some value when value.ValueKind = JsonValueKind.Null ->
+                        fail(MalformedArtifact("metadata", $"the metadata projection field '{name}' is null"))
+                    | Some value when value.ValueKind <> JsonValueKind.String ->
+                        fail(MalformedArtifact("metadata", $"the metadata projection field '{name}' is not a string"))
+                    | Some value ->
+                        let fieldText = value.GetString()
 
-                        if isNull valueNode then
-                            fail(MalformedArtifact("metadata", $"the metadata projection field '{name}' is null"))
+                        if String.IsNullOrEmpty fieldText then
+                            fail(MalformedArtifact("metadata", $"the metadata projection field '{name}' is empty"))
                         else
-                            try
-                                let value = valueNode.GetValue<string>()
-
-                                if String.IsNullOrEmpty value then
-                                    fail(MalformedArtifact("metadata", $"the metadata projection field '{name}' is empty"))
-                                else
-                                    Ok(Some value)
-                            with
-                            | :? InvalidOperationException as error ->
-                                fail(MalformedArtifact("metadata", $"the metadata projection field '{name}' is not a string: {error.Message}"))
+                            Ok(Some fieldText)
 
                 let schemaResult =
-                    try
-                        Ok(root.["schemaVersion"].GetValue<int>())
-                    with
-                    | _ -> fail(MalformedArtifact("metadata", "the metadata projection 'schemaVersion' is not an integer"))
+                    let notAnInteger () =
+                        fail(MalformedArtifact("metadata", "the metadata projection 'schemaVersion' is not an integer"))
+
+                    match tryField "schemaVersion" with
+                    // TryGetInt32 throws instead of returning false for a non-Number kind, so the kind guard comes first.
+                    | Some value when value.ValueKind = JsonValueKind.Number ->
+                        match value.TryGetInt32() with
+                        | true, parsed -> Ok parsed
+                        | _ -> notAnInteger ()
+                    | _ -> notAnInteger ()
 
                 match schemaResult with
                 | Error _ -> ()
@@ -185,6 +197,9 @@ let parse (text: string) : Result<Pin, ReleaseError> =
                         elif not (DistributionContract.isRevision publishedRevision) then
                             failure <-
                                 Some(MalformedArtifact("metadata", "the metadata projection 'publishedRevision' is not a 40-character lowercase hex revision"))
+                        elif not (DistributionContract.isSafeRelativePath archiveName) || archiveName.Contains '/' then
+                            failure <-
+                                Some(MalformedArtifact("metadata", "the metadata projection 'archiveName' is not a safe slash-free single file name"))
                         else
                             result <-
                                 Some

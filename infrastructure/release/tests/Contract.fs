@@ -314,11 +314,28 @@ let runtimeRequirementDerivation () =
         "the packaged runtime configuration declares no 'runtimeOptions' object"
         """{"configProperties":{}}"""
 
+// A non-numeric schemaVersion must stay inside the Result boundary as a typed malformed-manifest error.
+let manifestNonNumericSchemaVersion () =
+    let result = parse (manifestText (fun node -> node["schemaVersion"] <- JsonValue.Create "2"))
+
+    match result with
+    | Error(MalformedArtifact(location, detail)) when
+        location = manifestEntryName && detail = "the manifest field 'schemaVersion' is not an integer"
+        ->
+        passed <- passed + 1
+    | Error error ->
+        recordFailure
+            "a string schemaVersion is a typed malformed-manifest error"
+            (sprintf "expected the non-integer diagnostic, got '%s'" (ReleaseError.message error))
+    | Ok _ ->
+        recordFailure "a string schemaVersion is a typed malformed-manifest error" "expected the non-integer diagnostic, got Ok"
+
 let tests =
     testCaseAsync "shared distribution contract assertions" <| async {
         arbitraryRootResolution ()
         bothProducerPolicies ()
         runtimeRequirementDerivation ()
+        manifestNonNumericSchemaVersion ()
         do! exactFailureClasses ()
         printfn "contract-tests summary: passed=%d failed=%d" passed failed
         Expect.equal 0 failed (String.concat Environment.NewLine failures)
