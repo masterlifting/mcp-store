@@ -23,16 +23,19 @@ let private assertIdentity (field: string) (expected: string) (actual: string) :
 
 // Validates the packaged manifest against the producer's canonical policy and the
 // committed clean HEAD, then writes the canonical consumer pin for one producer.
+// Callers pass the canonical Config.json path, never a parsed projection: FSI gives
+// each #load chain its own PolicyProjection, an incompatible type across helpers.
 // Returns the archive hash, manifest hash, and validated revision for the caller's
 // diagnostics.
 let writeConsumerPins
     (root: string)
-    (policy: PolicyProjection)
+    (configPath: string)
     (manifestPath: string)
     (archivePath: string)
     (outputPath: string)
     : Async<Result<string * string * string, ReleaseError>> =
     releaseResult {
+        let! policy = ReleasePolicy.parse configPath
         do! BuildProvenance.assertCleanTree root
         let! head = BuildProvenance.committedHead root
         let! manifestText = BuildProvenance.readAllTextAsync manifestPath
