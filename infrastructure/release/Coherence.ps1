@@ -122,7 +122,9 @@ Assert-Count -Name "the coherence guard receives the projection value" -Pattern 
 Assert-Count -Name "the coherence guard reads no step-local output file" -Pattern 'Coherence\.ps1 -OutputFile' -Expected 0
 Assert-Count -Name "every SDK install is fed by the canonical projection" -Pattern '^ {10}dotnet-version: \$\{\{ steps\.project\.outputs\.sdk \}\}\s*$' -Expected 3
 Assert-Count -Name "SDK installs never name a literal version" -Pattern 'dotnet-version: (?!\$\{\{)' -Expected 0
-Assert-JobCount -Job "publisher" -Name "publisher reads the projected components" -Pattern 'ConvertFrom-Json \$env:RELEASE_COMPONENTS' -Expected 1
+# The publisher job derives no participant list of its own: it consumes the projection through the coherence step's
+# own value and the SDK install above, so only the two candidate jobs read the projection into a loop variable.
+Assert-Count -Name "every stage reads the projection instead of a literal participant list" -Pattern 'ConvertFrom-Json \$env:RELEASE_COMPONENTS' -Expected 4
 Assert-JobCount -Job "preparation" -Name "preparation reads the projected components" -Pattern 'ConvertFrom-Json \$env:RELEASE_COMPONENTS' -Expected 2
 Assert-JobCount -Job "publication" -Name "publication reads the projected components" -Pattern 'ConvertFrom-Json \$env:RELEASE_COMPONENTS' -Expected 2
 
@@ -176,6 +178,9 @@ Assert-Count -Name "the authored source closure is gone" -Pattern 'Sources\.json
 Assert-Count -Name "the publisher closure is gone" -Pattern 'Publisher\.(json|Closure)' -Expected 0
 Assert-Count -Name "the F# policy config is gone" -Pattern 'Config\.fsx' -Expected 0
 Assert-Count -Name "no preparation sidecar is transported" -Pattern 'preparation\.json' -Expected 0
+# The published-baseline fixture descriptor and its download prerequisite are retired with the schema-v1 archives they
+# pinned: the retained baseline regression reads canonical fixtures, so no stage downloads or stages one.
+Assert-Count -Name "no historical fixture download or descriptor survives" -Pattern '(Fixtures\.json|MCP_RELEASE_HISTORICAL_ROOT)' -Expected 0
 Assert-Count -Name "no receipt document or receipt path survives" -Pattern '(?i)(trusted-receipt|receipt\.json|receiptPath|receiptRoot|InstallReceipt)' -Expected 0
 Assert-Count -Name "no raw platform transport mode survives" -Pattern '(InstallRuntime|FetchCandidate|RawTransportPath|-Mode )' -Expected 0
 Assert-Count -Name "the retired orchestration mode is gone" -Pattern 'orchestrate' -Expected 0
@@ -191,13 +196,15 @@ Assert-JobCount -Job "publisher" -Name "publisher declares the runtime platform 
 Assert-JobCount -Job "publisher" -Name "publisher declares the runtime inventory as a job output" -Pattern '^ {6}runtimeInventory: \$\{\{ steps\.inventory\.outputs\.inventory \}\}\s*$' -Expected 1
 Assert-JobCount -Job "publisher" -Name "publisher emits the complete file and SHA-256 inventory" -Pattern '^ {10}"inventory=\$inventoryJson" >> \$env:GITHUB_OUTPUT\s*$' -Expected 1
 Assert-JobCount -Job "publisher" -Name "publisher stages from the project's explicit compile items" -Pattern 'SelectNodes\("//Compile\[@Include\]"\)' -Expected 1
+# The compile list now includes shared sources outside the project directory but inside the checkout, so the stage step's
+# containment guard is the invariant that keeps every staged item inside the checkout.
+Assert-JobCount -Job "publisher" -Name "publisher stages only compile items that resolve inside the checkout" -Pattern 'resolves outside the checkout' -Expected 1
 Assert-JobCount -Job "publisher" -Name "publisher publishes the staged project in isolation" -Pattern 'dotnet publish \$stageProject' -Expected 1
 Assert-JobCount -Job "publisher" -Name "publisher suppresses repository-wide build imports" -Pattern 'p:ImportDirectoryBuildProps=false -p:ImportDirectoryBuildTargets=false' -Expected 2
 Assert-JobCount -Job "publisher" -Name "publisher restores from the cleared isolated source list" -Pattern 'dotnet restore \$stageProject --configfile' -Expected 1
 Assert-JobCount -Job "publisher" -Name "twelve non-packaging Workflow entrypoints" -Pattern '^\s+"workflow/tests/[A-Za-z]+\.fsx",?\s*$' -Expected 12
 Assert-JobCount -Job "publisher" -Name "publisher runs the producer Expecto gate" -Pattern 'dotnet run --project dotnet/tests/Mcp\.Dotnet\.Tests' -Expected 1
 Assert-JobCount -Job "publisher" -Name "publisher builds the compiled release regression project" -Pattern 'dotnet build infrastructure/release/tests/Tests\.fsproj' -Expected 1
-Assert-JobCount -Job "publisher" -Name "publisher consumes the pinned fixture descriptor" -Pattern 'infrastructure/release/tests/Fixtures\.json' -Expected 1
 Assert-JobCount -Job "publisher" -Name "publisher runs the complete compiled release gate" -Pattern '^ {8}run: pwsh infrastructure/release/Suite\.ps1\s*$' -Expected 1
 Assert-JobCount -Job "publisher" -Name "publisher typechecks the retained release scripts" -Pattern 'Typecheck\.ps1 -SdkVersion' -Expected 1
 

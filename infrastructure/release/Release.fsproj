@@ -12,13 +12,15 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="../../infrastructure/Provenance.fs" />
+    <Compile Include="../distribution/Contract.fs" />
+    <Compile Include="../distribution/Pin.fs" />
     <Compile Include="Archive.fs" />
+    <Compile Include="Policy.fs" />
     <Compile Include="Compare.fs" />
     <Compile Include="Metadata.fs" />
     <Compile Include="Publish.fs" />
     <Compile Include="Capture.fs" />
     <Compile Include="Enrollment.fs" />
-    <Compile Include="Policy.fs" />
     <Compile Include="Handoff.fs" />
     <Compile Include="Evaluate.fs" />
     <Compile Include="Transaction.fs" />

@@ -1,17 +1,18 @@
 // role: reusable module/helper
 // Strict archive comparison over the raw ZIP bytes; only the embedded `revision` value may differ.
 // Unsupported or inconclusive layouts fail closed instead of being normalized or repacked.
-// Exact equality is re-validated, not trusted: allowlist, manifest identity, and payload hashes are cross-checked.
+// Exact equality is re-validated, not trusted: allowlist, manifest identity, declared member
+// hashes, launch/runtime metadata, and payload hashes are cross-checked against the trusted
+// producer contract and the archived runtime configuration.
 module ReleaseCompare
 
 open System
-open System.Collections.Generic
 open System.IO
 open System.IO.Compression
 open System.Security.Cryptography
 open System.Text
-open System.Text.Json
 open BuildProvenance
+open DistributionContract
 
 // `Raw` is the exact archive entry the comparison normalizes against, so no local/central metadata is discarded.
 type EntryObservation =
@@ -33,26 +34,40 @@ type Decision =
     | RevisionOnlyEquivalent of published: ArchiveObservation * publishedRevision: string * evaluatedRevision: string
     | DifferentBeyondRevision of published: ArchiveObservation * candidate: ArchiveObservation * reason: string
 
-// Allowlist and archive name come from the producer's canonical Config.json; the comparison never re-implements them.
+// Identity, member allowlist, launch descriptor, source repository, and build
+// provenance come from the producer's canonical Config.json; the comparison never
+// re-implements them.
 type ComponentContract =
     { ComponentId: string
       Version: string
       ArchiveName: string
+      SourceRepository: string
+      Producer: ProducerProvenance
+      Launch: LaunchDescriptor
       EntryAllowlist: string list }
 
-// A future schema change must update this constant and the parser together.
-let private embeddedManifestEntryName = "distribution.json"
-let private noticeEntryName = "NOTICE.txt"
-let private supportedSchemaVersion = 1
-
-type private ParsedManifest =
-    { SchemaVersion: int
-      Id: string
-      Version: string
-      Archive: string
-      Revision: string
-      ArchiveFiles: string list
-      Files: (string * string) list }
+// Derives the trusted contract from one producer's canonical policy so identity,
+// member allowlist, source repository, launch descriptor, and build provenance are
+// never re-implemented at a comparison call site.
+let contractFromPolicy
+    (policy: ReleasePolicy.PolicyProjection)
+    (archiveName: string)
+    : Result<ComponentContract, ReleaseError> =
+    sourceRepositoryFromAssetUri policy.AssetUri
+    |> Result.map (fun repository ->
+        { ComponentId = policy.ComponentId
+          Version = policy.Version
+          ArchiveName = archiveName
+          SourceRepository = repository
+          Producer =
+            { Sdk = policy.SdkVersion
+              Runtime = policy.RuntimeVersion
+              Platform = policy.Platform }
+          Launch =
+            { Kind = launchKindDotnetExec
+              Entrypoint = policy.EntryDll
+              Arguments = policy.LaunchArguments }
+          EntryAllowlist = trustedArchiveMemberNames policy.PublishedFiles })
 
 let private sha256Hex (bytes: byte[]) : string =
     SHA256.HashData bytes |> Convert.ToHexString |> fun value -> value.ToLowerInvariant()
@@ -91,207 +106,77 @@ let private readArchiveBytes (path: string) : Result<byte[], ReleaseError> =
     | :? IOException as error -> Error(FileFailure("read", path, error.Message))
     | :? UnauthorizedAccessException as error -> Error(FileFailure("read", path, error.Message))
 
-let private tryProperty (element: JsonElement) (name: string) : JsonElement option =
-    let mutable found = None
+let private renderProducer (producer: ProducerProvenance) : string =
+    $"{producer.Sdk} {producer.Runtime} {producer.Platform}"
 
-    for property in element.EnumerateObject() do
-        if property.Name = name && found.IsNone then
-            found <- Some property.Value
+let private renderLaunch (launch: LaunchDescriptor) : string =
+    let arguments =
+        launch.Arguments
+        |> List.map (fun argument -> $"{argument.Flag} {argument.Input} {LaunchArgumentType.wireName argument.Type}")
+        |> String.concat "; "
 
-    found
+    $"{launch.Kind} {launch.Entrypoint} [{arguments}]"
 
-// A duplicate key anywhere in the document is rejected so two parses cannot silently disagree.
-let private rejectDuplicateKeys (root: JsonElement) : Result<unit, string> =
-    let rec walk (element: JsonElement) : Result<unit, string> =
-        match element.ValueKind with
-        | JsonValueKind.Object ->
-            let seen = HashSet<string>(StringComparer.Ordinal)
-            let mutable failure = None
-
-            for property in element.EnumerateObject() do
-                if failure.IsNone then
-                    if not (seen.Add property.Name) then
-                        failure <- Some $"duplicate JSON key '{property.Name}'"
-                    else
-                        match walk property.Value with
-                        | Error message -> failure <- Some message
-                        | Ok () -> ()
-
-            match failure with
-            | Some message -> Error message
-            | None -> Ok()
-        | JsonValueKind.Array ->
-            let mutable failure = None
-
-            for item in element.EnumerateArray() do
-                if failure.IsNone then
-                    match walk item with
-                    | Error message -> failure <- Some message
-                    | Ok () -> ()
-
-            match failure with
-            | Some message -> Error message
-            | None -> Ok()
-        | _ -> Ok()
-
-    walk root
-
-let private readString (root: JsonElement) (name: string) : Result<string, ReleaseError> =
-    match tryProperty root name with
+// The declared runtime prerequisite must match the packaged runtime configuration
+// bytes that `files` hashes, so the manifest never states an unverified runtime.
+let private validateRuntimeConfiguration
+    (manifest: DistributionManifest)
+    (observation: ArchiveObservation)
+    : Result<unit, ReleaseError> =
+    match observation.Entries |> List.tryFind (fun entry -> entry.Name = manifest.Runtime.Config) with
     | None ->
-        Error(MalformedArtifact(embeddedManifestEntryName, $"the manifest is missing required field '{name}'"))
-    | Some value when value.ValueKind <> JsonValueKind.String ->
-        Error(MalformedArtifact(embeddedManifestEntryName, $"the manifest field '{name}' is not a string"))
-    | Some value -> Ok(value.GetString())
+        Error(
+            MalformedArtifact(
+                manifestEntryName,
+                $"the manifest 'runtime.config' '{manifest.Runtime.Config}' is absent from the archive"))
+    | Some entry ->
+        match ReleaseArchive.decompress entry.Raw with
+        | Error error -> Error error
+        | Ok payload ->
+            match runtimeRequirementFromConfig manifest.Runtime.Config payload with
+            | Error error -> Error error
+            | Ok derived when derived = manifest.Runtime -> Ok()
+            | Ok derived ->
+                Error(
+                    IdentityMismatch(
+                        "runtime",
+                        $"{manifest.Runtime.Framework} {manifest.Runtime.Version}",
+                        $"{derived.Framework} {derived.Version}"))
 
-let private readInt (root: JsonElement) (name: string) : Result<int, ReleaseError> =
-    match tryProperty root name with
-    | None ->
-        Error(MalformedArtifact(embeddedManifestEntryName, $"the manifest is missing required field '{name}'"))
-    | Some value ->
-        try
-            Ok(value.GetInt32())
-        with
-        | :? InvalidOperationException ->
-            Error(MalformedArtifact(embeddedManifestEntryName, $"the manifest field '{name}' is not an integer"))
-        | :? FormatException ->
-            Error(MalformedArtifact(embeddedManifestEntryName, $"the manifest field '{name}' is not an integer"))
-
-// A validated top-level revision is the only manifest value allowed to change between equivalent archives.
-let private isLowerHexRevision (value: string) : bool =
-    value.Length = 40
-    && value |> Seq.forall (fun character -> (character >= '0' && character <= '9') || (character >= 'a' && character <= 'f'))
-
-let private parseManifest (bytes: byte[]) : Result<ParsedManifest, ReleaseError> =
-    try
-        use document = JsonDocument.Parse(ReadOnlyMemory bytes)
-        let root = document.RootElement
-
-        if root.ValueKind <> JsonValueKind.Object then
-            Error(MalformedArtifact(embeddedManifestEntryName, "the manifest is not a JSON object"))
-        else
-            match rejectDuplicateKeys root with
-            | Error message -> Error(MalformedArtifact(embeddedManifestEntryName, message))
-            | Ok () ->
-                match readInt root "schemaVersion", readString root "id", readString root "version", readString root "archive", readString root "revision" with
-                | Error error, _, _, _, _ -> Error error
-                | _, Error error, _, _, _ -> Error error
-                | _, _, Error error, _, _ -> Error error
-                | _, _, _, Error error, _ -> Error error
-                | _, _, _, _, Error error -> Error error
-                | Ok schemaVersion, Ok id, Ok version, Ok archive, Ok revision ->
-                    if not (isLowerHexRevision revision) then
-                        Error(
-                            MalformedArtifact(
-                                embeddedManifestEntryName,
-                                "the manifest 'revision' is not a 40-character lowercase hex revision"))
-                    else
-                        match tryProperty root "archiveFiles", tryProperty root "files" with
-                        | Some archiveFilesElement, Some filesElement
-                            when archiveFilesElement.ValueKind = JsonValueKind.Array
-                                 && filesElement.ValueKind = JsonValueKind.Array ->
-                            let archiveFiles =
-                                archiveFilesElement.EnumerateArray()
-                                |> Seq.choose (fun item ->
-                                    if item.ValueKind = JsonValueKind.String then Some(item.GetString()) else None)
-                                |> Seq.toList
-
-                            if archiveFiles.Length <> archiveFilesElement.GetArrayLength() then
-                                Error(
-                                    MalformedArtifact(
-                                        embeddedManifestEntryName,
-                                        "the manifest 'archiveFiles' must contain only strings"))
-                            else
-                                let mutable files = []
-                                let mutable failure = None
-
-                                for item in filesElement.EnumerateArray() do
-                                    if failure.IsNone then
-                                        if item.ValueKind <> JsonValueKind.Object then
-                                            failure <- Some "the manifest 'files' entries must be JSON objects"
-                                        else
-                                            match tryProperty item "path", tryProperty item "sha256" with
-                                            | Some pathElement, Some hashElement
-                                                when pathElement.ValueKind = JsonValueKind.String
-                                                     && hashElement.ValueKind = JsonValueKind.String ->
-                                                files <- (pathElement.GetString(), hashElement.GetString()) :: files
-                                            | _ ->
-                                                failure <- Some "each manifest 'files' entry needs string 'path' and 'sha256'"
-
-                                match failure with
-                                | Some message -> Error(MalformedArtifact(embeddedManifestEntryName, message))
-                                | None ->
-                                    Ok
-                                        { SchemaVersion = schemaVersion
-                                          Id = id
-                                          Version = version
-                                          Archive = archive
-                                          Revision = revision
-                                          ArchiveFiles = archiveFiles
-                                          Files = List.rev files }
-                        | _ ->
-                            Error(
-                                MalformedArtifact(
-                                    embeddedManifestEntryName,
-                                    "the manifest is missing its 'archiveFiles' or 'files' array"))
-    with
-    | :? JsonException as error ->
-        Error(MalformedArtifact(embeddedManifestEntryName, $"the embedded manifest is not valid JSON: {error.Message}"))
-
-// Cross-checks the manifest against the actual payload bytes so declared hashes are never trusted on their own.
+// Cross-checks the manifest against the actual payload bytes so declared hashes and
+// the declared runtime are never trusted on their own.
 let private selfConsistency (observation: ArchiveObservation) : Result<unit, ReleaseError> =
     match observation.ManifestBody with
     | None -> Error(MalformedArtifact(observation.ArchivePath, "the canonical embedded manifest is missing"))
     | Some body ->
-        match parseManifest (Encoding.UTF8.GetBytes body) with
+        match parseBytes (Encoding.UTF8.GetBytes body) with
         | Error error -> Error error
         | Ok manifest ->
-            if manifest.SchemaVersion <> supportedSchemaVersion then
+            let actualSorted = observation.Entries |> List.map _.Name |> List.sort
+            let expectedSorted = archiveMemberNames manifest
+
+            if expectedSorted <> actualSorted then
                 Error(
-                    MalformedArtifact(
-                        embeddedManifestEntryName,
-                        $"unsupported manifest schemaVersion {manifest.SchemaVersion}; expected {supportedSchemaVersion}"))
+                    AllowlistMismatch(
+                        "the manifest 'files' entries do not cover exactly the archive members",
+                        expectedSorted,
+                        actualSorted))
             else
-                let actualNames = observation.Entries |> List.map _.Name
-                let actualSorted = actualNames |> List.sort
-                let archiveFilesSorted = manifest.ArchiveFiles |> List.sort
+                let byName = observation.Entries |> List.map (fun entry -> entry.Name, entry) |> Map.ofList
+                let mutable failure: string option = None
 
-                if archiveFilesSorted <> actualSorted then
-                    Error(
-                        AllowlistMismatch(
-                            "the manifest 'archiveFiles' does not match the archive entries",
-                            actualSorted,
-                            archiveFilesSorted))
-                else
-                    let byName = observation.Entries |> List.map (fun entry -> entry.Name, entry) |> Map.ofList
-                    let mutable failure : string option = None
+                for file in manifest.Files do
+                    if failure.IsNone then
+                        match Map.tryFind file.Path byName with
+                        | None ->
+                            failure <- Some $"the manifest declares payload '{file.Path}' that is absent from the archive"
+                        | Some entry when entry.PayloadSha256 <> file.Sha256 ->
+                            failure <- Some $"the manifest hash for '{file.Path}' does not match the archived payload"
+                        | Some _ -> ()
 
-                    for path, declaredHash in manifest.Files do
-                        if failure.IsNone then
-                            match Map.tryFind path byName with
-                            | None ->
-                                failure <- Some $"the manifest declares payload '{path}' that is absent from the archive"
-                            | Some entry when entry.PayloadSha256 <> declaredHash ->
-                                failure <- Some $"the manifest hash for '{path}' does not match the archived payload"
-                            | Some _ -> ()
-
-                    match failure with
-                    | Some message -> Error(MalformedArtifact(embeddedManifestEntryName, message))
-                    | None ->
-                        let declaredPaths = manifest.Files |> List.map fst |> Set.ofList
-
-                        let expectedPaths =
-                            actualNames
-                            |> List.filter (fun name -> name <> embeddedManifestEntryName && name <> noticeEntryName)
-                            |> Set.ofList
-
-                        if declaredPaths <> expectedPaths then
-                            Error(
-                                MalformedArtifact(
-                                    embeddedManifestEntryName,
-                                    "the manifest 'files' entries do not cover exactly the archived payload files"))
-                        else
-                            Ok()
+                match failure with
+                | Some message -> Error(MalformedArtifact(manifestEntryName, message))
+                | None -> validateRuntimeConfiguration manifest observation
 
 // Shared validation pipeline for both path-based and byte-based observations:
 // extracts entries, computes payload sha256, parses the embedded manifest, and
@@ -303,9 +188,9 @@ let private validateParsedArchive
     (bytes: byte[])
     : Result<ArchiveObservation, ReleaseError> =
     let entries = ResizeArray<EntryObservation>()
-    let mutable failure : ReleaseError option = None
-    let mutable manifestBody : string option = None
-    let mutable manifestSha256 : string option = None
+    let mutable failure: ReleaseError option = None
+    let mutable manifestBody: string option = None
+    let mutable manifestSha256: string option = None
     let mutable manifestCount = 0
 
     for raw in parsed.Entries do
@@ -317,7 +202,7 @@ let private validateParsedArchive
             | Ok payload ->
                 let payloadSha256 = sha256Hex payload
 
-                if raw.Name = embeddedManifestEntryName then
+                if raw.Name = manifestEntryName then
                     manifestCount <- manifestCount + 1
                     manifestBody <- Some(Encoding.UTF8.GetString payload)
                     manifestSha256 <- Some payloadSha256
@@ -335,7 +220,7 @@ let private validateParsedArchive
             Error(
                 MalformedArtifact(
                     path,
-                    $"the archive must contain exactly one '{embeddedManifestEntryName}' entry"))
+                    $"the archive must contain exactly one '{manifestEntryName}' entry"))
         else
             let observation =
                 { ArchivePath = path
@@ -380,7 +265,8 @@ let private precheck (contract: ComponentContract) (observation: ArchiveObservat
     else
         Ok()
 
-// Usable before any remote publication: validates one observation's manifest identity and payload hashes against the contract.
+// Usable before any remote publication: validates one observation's manifest identity,
+// member hashes, and launch/runtime/provenance metadata against the trusted contract.
 let validate (contract: ComponentContract) (observation: ArchiveObservation) (label: string) : Result<unit, ReleaseError> =
     match precheck contract observation label with
     | Error error -> Error error
@@ -388,20 +274,21 @@ let validate (contract: ComponentContract) (observation: ArchiveObservation) (la
         match observation.ManifestBody with
         | None -> Error(MalformedArtifact(observation.ArchivePath, "the canonical embedded manifest is missing"))
         | Some body ->
-            match parseManifest (Encoding.UTF8.GetBytes body) with
+            match parseBytes (Encoding.UTF8.GetBytes body) with
             | Error error -> Error error
             | Ok manifest ->
-                if manifest.SchemaVersion <> supportedSchemaVersion then
-                    Error(
-                        MalformedArtifact(
-                            embeddedManifestEntryName,
-                            $"unsupported manifest schemaVersion {manifest.SchemaVersion}; expected {supportedSchemaVersion}"))
-                elif manifest.Id <> contract.ComponentId then
+                if manifest.Id <> contract.ComponentId then
                     Error(IdentityMismatch("id", contract.ComponentId, manifest.Id))
                 elif manifest.Version <> contract.Version then
                     Error(IdentityMismatch("version", contract.Version, manifest.Version))
                 elif manifest.Archive <> contract.ArchiveName then
                     Error(IdentityMismatch("archive", contract.ArchiveName, manifest.Archive))
+                elif manifest.SourceRepository <> contract.SourceRepository then
+                    Error(IdentityMismatch("sourceRepository", contract.SourceRepository, manifest.SourceRepository))
+                elif manifest.Producer <> contract.Producer then
+                    Error(IdentityMismatch("producer", renderProducer contract.Producer, renderProducer manifest.Producer))
+                elif manifest.Launch <> contract.Launch then
+                    Error(IdentityMismatch("launch", renderLaunch contract.Launch, renderLaunch manifest.Launch))
                 else
                     Ok()
 
@@ -493,7 +380,7 @@ let private confirmCanonicalDeflate (entry: ReleaseArchive.Entry) (payload: byte
     if output.ToArray() <> entry.CompressedData then
         Error(
             MalformedArtifact(
-                embeddedManifestEntryName,
+                manifestEntryName,
                 "the embedded manifest compressed bytes are not the canonical Deflate representation for their content"))
     else
         Ok()
@@ -503,7 +390,7 @@ type private BodyComparison =
     | BodyDiffers of reason: string
 
 let private compareManifestBodies (publishedBytes: byte[]) (candidateBytes: byte[]) : Result<BodyComparison, ReleaseError> =
-    match parseManifest publishedBytes, parseManifest candidateBytes with
+    match parseBytes publishedBytes, parseBytes candidateBytes with
     | Error error, _ -> Error error
     | _, Error error -> Error error
     | Ok published, Ok candidate ->
@@ -523,12 +410,12 @@ let private compareManifestBodies (publishedBytes: byte[]) (candidateBytes: byte
         if countOccurrences published.Revision publishedText <> 1 then
             Error(
                 MalformedArtifact(
-                    embeddedManifestEntryName,
+                    manifestEntryName,
                     "the published manifest revision value is not unique in its document"))
         elif countOccurrences candidate.Revision candidateText <> 1 then
             Error(
                 MalformedArtifact(
-                    embeddedManifestEntryName,
+                    manifestEntryName,
                     "the candidate manifest revision value is not unique in its document"))
         elif published.Revision = candidate.Revision then
             Ok(BodyDiffers "the published and candidate manifests share the same revision yet the archive bytes differ")
@@ -540,7 +427,7 @@ let private compareManifestBodies (publishedBytes: byte[]) (candidateBytes: byte
 
 let private partitionManifestEntry (entries: EntryObservation list) : EntryObservation option * EntryObservation list =
     let manifest, others =
-        entries |> List.partition (fun entry -> entry.Name = embeddedManifestEntryName)
+        entries |> List.partition (fun entry -> entry.Name = manifestEntryName)
 
     match manifest with
     | head :: _ -> Some head, others
@@ -617,32 +504,13 @@ let compare
     : Async<Result<Decision, ReleaseError>> =
     async { return compareInternal contract published candidate evaluatedRevision }
 
-// Stable public header for the embedded distribution manifest; avoids leaking the private `ParsedManifest` shape.
-type EmbeddedManifestHeader =
-    { SchemaVersion: int
-      Id: string
-      Version: string
-      Archive: string
-      Revision: string
-      ArchiveFiles: string list
-      FileCount: int }
-
-let parseEmbeddedManifestHeader (body: string) : Result<EmbeddedManifestHeader, ReleaseError> =
-    match parseManifest (Encoding.UTF8.GetBytes body) with
-    | Error error -> Error error
-    | Ok parsed ->
-        Ok
-            { SchemaVersion = parsed.SchemaVersion
-              Id = parsed.Id
-              Version = parsed.Version
-              Archive = parsed.Archive
-              Revision = parsed.Revision
-              ArchiveFiles = parsed.ArchiveFiles
-              FileCount = parsed.Files.Length }
+// Stable public accessors for the embedded distribution manifest.
+let parseEmbeddedManifest (body: string) : Result<DistributionManifest, ReleaseError> =
+    parse body
 
 let parseEmbeddedManifestEntry
     (observation: ArchiveObservation)
-    : Result<EmbeddedManifestHeader, ReleaseError> =
+    : Result<DistributionManifest, ReleaseError> =
     match observation.ManifestBody with
     | None -> Error(MalformedArtifact(observation.ArchivePath, "the canonical embedded manifest entry is missing"))
-    | Some body -> parseEmbeddedManifestHeader body
+    | Some body -> parse body

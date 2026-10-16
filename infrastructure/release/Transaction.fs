@@ -295,33 +295,3 @@ let run
         | Error error -> return Error error
     }
 
-let parseContractJson (contractJson: string) : Result<ReleaseCompare.ComponentContract * string, ReleaseError> =
-    try
-        let doc = System.Text.Json.Nodes.JsonNode.Parse(contractJson)
-        let obj = doc.AsObject()
-        let assetUriNode = obj.["assetUri"]
-        let assetUri =
-            if isNull assetUriNode then ""
-            else
-                try assetUriNode.GetValue<string>()
-                with _ -> ""
-        let allowlist =
-            obj.["entryAllowlist"].AsArray()
-            |> Seq.choose (fun v ->
-                if isNull v then None
-                else
-                    try Some (v.GetValue<string>())
-                    with _ -> None)
-            |> Seq.toList
-        Ok
-            ({ ComponentId = obj["componentId"].GetValue<string>()
-               Version = obj["version"].GetValue<string>()
-               ArchiveName = obj["archiveName"].GetValue<string>()
-               EntryAllowlist = allowlist }, assetUri)
-    with
-    | :? System.Text.Json.JsonException as error ->
-        Error(MalformedArtifact("contract", $"the contract JSON is not valid: {error.Message}"))
-    | :? FormatException as error ->
-        Error(MalformedArtifact("contract", $"the contract JSON is not valid: {error.Message}"))
-    | :? InvalidOperationException as error ->
-        Error(MalformedArtifact("contract", $"the contract JSON is not valid: {error.Message}"))

@@ -1,16 +1,20 @@
 {
   "componentId": "dotnet",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "entryDll": "Mcp.Dotnet.dll",
   "sdkVersion": "11.0.100-rc.1.26425.128",
   "runtimeVersion": "11.0.0-rc.1.26425.128",
   "platform": "win-x64",
-  "archiveName": "v1.0.4.zip",
-  "assetUri": "https://github.com/masterlifting/mcp-store/releases/download/dotnet/v1.0.4.zip",
+  "archiveName": "v1.0.5.zip",
+  "assetUri": "https://github.com/masterlifting/mcp-store/releases/download/dotnet/v1.0.5.zip",
   "publishedFiles": [
     "FSharp.Core.dll",
     "Mcp.Dotnet.deps.json",
     "Mcp.Dotnet.dll",
     "Mcp.Dotnet.runtimeconfig.json"
+  ],
+  "launchArguments": [
+    { "flag": "--dotnet-host", "input": "dotnetHost", "type": "absolute-file" },
+    { "flag": "--artifact-root", "input": "artifactRoot", "type": "absolute-directory" }
   ]
 }

@@ -5,15 +5,16 @@
 module DistributionBuild
 
 #load "Provenance.fs"
+#load "distribution/Contract.fs"
 #load "release/Policy.fs"
 
 open System
 open System.IO
 open System.IO.Compression
-open System.Text.Json
-open System.Text.Json.Nodes
+open System.Text
 open System.Threading
 open BuildProvenance
+open DistributionContract
 open ReleasePolicy
 
 // Everything the shared flow needs; producer release policy stays in the
@@ -25,9 +26,13 @@ type Request =
       ComponentId: string
       Version: string
       SdkVersion: string
+      RuntimeVersion: string
+      Platform: string
+      SourceRepository: string
       EntryDll: string
       ArchiveName: string
       PublishedFiles: string list
+      LaunchArguments: LaunchArgument list
       ExtraPublishProperties: string list
       Notice: string }
 
@@ -97,7 +102,12 @@ let private buildWith
     releaseResult {
         do! BuildProvenance.assertCleanTree request.Root
         let! revision = BuildProvenance.committedHead request.Root
-        let archiveFiles = request.PublishedFiles @ [ "NOTICE.txt"; "distribution.json" ] |> List.sort
+
+        // Membership is exactly the declared payload allowlist, the always-present
+        // NOTICE, and the manifest entry; every non-manifest member is hashed.
+        let manifestFiles = sortOrdinal (request.PublishedFiles @ [ noticeEntryName ])
+        let archiveFiles = trustedArchiveMemberNames request.PublishedFiles
+        let runtimeConfigName = runtimeConfigNameFor request.EntryDll
         let destination = Path.Combine(request.OutputRoot, request.ComponentId)
         let publishRoot = Path.Combine(destination, "publish")
         do! attempt "create output root" destination (fun () -> Directory.CreateDirectory destination |> ignore)
@@ -107,7 +117,7 @@ let private buildWith
         if Directory.Exists publishRoot then
             do! attempt "clear publish staging" publishRoot (fun () -> Directory.Delete(publishRoot, true))
 
-        for relativePath in request.PublishedFiles @ [ "NOTICE.txt"; "distribution.json" ] do
+        for relativePath in archiveFiles do
             let path = Path.Combine(destination, relativePath)
 
             if File.Exists path then
@@ -131,7 +141,7 @@ let private buildWith
                 cancellationToken
 
         let actualFiles = listFiles publishRoot SearchOption.AllDirectories
-        let expectedFiles = request.PublishedFiles |> List.sort
+        let expectedFiles = request.PublishedFiles |> sortOrdinal
 
         do! assertExactFiles $"{request.ComponentId} publish output is not the deterministic allowlist" expectedFiles actualFiles
 
@@ -141,46 +151,53 @@ let private buildWith
                     File.Copy(Path.Combine(publishRoot, relativePath), Path.Combine(destination, relativePath)))
 
         do! attempt "clear publish staging" publishRoot (fun () -> Directory.Delete(publishRoot, true))
-        do! attempt "write NOTICE" (Path.Combine(destination, "NOTICE.txt")) (fun () -> File.WriteAllText(Path.Combine(destination, "NOTICE.txt"), request.Notice))
+        do! attempt "write NOTICE" (Path.Combine(destination, noticeEntryName)) (fun () -> File.WriteAllText(Path.Combine(destination, noticeEntryName), request.Notice))
 
         let stagedFiles = listFiles destination SearchOption.TopDirectoryOnly
 
         do!
             assertExactFiles
-                $"{request.ComponentId} v1 staging contains unexpected files"
-                (request.PublishedFiles @ [ "NOTICE.txt" ] |> List.sort)
+                $"{request.ComponentId} distribution staging contains unexpected files"
+                manifestFiles
                 stagedFiles
 
-        let manifest = JsonObject()
-        manifest["schemaVersion"] <- JsonValue.Create 1
-        manifest["id"] <- JsonValue.Create request.ComponentId
-        manifest["version"] <- JsonValue.Create request.Version
-        manifest["revision"] <- JsonValue.Create revision
-        manifest["sdk"] <- JsonValue.Create request.SdkVersion
-        manifest["entryDll"] <- JsonValue.Create request.EntryDll
-        manifest["archive"] <- JsonValue.Create request.ArchiveName
-        let files = JsonArray()
+        // The packaged runtime configuration is the authoritative prerequisite
+        // source, so framework and version are derived from its bytes.
+        let! runtimeConfigText = readAllTextAsync (Path.Combine(destination, runtimeConfigName))
+        let! runtime = runtimeRequirementFromConfig runtimeConfigName (Encoding.UTF8.GetBytes runtimeConfigText)
 
-        for file in request.PublishedFiles |> List.sort do
+        let mutable fileEntries : DistributionFile list = []
+
+        for file in manifestFiles do
             let! fileHash = sha256FileAsync (Path.Combine(destination, file))
-            let fileEntry = JsonObject()
-            fileEntry["path"] <- JsonValue.Create file
-            fileEntry["sha256"] <- JsonValue.Create fileHash
-            files.Add fileEntry
+            fileEntries <- fileEntries @ [ { Path = file; Sha256 = fileHash } ]
 
-        manifest["files"] <- files
-        let archiveFileNames = JsonArray()
+        let manifest: DistributionManifest =
+            { SchemaVersion = schemaVersion
+              Id = request.ComponentId
+              Version = request.Version
+              Revision = revision
+              SourceRepository = request.SourceRepository
+              Producer =
+                { Sdk = request.SdkVersion
+                  Runtime = request.RuntimeVersion
+                  Platform = request.Platform }
+              Archive = request.ArchiveName
+              Launch =
+                { Kind = launchKindDotnetExec
+                  Entrypoint = request.EntryDll
+                  Arguments = request.LaunchArguments }
+              Runtime = runtime
+              Files = fileEntries }
 
-        for file in archiveFiles do
-            archiveFileNames.Add(JsonValue.Create file)
+        do! validate manifest
 
-        manifest["archiveFiles"] <- archiveFileNames
-        let manifestPath = Path.Combine(destination, "distribution.json")
-        do! writeJsonAsync manifestPath manifest
+        let manifestPath = Path.Combine(destination, manifestEntryName)
+        do! writeJsonAsync manifestPath (toJsonNode manifest)
 
         let archiveSources = listFiles destination SearchOption.TopDirectoryOnly
 
-        do! assertExactFiles $"{request.ComponentId} v1 archive sources contain unexpected files" archiveFiles archiveSources
+        do! assertExactFiles $"{request.ComponentId} archive sources contain unexpected files" archiveFiles archiveSources
         let archivePath = Path.Combine(request.OutputRoot, request.ArchiveName)
 
         if File.Exists archivePath then

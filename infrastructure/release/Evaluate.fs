@@ -163,12 +163,7 @@ module VerifiedCandidate =
             let archiveSize = archiveBytesCopy.Length
             let manifestSha = sha256Hex manifestBytesCopy
             let manifestSize = manifestBytesCopy.Length
-            let buildCandidate (header: ReleaseCompare.EmbeddedManifestHeader) (observation: ReleaseCompare.ArchiveObservation) (embeddedBytes: byte[]) (embeddedSha: string) =
-                let contract : ReleaseCompare.ComponentContract =
-                    { ComponentId = policy.ComponentId
-                      Version = policy.Version
-                      ArchiveName = archiveName
-                      EntryAllowlist = List.sort (policy.PublishedFiles @ [ "NOTICE.txt"; "distribution.json" ]) }
+            let buildCandidate (contract: ReleaseCompare.ComponentContract) (manifest: DistributionContract.DistributionManifest) (observation: ReleaseCompare.ArchiveObservation) (embeddedBytes: byte[]) (embeddedSha: string) =
                 let metadataAssetName = ReleaseMetadata.metadataAssetName policy.ComponentId policy.Version
                 let dto : CandidateDto =
                     { Contract = contract
@@ -191,11 +186,11 @@ module VerifiedCandidate =
                         archiveName
                         archiveSha
                         manifestSha
-                        header.Revision
+                        manifest.Revision
                         (Some policy.SdkVersion)
                         (Some policy.RuntimeVersion)
                         (Some policy.Platform)
-                VerifiedCandidate(archiveBytesCopy, manifestBytesCopy, observation, archiveSha, manifestSha, archiveSize, manifestSize, embeddedBytes, embeddedSha, header.Revision, dto, projection)
+                VerifiedCandidate(archiveBytesCopy, manifestBytesCopy, observation, archiveSha, manifestSha, archiveSize, manifestSize, embeddedBytes, embeddedSha, manifest.Revision, dto, projection)
             let fieldChecks =
                 fieldCheck "policy.componentId" policy.ComponentId
                 |> Result.bind (fun _ -> fieldCheck "policy.version" policy.Version)
@@ -210,19 +205,19 @@ module VerifiedCandidate =
                 |> Result.bind (fun _ -> fieldCheck "metadataLocalPath" metadataLocalPath)
                 |> Result.bind (fun _ -> fieldCheck "repositoryOwner" repositoryOwner)
                 |> Result.bind (fun _ -> fieldCheck "repositoryName" repositoryName)
-            let expectedEntryNames = List.sort (policy.PublishedFiles @ [ "NOTICE.txt"; "distribution.json" ])
-            let runEmbeddedChecks (observation: ReleaseCompare.ArchiveObservation) (embeddedBody: string) (embeddedBytes: byte[]) (embeddedSha: string) =
+            let expectedEntryNames = DistributionContract.trustedArchiveMemberNames policy.PublishedFiles
+            let runEmbeddedChecks (contract: ReleaseCompare.ComponentContract) (observation: ReleaseCompare.ArchiveObservation) (embeddedBody: string) (embeddedBytes: byte[]) (embeddedSha: string) =
                 let manifestBytesCheck = ensure (embeddedBytes = manifestBytesCopy) (IdentityMismatch("candidate manifest bytes", "embedded == standalone", "embedded " + string embeddedBytes.Length + " bytes (sha " + embeddedSha + ") vs standalone " + string manifestSize + " bytes (sha " + manifestSha + ")"))
                 let manifestShaCheck = ensure (embeddedSha = manifestSha) (IdentityMismatch("candidate manifest sha", embeddedSha, manifestSha))
                 let archiveShaCheck = ensure (archiveSha = observation.ArchiveSha256) (IdentityMismatch("candidate archive sha", archiveSha, observation.ArchiveSha256))
                 let allowlistCheck =
                         let actualEntryNames = List.sort (List.map (fun (e: ReleaseCompare.EntryObservation) -> e.Name) observation.Entries)
                         ensure (actualEntryNames = expectedEntryNames) (AllowlistMismatch("the candidate archive entry allowlist does not match the producer contract", expectedEntryNames, actualEntryNames))
-                let entryFieldsChecks (header: ReleaseCompare.EmbeddedManifestHeader) =
-                    let revisionCheck = ensure (header.Revision = evaluatedHead) (RevisionMismatch(evaluatedHead, header.Revision))
-                    let idCheck = ensure (header.Id = policy.ComponentId) (IdentityMismatch("id", policy.ComponentId, header.Id))
-                    let versionCheck = ensure (header.Version = policy.Version) (IdentityMismatch("version", policy.Version, header.Version))
-                    let archiveCheck = ensure (header.Archive = archiveName) (IdentityMismatch("archive", archiveName, header.Archive))
+                let entryFieldsChecks (manifest: DistributionContract.DistributionManifest) =
+                    let revisionCheck = ensure (manifest.Revision = evaluatedHead) (RevisionMismatch(evaluatedHead, manifest.Revision))
+                    let idCheck = ensure (manifest.Id = policy.ComponentId) (IdentityMismatch("id", policy.ComponentId, manifest.Id))
+                    let versionCheck = ensure (manifest.Version = policy.Version) (IdentityMismatch("version", policy.Version, manifest.Version))
+                    let archiveCheck = ensure (manifest.Archive = archiveName) (IdentityMismatch("archive", archiveName, manifest.Archive))
                     revisionCheck
                     |> Result.bind (fun _ -> idCheck)
                     |> Result.bind (fun _ -> versionCheck)
@@ -232,21 +227,25 @@ module VerifiedCandidate =
                 |> Result.bind (fun _ -> archiveShaCheck)
                 |> Result.bind (fun _ -> allowlistCheck)
                 |> Result.bind (fun _ ->
-                    ReleaseCompare.parseEmbeddedManifestHeader embeddedBody
-                    |> Result.bind (fun header -> entryFieldsChecks header |> Result.map (fun _ -> header)))
-            let fromObservation (observation: ReleaseCompare.ArchiveObservation) =
+                    ReleaseCompare.parseEmbeddedManifest embeddedBody
+                    |> Result.bind (fun manifest -> entryFieldsChecks manifest |> Result.map (fun _ -> manifest)))
+            let fromObservation (contract: ReleaseCompare.ComponentContract) (observation: ReleaseCompare.ArchiveObservation) =
                 match observation.ManifestBody with
                 | None -> Error(MalformedArtifact(candidateLabel, "the candidate archive is missing the canonical distribution.json entry; refusing to publish"))
                 | Some embeddedBody ->
                     let embeddedBytes = Encoding.UTF8.GetBytes embeddedBody
                     let embeddedSha = sha256Hex embeddedBytes
-                    runEmbeddedChecks observation embeddedBody embeddedBytes embeddedSha
-                    |> Result.map (fun header -> (header, observation, embeddedBytes, embeddedSha))
+                    runEmbeddedChecks contract observation embeddedBody embeddedBytes embeddedSha
+                    |> Result.map (fun manifest -> (manifest, observation, embeddedBytes, embeddedSha))
             fieldChecks
             |> Result.bind (fun _ -> bytesAvailable ())
             |> Result.bind (fun _ -> ReleaseCompare.observeBytes candidateLabel archiveBytesCopy)
-            |> Result.bind fromObservation
-            |> Result.bind (fun (header, observation, embeddedBytes, embeddedSha) -> Ok(buildCandidate header observation embeddedBytes embeddedSha))
+            |> Result.bind (fun observation ->
+                match ReleaseCompare.contractFromPolicy policy archiveName with
+                | Error error -> Error error
+                | Ok contract ->
+                    fromObservation contract observation
+                    |> Result.bind (fun (manifest, observed, embeddedBytes, embeddedSha) -> Ok(buildCandidate contract manifest observed embeddedBytes embeddedSha)))
         async { return computation () }
 
     // SEC1 boundary adapter: builds a VerifiedCandidate from the typed
@@ -291,12 +290,7 @@ module VerifiedCandidate =
                 let manifestSha = sha256Hex manifestBytesCopy
                 let manifestSize = manifestBytesCopy.Length
 
-                let buildCandidate (header: ReleaseCompare.EmbeddedManifestHeader) (observation: ReleaseCompare.ArchiveObservation) (embeddedBytesCopy: byte[]) (embeddedSha: string) =
-                    let contract : ReleaseCompare.ComponentContract =
-                        { ComponentId = policy.ComponentId
-                          Version = policy.Version
-                          ArchiveName = archiveName
-                          EntryAllowlist = List.sort (policy.PublishedFiles @ [ "NOTICE.txt"; "distribution.json" ]) }
+                let buildCandidate (contract: ReleaseCompare.ComponentContract) (manifest: DistributionContract.DistributionManifest) (observation: ReleaseCompare.ArchiveObservation) (embeddedBytesCopy: byte[]) (embeddedSha: string) =
                     let metadataAssetName = ReleaseMetadata.metadataAssetName policy.ComponentId policy.Version
                     let dto : CandidateDto =
                         { Contract = contract
@@ -319,7 +313,7 @@ module VerifiedCandidate =
                             archiveName
                             archiveSha
                             manifestSha
-                            header.Revision
+                            manifest.Revision
                             (Some policy.SdkVersion)
                             (Some policy.RuntimeVersion)
                             (Some policy.Platform)
@@ -333,7 +327,7 @@ module VerifiedCandidate =
                          manifestSize,
                          embeddedBytesCopy,
                          embeddedSha,
-                         header.Revision,
+                         manifest.Revision,
                          dto,
                          projection)
 
@@ -364,12 +358,13 @@ module VerifiedCandidate =
                 // manifest byte equality and the canonical outer entry set;
                 // the factory re-runs the policy-bound checks against the
                 // snapshot's bytes so no candidate-controlled value escapes.
-                let expectedEntryNames = List.sort (policy.PublishedFiles @ [ "NOTICE.txt"; "distribution.json" ])
+                let expectedEntryNames = DistributionContract.trustedArchiveMemberNames policy.PublishedFiles
                 let runSnapshotChecks
+                    (contract: ReleaseCompare.ComponentContract)
                     (observation: ReleaseCompare.ArchiveObservation)
                     (embeddedBody: string)
                     (embeddedBytesCopy: byte[])
-                    : Result<ReleaseCompare.EmbeddedManifestHeader, ReleaseError> =
+                    : Result<DistributionContract.DistributionManifest, ReleaseError> =
                     let embeddedSha = sha256Hex embeddedBytesCopy
                     let manifestBytesCheck =
                         ensure (embeddedBytesCopy = manifestBytesCopy)
@@ -385,25 +380,25 @@ module VerifiedCandidate =
                         let actualEntryNames = List.sort (List.map (fun (e: ReleaseCompare.EntryObservation) -> e.Name) observation.Entries)
                         ensure (actualEntryNames = expectedEntryNames)
                             (AllowlistMismatch("the candidate archive entry allowlist does not match the producer contract", expectedEntryNames, actualEntryNames))
-                    let entryFieldsChecks (header: ReleaseCompare.EmbeddedManifestHeader) =
-                        let revisionCheck = ensure (header.Revision = evaluatedHead) (RevisionMismatch(evaluatedHead, header.Revision))
-                        let idCheck = ensure (header.Id = policy.ComponentId) (IdentityMismatch("id", policy.ComponentId, header.Id))
-                        let versionCheck = ensure (header.Version = policy.Version) (IdentityMismatch("version", policy.Version, header.Version))
-                        let archiveCheck = ensure (header.Archive = archiveName) (IdentityMismatch("archive", archiveName, header.Archive))
+                    let entryFieldsChecks (manifest: DistributionContract.DistributionManifest) =
+                        let revisionCheck = ensure (manifest.Revision = evaluatedHead) (RevisionMismatch(evaluatedHead, manifest.Revision))
+                        let idCheck = ensure (manifest.Id = policy.ComponentId) (IdentityMismatch("id", policy.ComponentId, manifest.Id))
+                        let versionCheck = ensure (manifest.Version = policy.Version) (IdentityMismatch("version", policy.Version, manifest.Version))
+                        let archiveCheck = ensure (manifest.Archive = archiveName) (IdentityMismatch("archive", archiveName, manifest.Archive))
                         revisionCheck
                         |> Result.bind (fun _ -> idCheck)
                         |> Result.bind (fun _ -> versionCheck)
                         |> Result.bind (fun _ -> archiveCheck)
-                        |> Result.map (fun _ -> header)
+                        |> Result.map (fun _ -> manifest)
                     manifestBytesCheck
                     |> Result.bind (fun _ -> manifestShaCheck)
                     |> Result.bind (fun _ -> archiveShaCheck)
                     |> Result.bind (fun _ -> allowlistCheck)
                     |> Result.bind (fun _ ->
-                        ReleaseCompare.parseEmbeddedManifestHeader embeddedBody
+                        ReleaseCompare.parseEmbeddedManifest embeddedBody
                         |> Result.bind entryFieldsChecks)
 
-                let fromObservation (observation: ReleaseCompare.ArchiveObservation) =
+                let fromObservation (contract: ReleaseCompare.ComponentContract) (observation: ReleaseCompare.ArchiveObservation) =
                     match observation.ManifestBody with
                     | None ->
                         Error(MalformedArtifact(candidateLabel, "the candidate archive is missing the canonical distribution.json entry; refusing to publish"))
@@ -413,14 +408,18 @@ module VerifiedCandidate =
                             Error(MalformedArtifact(candidateLabel, "the verified candidate embedded manifest bytes are missing or empty"))
                         else
                             let embeddedSha = sha256Hex embeddedBytesCopy
-                            runSnapshotChecks observation embeddedBody embeddedBytesCopy
-                            |> Result.map (fun header -> (header, observation, embeddedBytesCopy, embeddedSha))
+                            runSnapshotChecks contract observation embeddedBody embeddedBytesCopy
+                            |> Result.map (fun manifest -> (manifest, observation, embeddedBytesCopy, embeddedSha))
 
                 fieldChecks
                 |> Result.bind (fun _ -> bytesAvailable ())
                 |> Result.bind (fun _ -> ReleaseCompare.observeBytes candidateLabel innerBytesCopy)
-                |> Result.bind fromObservation
-                |> Result.map (fun (header, observation, embeddedBytesCopy, embeddedSha) -> buildCandidate header observation embeddedBytesCopy embeddedSha)
+                |> Result.bind (fun observation ->
+                    match ReleaseCompare.contractFromPolicy policy archiveName with
+                    | Error error -> Error error
+                    | Ok contract ->
+                        fromObservation contract observation
+                        |> Result.map (fun (manifest, observed, embeddedBytesCopy, embeddedSha) -> buildCandidate contract manifest observed embeddedBytesCopy embeddedSha))
             return computation ()
         }
 
@@ -479,7 +478,7 @@ let finalizeRecovery (resolution: Resolution) (verifiedMetadataSha: string) : Re
 
 let private publishedRevision (published: ReleaseCompare.ArchiveObservation) : Result<string, ReleaseError> =
     match ReleaseCompare.parseEmbeddedManifestEntry published with
-    | Ok header -> Ok header.Revision
+    | Ok manifest -> Ok manifest.Revision
     | Error error -> Error error
 
 let validateCanonicalAssetUri
@@ -632,8 +631,8 @@ let private classifyInternal
                                     Some ("manifestSha256", value, parsed.ManifestSha256)
                                 | _ ->
                                     match ReleaseCompare.parseEmbeddedManifestEntry publishedObs with
-                                    | Ok header when header.Revision <> parsed.PublishedRevision ->
-                                        Some ("publishedRevision", header.Revision, parsed.PublishedRevision)
+                                    | Ok manifest when manifest.Revision <> parsed.PublishedRevision ->
+                                        Some ("publishedRevision", manifest.Revision, parsed.PublishedRevision)
                                     | _ ->
                                         if parsed.ProducerSdk <> dto.ProducerSdk then
                                             Some ("producerSdk", optToString dto.ProducerSdk, optToString parsed.ProducerSdk)

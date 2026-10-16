@@ -8,6 +8,7 @@ open System.IO
 open System.IO.Compression
 open System.Text
 open System.Text.Json
+open System.Text.Json.Nodes
 open BuildProvenance
 open ReleaseCompare
 
@@ -27,13 +28,7 @@ let assertEqual name expected actual =
         failed <- failed + 1
         failures.Add(sprintf "%s: expected %A got %A" name expected actual)
 
-let private contract =
-    {
-        ComponentId = Fixture.contractComponentId
-        Version = Fixture.contractVersion
-        ArchiveName = Fixture.contractArchiveName
-        EntryAllowlist = Fixture.contractEntryAllowlist
-    }
+let private contract = Fixture.canonicalContract
 
 let private evalRevision = Fixture.canonicalEvaluatedRevision
 let private otherRevision = Fixture.canonicalPublishedRevision
@@ -136,10 +131,14 @@ let changedSdkRejection () = async {
                  || reason.Contains("differs", StringComparison.Ordinal))
         | Ok other ->
             failed <- failed + 1
-            failures.Add(sprintf "sdk rejection: expected DifferentBeyondRevision got %A" other)
+            failures.Add(sprintf "sdk rejection: the sdk bump was accepted as %A" other)
         | Error error ->
-            failed <- failed + 1
-            failures.Add(sprintf "sdk rejection: Error %s" (ReleaseError.message error))
+            // The pinned producer gate rejects a bumped SDK before the byte comparison can classify it.
+            let message = ReleaseError.message error
+
+            assertTrue "sdk bump fails closed on the pinned producer identity"
+                (message.Contains("producer", StringComparison.Ordinal)
+                 && message.Contains("11.0.100-rc.1.26425.200", StringComparison.Ordinal))
     | _ ->
         failed <- failed + 1
         failures.Add("sdk rejection: could not observe fixtures")
@@ -240,8 +239,8 @@ let duplicateOrExtraEntryRejected () = async {
         failures.Add("extra-entry candidate: observation unexpectedly accepted")
     | Error error ->
         let message = ReleaseError.message error
-        assertTrue "extra-entry candidate fails closed at observation (archiveFiles / allowlist)"
-            (message.Contains("archiveFiles", StringComparison.Ordinal)
+        assertTrue "extra-entry candidate fails closed at observation (membership allowlist)"
+            (message.Contains("cover exactly", StringComparison.Ordinal)
              || message.Contains("allowlist", StringComparison.Ordinal)
              || message.Contains("does not match", StringComparison.Ordinal))
 }
@@ -597,12 +596,13 @@ let compressionRatioBoundRejection () = async {
 }
 let duplicateKeyManifestRejected () = async {
     let path = Path.Combine(tempRoot, "dup-key.zip")
-    let payloadHashes = Fixture.canonicalPayloadHashes ()
-    let mutable rawDuplicate = "{\"schemaVersion\":1,\"id\":\"dotnet\",\"version\":\"1.0.4\",\"id\":\"duplicate-value\",\"revision\":\"3612e8e6dd4655543e6d4b9dc0edee9c24b82bf1\",\"sdk\":\"11.0.100-rc.1.26425.128\",\"entryDll\":\"Mcp.Dotnet.dll\",\"archive\":\"v1.0.4.zip\",\"files\":["
-    for path, hash in payloadHashes do
-        rawDuplicate <- rawDuplicate + sprintf "{\"path\":\"%s\",\"sha256\":\"%s\"}," path hash
-    rawDuplicate <- rawDuplicate + "{\"\":\"\"}],"
-    rawDuplicate <- rawDuplicate + "\"archiveFiles\":[\"FSharp.Core.dll\",\"Mcp.Dotnet.deps.json\",\"Mcp.Dotnet.dll\",\"Mcp.Dotnet.runtimeconfig.json\",\"NOTICE.txt\",\"distribution.json\"]}"
+    let canonicalText = Fixture.buildManifestText evalRevision Fixture.canonicalSdk (Fixture.canonicalPayloadHashes ())
+    // WHY: JsonObject cannot carry duplicate keys, so the duplicate is spliced from the
+    //   compact canonical projection; the fixture keeps riding the shared v2 renderer.
+    let compact =
+        JsonNode.Parse(canonicalText).AsObject().ToJsonString(JsonSerializerOptions(WriteIndented = false))
+    let openBrace = compact.IndexOf '{'
+    let rawDuplicate = compact.Insert(openBrace + 1, "\"id\":\"duplicate-value\",")
     let manifestBytes = Encoding.UTF8.GetBytes rawDuplicate
     do
         use archive = ZipFile.Open(path, ZipArchiveMode.Create)
@@ -625,29 +625,14 @@ let duplicateKeyManifestRejected () = async {
             (message.Contains("duplicate", StringComparison.Ordinal)
              || message.Contains("invalid", StringComparison.Ordinal))
 }
-let unknownManifestFieldAddedClassifiedBeyondRevision () = async {
-    let publishedPath = Path.Combine(tempRoot, "unknown-pub.zip")
-    let publishedManifestPath = Path.Combine(tempRoot, "unknown-pub.json")
-    Fixture.writeRevisionVariantArchive publishedPath publishedManifestPath Fixture.canonicalPublishedRevision
-    let candidatePath = Path.Combine(tempRoot, "unknown-cand.zip")
-    let candidateManifestPath = Path.Combine(tempRoot, "unknown-cand.json")
-    let payloadHashes = Fixture.canonicalPayloadHashes ()
-    let rawManifest =
-        let sb = StringBuilder()
-        sb.Append("{\"schemaVersion\":1,\"id\":\"dotnet\",\"version\":\"1.0.4\",\"revision\":\"") |> ignore
-        sb.Append(Fixture.canonicalEvaluatedRevision) |> ignore
-        sb.Append("\",\"sdk\":\"11.0.100-rc.1.26425.128\",\"entryDll\":\"Mcp.Dotnet.dll\",\"archive\":\"v1.0.4.zip\",\"rogue_field\":\"rogue-value\",\"files\":[") |> ignore
-        let mutable firstFile = true
-        for path, hash in payloadHashes do
-            if not firstFile then sb.Append "," |> ignore
-            sb.Append(sprintf "{\"path\":\"%s\",\"sha256\":\"%s\"}" path hash) |> ignore
-            firstFile <- false
-        sb.Append("],\"archiveFiles\":[\"FSharp.Core.dll\",\"Mcp.Dotnet.deps.json\",\"Mcp.Dotnet.dll\",\"Mcp.Dotnet.runtimeconfig.json\",\"NOTICE.txt\",\"distribution.json\"]}") |> ignore
-        sb.ToString()
-    let manifestBytes = Encoding.UTF8.GetBytes rawManifest
-    File.WriteAllText(candidateManifestPath, rawManifest)
+let unknownManifestFieldRejected () = async {
+    let path = Path.Combine(tempRoot, "unknown-field.zip")
+    let canonicalText = Fixture.buildManifestText evalRevision Fixture.canonicalSdk (Fixture.canonicalPayloadHashes ())
+    let node = JsonNode.Parse(canonicalText).AsObject()
+    node["rogue_field"] <- JsonValue.Create "rogue-value"
+    let manifestBytes = Encoding.UTF8.GetBytes(node.ToJsonString())
     do
-        use archive = ZipFile.Open(candidatePath, ZipArchiveMode.Create)
+        use archive = ZipFile.Open(path, ZipArchiveMode.Create)
         let writeEntry name (bytes: byte[]) =
             let entry = archive.CreateEntry(name, CompressionLevel.Optimal)
             entry.LastWriteTime <- DateTimeOffset(1980, 1, 1, 0, 0, 0, TimeSpan.Zero)
@@ -657,22 +642,40 @@ let unknownManifestFieldAddedClassifiedBeyondRevision () = async {
         for name, bytes in Fixture.canonicalEntryPayloads () do
             writeEntry name bytes
         writeEntry "distribution.json" manifestBytes
-    let! published = observationOf publishedPath
-    let! candidate = observationOf candidatePath
-    match published, candidate with
-    | Some pub, Some cand ->
-        match! compareInvoke pub cand Fixture.canonicalEvaluatedRevision with
-        | Ok (DifferentBeyondRevision _) ->
-            assertTrue "unknown-field added classified as DifferentBeyondRevision" true
-        | Ok other ->
-            failed <- failed + 1
-            failures.Add(sprintf "unknown-field added: expected DifferentBeyondRevision got %A" other)
-        | Error error ->
-            failed <- failed + 1
-            failures.Add(sprintf "unknown-field added: %s" (ReleaseError.message error))
-    | _ ->
+    match! observe path with
+    | Ok _ ->
         failed <- failed + 1
-        failures.Add("unknown-field added: observation failed")
+        failures.Add("unknown-field manifest: observation unexpectedly accepted")
+    | Error error ->
+        let message = ReleaseError.message error
+        assertTrue "unknown-field manifest fails closed with the strict field gate"
+            (message.Contains("unknown field", StringComparison.Ordinal)
+             || message.Contains("invalid", StringComparison.Ordinal))
+}
+let legacySchemaVersionRejected () = async {
+    let path = Path.Combine(tempRoot, "v1-schema.zip")
+    let canonicalText = Fixture.buildManifestText evalRevision Fixture.canonicalSdk (Fixture.canonicalPayloadHashes ())
+    let node = JsonNode.Parse(canonicalText).AsObject()
+    node["schemaVersion"] <- JsonValue.Create 1
+    let manifestBytes = Encoding.UTF8.GetBytes(node.ToJsonString())
+    do
+        use archive = ZipFile.Open(path, ZipArchiveMode.Create)
+        let writeEntry name (bytes: byte[]) =
+            let entry = archive.CreateEntry(name, CompressionLevel.Optimal)
+            entry.LastWriteTime <- DateTimeOffset(1980, 1, 1, 0, 0, 0, TimeSpan.Zero)
+            use source = new MemoryStream(bytes)
+            use target = entry.Open()
+            source.CopyTo(target)
+        for name, bytes in Fixture.canonicalEntryPayloads () do
+            writeEntry name bytes
+        writeEntry "distribution.json" manifestBytes
+    match! observe path with
+    | Ok _ -> failed <- failed + 1; failures.Add("legacy v1 schemaVersion: observation unexpectedly accepted")
+    | Error error ->
+        let message = ReleaseError.message error
+        assertTrue "legacy v1 schemaVersion is rejected by the strict parser"
+            (message.Contains("schemaVersion", StringComparison.Ordinal)
+             || message.Contains("unsupported", StringComparison.Ordinal))
 }
 let externalAttributesRejected () = async {
     let! published = observationOf canonicalRevisionArchive
@@ -892,7 +895,8 @@ let runSuite () = async {
     do! entryCountUpperBoundRejection ()
     do! compressionRatioBoundRejection ()
     do! duplicateKeyManifestRejected ()
-    do! unknownManifestFieldAddedClassifiedBeyondRevision ()
+    do! unknownManifestFieldRejected ()
+    do! legacySchemaVersionRejected ()
     do! externalAttributesRejected ()
     do! entryCommentRejected ()
     do! totalUncompressedBoundRejection ()
@@ -905,7 +909,7 @@ let tests =
         ensureCanonicalArchives ()
         try
             do! runSuite ()
-            Expect.equal 0 failed (String.concat Environment.NewLine failures)
+            Expect.equal failed 0 (String.concat Environment.NewLine failures)
         finally
             Fixture.safeDeleteDir tempRoot
     }

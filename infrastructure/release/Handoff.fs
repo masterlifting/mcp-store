@@ -48,17 +48,13 @@ let private readFileBounded (path: string) =
     | :? UnauthorizedAccessException as error -> Error(FileFailure("read", path, error.Message))
 
 let private pathSafe (name: string) =
-    not (String.IsNullOrWhiteSpace name)
-    && not (name.Contains("\\"))
-    && not (name.Contains(":"))
-    && not (name.StartsWith("/", StringComparison.Ordinal))
-    && (name.Split('/') |> Array.forall (fun segment -> segment <> "" && segment <> "." && segment <> ".." && (segment |> Seq.forall (fun ch -> int ch < 128))))
+    DistributionContract.isSafeRelativePath name
 
 let readCandidate (candidatePath: string) (policy: ReleasePolicy.PolicyProjection) (eventSha: string) : Result<CandidateArchiveSnapshot, ReleaseError> =
     try
         let canonicalPath = Path.GetFullPath candidatePath
         let archivePath = Path.Combine(canonicalPath, policy.ArchiveName)
-        let manifestPath = Path.Combine(canonicalPath, "distribution.json")
+        let manifestPath = Path.Combine(canonicalPath, DistributionContract.manifestEntryName)
         let info = FileInfo archivePath
         let candidateRootInfo = DirectoryInfo canonicalPath
         let candidateEntries = if candidateRootInfo.Exists then Directory.EnumerateFileSystemEntries canonicalPath |> Seq.map Path.GetFileName |> Set.ofSeq else Set.empty
@@ -75,7 +71,7 @@ let readCandidate (candidatePath: string) (policy: ReleasePolicy.PolicyProjectio
                 Directory.EnumerateFileSystemEntries canonicalPath
                 |> Seq.exists (fun path -> (File.GetAttributes path &&& FileAttributes.ReparsePoint) <> enum<FileAttributes> 0)
         if unsafeCandidatePath || unsafeCandidateMember then Error(MalformedArtifact(canonicalPath, "candidate directory or a member traverses a reparse point"))
-        elif candidateEntries <> Set.ofList [ policy.ArchiveName; "distribution.json" ] then Error(AllowlistMismatch("candidate directory must contain exactly the producer archive and distribution.json", [ policy.ArchiveName; "distribution.json" ], Set.toList candidateEntries))
+        elif candidateEntries <> Set.ofList [ policy.ArchiveName; DistributionContract.manifestEntryName ] then Error(AllowlistMismatch($"candidate directory must contain exactly the producer archive and {DistributionContract.manifestEntryName}", [ policy.ArchiveName; DistributionContract.manifestEntryName ], Set.toList candidateEntries))
         elif not info.Exists then Error(MissingArtifact canonicalPath)
         elif info.Length > maxArchiveBytes then Error(MalformedArtifact(canonicalPath, "candidate archive exceeds the bounded read"))
         else
@@ -103,10 +99,10 @@ let readCandidate (candidatePath: string) (policy: ReleasePolicy.PolicyProjectio
                                 match archive.GetEntry name with
                                 | null -> Error(MissingArtifact name)
                                 | entry -> use stream = entry.Open() in readBounded stream name
-                            match readMember "distribution.json" with
+                            match readMember DistributionContract.manifestEntryName with
                             | Error error ->
                                 match error with
-                                | MissingArtifact name -> Error(MalformedArtifact(name, "candidate producer archive is missing distribution.json"))
+                                | MissingArtifact name -> Error(MalformedArtifact(name, $"candidate producer archive is missing {DistributionContract.manifestEntryName}"))
                                 | _ -> Error error
                             | Ok embeddedManifestBytes ->
                                 match ReleaseArchive.parse policy.ArchiveName bytes with
@@ -115,33 +111,28 @@ let readCandidate (candidatePath: string) (policy: ReleasePolicy.PolicyProjectio
                                     match ReleaseCompare.observeBytes policy.ArchiveName bytes with
                                     | Error error -> Error error
                                     | Ok observation ->
-                                        let contract: ReleaseCompare.ComponentContract =
-                                            { ComponentId = policy.ComponentId
-                                              Version = policy.Version
-                                              ArchiveName = policy.ArchiveName
-                                              EntryAllowlist = policy.PublishedFiles @ [ "NOTICE.txt"; "distribution.json" ] }
-                                        match ReleaseCompare.validate contract observation "candidate" with
+                                        match ReleaseCompare.contractFromPolicy policy policy.ArchiveName with
                                         | Error error -> Error error
-                                        | Ok () ->
-                                            match observation.ManifestBody with
-                                            | None -> Error(MalformedArtifact(canonicalPath, "candidate producer archive is missing distribution.json"))
-                                            | Some body ->
-                                                match ReleaseCompare.parseEmbeddedManifestHeader body with
+                                        | Ok contract ->
+                                            match ReleaseCompare.validate contract observation "candidate" with
+                                            | Error error -> Error error
+                                            | Ok () ->
+                                                match ReleaseCompare.parseEmbeddedManifestEntry observation with
                                                 | Error error -> Error error
-                                                | Ok header ->
-                                                    let standalone = Encoding.UTF8.GetString manifestBytes
+                                                | Ok manifest ->
                                                     let identityChecks =
-                                                        [ header.Id = policy.ComponentId, "id"
-                                                          header.Version = policy.Version, "version"
-                                                          header.Archive = policy.ArchiveName, "archive"
-                                                          header.Revision = eventSha, "revision"
+                                                        [ manifest.Id = policy.ComponentId, "id"
+                                                          manifest.Version = policy.Version, "version"
+                                                          manifest.Archive = policy.ArchiveName, "archive"
+                                                          manifest.Revision = eventSha, "revision"
                                                           embeddedManifestBytes = manifestBytes, "manifest bytes" ]
+
                                                     match identityChecks |> List.tryFind (fun (valid, _) -> not valid) with
                                                     | Some (_, field) -> Error(MalformedArtifact(canonicalPath, $"candidate {field} does not match trusted release policy"))
                                                     | None ->
-                                                        match ReleaseCompare.parseEmbeddedManifestHeader standalone with
+                                                        match DistributionContract.parse (Encoding.UTF8.GetString manifestBytes) with
                                                         | Error error -> Error error
-                                                        | Ok standaloneHeader when standaloneHeader.Id <> policy.ComponentId || standaloneHeader.Version <> policy.Version || standaloneHeader.Archive <> policy.ArchiveName || standaloneHeader.Revision <> eventSha -> Error(MalformedArtifact(canonicalPath, "standalone manifest identity does not match trusted release policy"))
+                                                        | Ok standalone when standalone.Id <> policy.ComponentId || standalone.Version <> policy.Version || standalone.Archive <> policy.ArchiveName || standalone.Revision <> eventSha -> Error(MalformedArtifact(canonicalPath, "standalone manifest identity does not match trusted release policy"))
                                                         | Ok _ -> Ok(CandidateArchiveSnapshot(Array.copy bytes, Array.copy manifestBytes, archivePath, sha256 bytes))
     with
     | :? IOException as error -> Error(FileFailure("read", candidatePath, error.Message))

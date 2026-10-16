@@ -106,52 +106,60 @@ The distribution scripts are component-local: they emit only Workflow artifacts.
 The .NET MCP has its own producer boundary under `dotnet/` and its release is
 not part of the Workflow bootstrap.
 
-The v1 release build produces the immutable `v1.0.4.zip`
+The v1 release build produces the immutable `v1.0.6.zip`
 framework-dependent `net11.0` distribution. The archive filename encodes the
 version only; the producer identity already comes from the producer directory,
 the manifest `id`, the project/assembly identity, the release context, and
-the consumer descriptor. The consumer must invoke the pinned `Mcp.Workflow.dll`
-entry DLL with `dotnet exec`; it must not run source scripts or restore/build
-the producer at runtime.
+the consumer descriptor. The consumer must invoke the entry DLL with `dotnet exec`
+and pass the manifest-declared required arguments in order —
+`--profile-catalog <absolute path>` and
+`--profile-catalog-sha256 <lowercase SHA-256>`; it must not run source scripts or
+restore/build the producer at runtime.
 
 ```text
 dotnet build workflow/Mcp.Workflow.fsproj -c Release
 dotnet run --project workflow/Mcp.Workflow.fsproj -c Release --no-build
 ```
 
-For the immutable `v1.0.4.zip` asset, run
+For the immutable `v1.0.6.zip` asset, run
 `dotnet fsi workflow/release/Build.fsx`, then
 `dotnet fsi workflow/release/Pins.fsx`, and verify with
 `dotnet fsi workflow/tests/DistributionTests.fsx`. The build stages only
 `workflow/Mcp.Workflow.fsproj` under `workflow/dist/workflow/` and emits:
 
 ```text
-workflow/dist/v1.0.4.zip
+workflow/dist/v1.0.6.zip
 workflow/dist/workflow/distribution.json
 workflow/dist/consumer-pins.json
 ```
 
-`workflow/dist/consumer-pins.json` contains exactly one `workflow` pin and is the
-sole input for the downstream harness descriptor pin update. The manifest records
-the exact archive allowlist and a lowercase SHA-256 for every runtime file. The
-archive is allowlisted to the runtime DLL, its framework-dependent metadata,
-`NOTICE.txt`, and `distribution.json`; source, project, build output, PDB, and
-apphost files are rejected. Regeneration removes only the workflow v1 staging
+`workflow/dist/consumer-pins.json` is the single unwrapped `workflow` pin record
+and is the sole input for the downstream harness descriptor pin update. The
+manifest records the exact archive allowlist and a lowercase SHA-256 for every
+runtime file. The archive is allowlisted to the runtime DLL, its framework-dependent
+metadata, `NOTICE.txt`, and `distribution.json`; source, project, build output, PDB,
+and apphost files are rejected. Regeneration removes only the workflow staging
 directory. Packaging refuses to run from a dirty source tree and stamps each
 manifest with the clean `HEAD` revision it built from.
 
-**Packaging provenance gate.** The definitive `v1.0.4.zip` asset and its
+**Packaging provenance gate.** The definitive `v1.0.6.zip` asset and its
 `consumer-pins.json` must be produced only after this version-bump PR merges,
 from a clean fresh working tree on the final `main` committed revision. No
 packaging run, archive, or pin generation occurs from the PR branch or any
 pre-merge state, and this gate adds no new packaging tooling or automatic
 consumer updates.
 
-The manifest uses deterministic arrays: `files` contains `{ "path", "sha256" }`
-objects for the runtime allowlist. `path` is an exact slash-separated,
-repository-relative archive path matching the v1 consumer contract; paths are
-unique case-insensitively and each payload hash is lowercase SHA-256.
-`archiveFiles` contains the complete archive entry-name allowlist.
+The manifest is the shared distribution schema v2
+(`infrastructure/distribution/README.md`) and uses deterministic arrays: `files`
+contains `{ "path", "sha256" }` objects for the runtime allowlist, `NOTICE.txt`
+included. `path` is an exact slash-separated relative archive member path; paths
+are unique case-insensitively and each payload hash is lowercase SHA-256. Archive
+membership is exactly `files ∪ { "distribution.json" }`; there is no separate
+`archiveFiles` list. `launch.arguments` declares the required
+`--profile-catalog` / `--profile-catalog-sha256` argument descriptors in order,
+`runtime` is derived from the packaged `Mcp.Workflow.runtimeconfig.json` and
+cross-checked against its hashed bytes, and `sourceRepository` is derived from the
+fixed release asset URI.
 
 ## Persisted-reference inventory
 

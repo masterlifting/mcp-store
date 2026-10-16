@@ -28,6 +28,7 @@
     <Compile Include="Telegram.fs" />
     <Compile Include="Orchestration.fs" />
     <Compile Include="Authority.fs" />
+    <Compile Include="Contract.fs" />
     <Compile Include="Main.fs" />
   </ItemGroup>
   <ItemGroup>

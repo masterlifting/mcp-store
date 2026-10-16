@@ -87,11 +87,13 @@ let updateProjectEmitsCanonicalSdkLiteral () = async {
 let policyRejectsUnknownField () =
     let tempPath = Path.Combine(Path.GetTempPath(), "mcp-invocation-unknown-" + Guid.NewGuid().ToString("N") + ".json")
     let source =
-        "{\"componentId\":\"dotnet\",\"version\":\"1.0.4\",\"entryDll\":\"Mcp.Dotnet.dll\"," +
+        "{\"componentId\":\"dotnet\",\"version\":\"1.0.5\",\"entryDll\":\"Mcp.Dotnet.dll\"," +
         "\"sdkVersion\":\"11.0.100-rc.1.26425.128\",\"runtimeVersion\":\"11.0.0-rc.1.26425.128\"," +
-        "\"platform\":\"win-x64\",\"archiveName\":\"v1.0.4.zip\"," +
-        "\"assetUri\":\"https://github.com/masterlifting/mcp-store/releases/download/dotnet/v1.0.4.zip\"," +
-        "\"publishedFiles\":[\"Mcp.Dotnet.dll\"],\"rogueField\":\"rogue\"}"
+        "\"platform\":\"win-x64\",\"archiveName\":\"v1.0.5.zip\"," +
+        "\"assetUri\":\"https://github.com/masterlifting/mcp-store/releases/download/dotnet/v1.0.5.zip\"," +
+        "\"publishedFiles\":[\"Mcp.Dotnet.dll\"]," +
+        "\"launchArguments\":[{\"flag\":\"--fixture-input\",\"input\":\"fixtureInput\",\"type\":\"absolute-file\"}]," +
+        "\"rogueField\":\"rogue\"}"
     File.WriteAllText(tempPath, source)
     match ReleasePolicy.parseBytes tempPath (File.ReadAllBytes tempPath) with
     | Error (MalformedArtifact (_, detail)) ->

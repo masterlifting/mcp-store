@@ -11,6 +11,7 @@ open System.Text.Json
 open System.Text.Json.Nodes
 open Expecto
 open ReleaseTestProcess
+open DistributionContract
 
 type private StageFailure =
     | BuildFailure
@@ -20,9 +21,6 @@ type private StageFailure =
     | WorkflowPackagedFailure
 
 let private componentIds = [ "dotnet"; "workflow" ]
-
-let private sha256 (bytes: byte[]) =
-    SHA256.HashData bytes |> Convert.ToHexString |> fun value -> value.ToLowerInvariant()
 
 let private clearReadOnlyGitObjects (root: string) =
     let objectDirectory = Path.Combine(root, ".git", "objects")
@@ -53,9 +51,9 @@ let private write (root: string) (relativePath: string) (contents: string) =
     File.WriteAllText(path, contents)
     path
 
-// WHY: the production policy reader only consumes strict JSON over the canonical 9 fields,
-//   so the preparation fixture writes the same shape to a temporary Config.json. The JSON
-//   template is the single source of fixture policy; no F# grammar support is preserved.
+// WHY: the strict Config.json reader requires the ordered launch descriptors; the
+//   fixture supplies one generic flag/input pair so the projection path matches the
+//   canonical Configs without restating producer identity.
 let private policyJson componentId =
     let productName = if componentId = "dotnet" then "Dotnet" else "Workflow"
     let entryDll = $"Mcp.{productName}.dll"
@@ -74,6 +72,13 @@ let private policyJson componentId =
     files.Add(JsonValue.Create entryDll) |> ignore
     files.Add(JsonValue.Create $"Mcp.{productName}.runtimeconfig.json") |> ignore
     node["publishedFiles"] <- files
+    let launchArguments = JsonArray()
+    let argument = JsonObject()
+    argument["flag"] <- JsonValue.Create "--fixture-input"
+    argument["input"] <- JsonValue.Create "fixtureInput"
+    argument["type"] <- JsonValue.Create "absolute-file"
+    launchArguments.Add argument
+    node["launchArguments"] <- launchArguments
     node.ToJsonString(JsonSerializerOptions(WriteIndented = true))
 
 // WHY: test fixture generation now goes through the strict JSON policy template so the same
@@ -86,44 +91,20 @@ let private parsePolicy configPath =
         | Ok policy -> policy
         | Error error -> failwithf "fixture policy failed to parse: %s" (BuildProvenance.ReleaseError.message error)
 
-let private writeProducerArchive (root: string) (policy: ReleasePolicy.PolicyProjection) =
-    let payloads =
-        policy.PublishedFiles
-        |> List.map (fun name -> name, Encoding.UTF8.GetBytes($"fixture:{policy.ComponentId}:{name}"))
-        |> fun files -> files @ [ "NOTICE.txt", Encoding.UTF8.GetBytes "release preparation fixture" ]
-
-    let manifest = JsonObject()
-    manifest["schemaVersion"] <- JsonValue.Create 1
-    manifest["id"] <- JsonValue.Create policy.ComponentId
-    manifest["version"] <- JsonValue.Create policy.Version
-    manifest["revision"] <- JsonValue.Create("0123456789abcdef0123456789abcdef01234567")
-    manifest["sdk"] <- JsonValue.Create policy.SdkVersion
-    manifest["entryDll"] <- JsonValue.Create policy.EntryDll
-    manifest["archive"] <- JsonValue.Create policy.ArchiveName
-
-    let files = JsonArray()
-    for name, bytes in payloads do
-        if name <> "NOTICE.txt" then
-            let entry = JsonObject()
-            entry["path"] <- JsonValue.Create name
-            entry["sha256"] <- JsonValue.Create(sha256 bytes)
-            files.Add entry
-    manifest["files"] <- files
-
-    let archiveFiles = JsonArray()
-    for name in policy.PublishedFiles @ [ "NOTICE.txt"; "distribution.json" ] do
-        archiveFiles.Add(JsonValue.Create name)
-    manifest["archiveFiles"] <- archiveFiles
-    let manifestBytes = Encoding.UTF8.GetBytes(manifest.ToJsonString(JsonSerializerOptions(WriteIndented = true)))
+let private writeProducerArchive (root: string) (policy: ReleasePolicy.PolicyProjection) (revision: string) =
+    let payloads = Fixture.policyPayloads policy "fixture"
+    let manifestText = Fixture.policyManifestFor policy revision payloads
+    let manifestBytes = Encoding.UTF8.GetBytes manifestText
     let archivePath = Path.Combine(root, policy.ComponentId, "dist", policy.ArchiveName)
-    let manifestPath = Path.Combine(root, policy.ComponentId, "dist", policy.ComponentId, "distribution.json")
+    let manifestPath = Path.Combine(root, policy.ComponentId, "dist", policy.ComponentId, DistributionContract.manifestEntryName)
     Directory.CreateDirectory(Path.GetDirectoryName archivePath) |> ignore
     Directory.CreateDirectory(Path.GetDirectoryName manifestPath) |> ignore
     File.WriteAllBytes(manifestPath, manifestBytes)
 
     use stream = File.Create archivePath
     use archive = new ZipArchive(stream, ZipArchiveMode.Create)
-    for name, bytes in payloads @ [ "distribution.json", manifestBytes ] do
+
+    for name, bytes in payloads @ [ DistributionContract.manifestEntryName, manifestBytes ] do
         let entry = archive.CreateEntry(name, CompressionLevel.Optimal)
         entry.LastWriteTime <- DateTimeOffset(1980, 1, 1, 0, 0, 0, TimeSpan.Zero)
         use entryStream = entry.Open()
@@ -159,6 +140,20 @@ let private runGit root arguments =
         | Error error -> return failwithf "git %A could not run: %s" arguments error
     }
 
+let private runGitHead root =
+    async {
+        let info = ProcessStartInfo("git")
+        info.WorkingDirectory <- root
+        info.UseShellExecute <- false
+        info.RedirectStandardOutput <- true
+        info.RedirectStandardError <- true
+        [ "rev-parse"; "HEAD" ] |> List.iter info.ArgumentList.Add
+        match! capture 30000 info with
+        | Ok (0, stdout, _) -> return stdout.Trim()
+        | Ok (code, stdout, stderr) -> return failwithf "git rev-parse HEAD failed (%d): %s %s" code stdout stderr
+        | Error error -> return failwithf "git rev-parse HEAD could not run: %s" error
+    }
+
 let private writeFixture (root: string) (failure: StageFailure option) =
     async {
         let roster = JsonObject()
@@ -177,9 +172,7 @@ let private writeFixture (root: string) (failure: StageFailure option) =
                 |> Option.map (stageFailure componentId)
                 |> Option.defaultValue ("", "")
 
-            let configPath = write root $"{componentId}/release/Config.json" (policySource componentId)
-            let policy = parsePolicy configPath
-            writeProducerArchive root policy
+            write root $"{componentId}/release/Config.json" (policySource componentId) |> ignore
             write root $"{componentId}/release/Build.fsx" (stageScript "build" (scriptFails selectedProducer selectedStage componentId "build")) |> ignore
             write root $"{componentId}/release/Pins.fsx" (stageScript "pins" (scriptFails selectedProducer selectedStage componentId "pins")) |> ignore
             write root $"{componentId}/tests/DistributionTests.fsx" (stageScript "distribution" (scriptFails selectedProducer selectedStage componentId "distribution")) |> ignore
@@ -194,6 +187,14 @@ let private writeFixture (root: string) (failure: StageFailure option) =
             runGit
                 root
                 [ "-c"; "user.name=ReleaseTests"; "-c"; "user.email=release-tests@example.invalid"; "commit"; "--quiet"; "-m"; "fixture"; "--allow-empty" ]
+
+        // The packaged manifest must carry the committed HEAD, so the data-only dist
+        // output is generated after the source commit, mirroring production order.
+        let! head = runGitHead root
+
+        for componentId in componentIds do
+            let configPath = Path.Combine(root, componentId, "release", "Config.json")
+            writeProducerArchive root (parsePolicy configPath) head
     }
 
 let private runPrepare root configPath outputPath =

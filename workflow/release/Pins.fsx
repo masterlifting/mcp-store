@@ -11,26 +11,16 @@ let config = DistributionBuild.loadConfig (Path.Combine(__SOURCE_DIRECTORY__, "C
 let dist = Path.Combine(root, "workflow", "dist")
 let output = Path.Combine(dist, "consumer-pins.json")
 let componentId = config.ComponentId
-let version = config.Version
 let archiveName = config.ArchiveName
-let assetUri = config.AssetUri
 
 let manifestPath = Path.Combine(dist, componentId, "distribution.json")
 let archivePath = Path.Combine(dist, archiveName)
 
 let run () : Async<Result<string * string * string, ReleaseError>> =
     if not (File.Exists archivePath) || not (File.Exists manifestPath) then
-        async { return Error(MissingArtifact "run workflow/release/Build.fsx before preparing workflow v1 pins") }
+        async { return Error(MissingArtifact "run workflow/release/Build.fsx before preparing the workflow consumer pin") }
     else
-        releaseResult {
-            do!
-                ReleasePins.validateManifestIdentity
-                    manifestPath
-                    [ "id", componentId; "version", version; "archive", archiveName ]
-
-            return!
-                ReleasePins.writeConsumerPins root manifestPath archivePath output componentId archiveName assetUri
-        }
+        ReleasePins.writeConsumerPins root config manifestPath archivePath output
 
 // Standalone entry bridge: the only synchronous wait in this script's flow.
 let archiveSha256, manifestSha256, revision =

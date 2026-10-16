@@ -50,7 +50,7 @@ let assertErrorMatches name fragment (result: Result<'a, ReleaseError>) =
             failures.Add(sprintf "%s: expected fragment '%s' got '%s'" name fragment message)
 
 let private tempRoot = Path.Combine(Path.GetTempPath(), "mcp-release-metadata-tests-" + Guid.NewGuid().ToString("N"))
-let private completeProjection = {
+let private completeProjection: ProducerMetadataProjection = {
     SchemaVersion = metadataSchemaVersion
     ComponentId = "dotnet"
     Version = "1.0.4"

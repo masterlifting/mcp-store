@@ -1,13 +1,13 @@
 # role: entrypoint/command
 # Runs the complete non-publishing release regression gate: the compiled Expecto release suite plus the retained producer provenance entrypoint.
 # The compiled suite is a console Expecto entrypoint, so `dotnet test` reports no counts for it; the native Expecto exit code and the executed-case count are the gate.
-# The historical integration is a required case, so a missing pinned historical fixture fails the gate closed instead of excluding or rewriting any case.
+# The retained baseline regression is a required case, so a suite that omits it fails the gate closed instead of excluding or rewriting any case.
+# The compiled case owns its canonical fixtures, so this gate reads no fixture root, stages no fixture transport and downloads nothing.
 
 [CmdletBinding()]
 param(
     [string]$Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path,
-    [string]$Configuration = "Release",
-    [string]$HistoricalRoot = $env:MCP_RELEASE_HISTORICAL_ROOT
+    [string]$Configuration = "Release"
 )
 
 $ErrorActionPreference = "Stop"
@@ -51,19 +51,8 @@ foreach ($relative in $scriptEntrypoints + $orchestratedEntrypoints + $packagedE
     }
 }
 
-# The pinned fixture identity mirrors the compiled Historical case, which owns the fixture names and re-verifies each archive's SHA-256 and size itself.
-
-# The complete suite cannot run without the historical archives, and no case may be excluded to work around that.
-if ([string]::IsNullOrWhiteSpace($HistoricalRoot)) {
-    Write-Host "::error::MCP_RELEASE_HISTORICAL_ROOT is not set; the complete compiled release suite requires the pinned historical fixtures and this gate does not exclude cases"
-    exit 1
-}
-if (-not (Test-Path -LiteralPath $HistoricalRoot -PathType Container)) {
-    Write-Host "::error::MCP_RELEASE_HISTORICAL_ROOT does not name a directory: $HistoricalRoot"
-    exit 1
-}
-
-$historicalRootResolved = (Resolve-Path -LiteralPath $HistoricalRoot).Path
+# The retained baseline regression case owns its canonical fixtures and re-verifies each archive hash itself, so this
+# gate reads no fixture root and no case may be excluded to work around a missing download.
 
 $outputBefore = @{}
 foreach ($name in @("GITHUB_ENV", "GITHUB_OUTPUT")) {
@@ -91,14 +80,12 @@ if ($inventory.Count -eq 0) {
 
 $historicalCases = @($inventory | Where-Object { $_ -match '\.Historical ' })
 if ($historicalCases.Count -eq 0) {
-    throw "the compiled suite does not report its historical integration case; refusing to run an unverified inventory"
+    throw "the compiled suite does not report its retained baseline regression case; refusing to run an unverified inventory"
 }
 
 $failed = New-Object System.Collections.Generic.List[string]
 Push-Location $Root
 try {
-    $env:MCP_RELEASE_HISTORICAL_ROOT = $historicalRootResolved
-
     Write-Host "::group::Release.Tests (complete compiled suite)"
     $lines = Read-Lines (& dotnet $suiteDll --sequenced --no-spinner 2>&1)
     $code = $LASTEXITCODE
