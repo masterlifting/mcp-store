@@ -81,6 +81,24 @@ let private parsePublishCli (argv: string[]) =
                   EventSha = values["--event-sha"]
                   Repo = values["--repo"] }
 
+// The private publication directory is the runner-temp parent of the candidate directory; it holds the
+// uploaded projection and every transport download, so it must exist before the first remote observation.
+let ensurePublicationDirectory (candidateRoot: string) : Result<string, ReleaseError> =
+    match Path.GetDirectoryName candidateRoot with
+    | parent when String.IsNullOrEmpty parent ->
+        Error(FileFailure("mkdir", candidateRoot, "the candidate directory has no parent directory for the private publication directory"))
+    | parent ->
+        let directory = Path.Combine(parent, "publication")
+
+        try
+            Directory.CreateDirectory directory |> ignore
+            Ok directory
+        with
+        | :? IOException as error -> Error(FileFailure("mkdir", directory, error.Message))
+        | :? UnauthorizedAccessException as error -> Error(FileFailure("mkdir", directory, error.Message))
+        | :? ArgumentException as error -> Error(FileFailure("mkdir", directory, error.Message))
+        | :? NotSupportedException as error -> Error(FileFailure("mkdir", directory, error.Message))
+
 let private runPublishPipelineWithTransportFactory (createTransport: unit -> ReleasePublish.HttpTransport) (policy: ReleasePolicy.PolicyProjection) (snapshot: ReleaseHandoff.CandidateArchiveSnapshot) (eventSha: string) (metadataLocalPath: string) (owner: string) (repo: string) =
     async {
         match! ReleaseEvaluate.VerifiedCandidate.createFromSnapshot snapshot policy policy.ArchiveName eventSha metadataLocalPath owner repo with
@@ -147,9 +165,11 @@ let private runPublishMode (argv: string[]) =
                                             match ReleaseHandoff.readCandidate candidateRoot policy cli.EventSha with
                                             | Error error -> emitFailure (ReleaseError.message error); return 4
                                             | Ok snapshot ->
-                                                let privateDirectory = Path.Combine(Path.GetDirectoryName(candidateRoot), "publication")
-                                                let metadataPath = Path.Combine(privateDirectory, ReleaseMetadata.metadataAssetName policy.ComponentId policy.Version)
-                                                return! runPublishPipelineWithTransportFactory (fun () -> ReleasePublish.defaultHttpTransport ()) policy snapshot cli.EventSha metadataPath "masterlifting" "mcp-store"
+                                                match ensurePublicationDirectory candidateRoot with
+                                                | Error error -> emitFailure (ReleaseError.message error); return 4
+                                                | Ok privateDirectory ->
+                                                    let metadataPath = Path.Combine(privateDirectory, ReleaseMetadata.metadataAssetName policy.ComponentId policy.Version)
+                                                    return! runPublishPipelineWithTransportFactory (fun () -> ReleasePublish.defaultHttpTransport ()) policy snapshot cli.EventSha metadataPath "masterlifting" "mcp-store"
     }
 
 [<EntryPoint>]

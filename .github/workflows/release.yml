@@ -653,6 +653,13 @@ jobs:
           $components = @(ConvertFrom-Json $env:RELEASE_COMPONENTS)
           $evidenceRoot = Join-Path $temp "release-evidence"
           New-Item -ItemType Directory -Path $evidenceRoot -Force | Out-Null
+          # The runner writes the verified projection beside the candidate transports and never inside the checkout: its
+          # private publication directory is the candidate transport root's parent, which here is this job's runner temp
+          # directory. Only the trusted projection (the project step's own value read from the canonical Config.json)
+          # derives the expected asset name; the runner's JSON never derives it. Nothing is moved and no checkout path is
+          # written, and the comparison is case-aware for the filesystem the job runs on.
+          $pathComparison = if ([System.IO.Path]::DirectorySeparatorChar -eq '\') { [System.StringComparison]::OrdinalIgnoreCase } else { [System.StringComparison]::Ordinal }
+          $unverified = @()
           foreach ($component in $components) {
             $statusLog = Join-Path $temp "publish-stdout-$component.json"
             $exitLog = Join-Path $temp "publish-exit-$component.txt"
@@ -682,25 +689,143 @@ jobs:
                 metadataSha256 = "$($document.publishedMetadataSha256)"
                 revision       = "$($document.publishedRevision)"
               }
+              # Only the exact trusted publication path is accepted: the runner's reported path must be the trusted
+              # publication root plus the component/version metadata asset name. A checkout path, a candidate transport
+              # root, a sibling prefix, a nested path and a wrong component or version are all refused as evidence.
+              $versionName = "RELEASE_$($component.ToUpperInvariant())_VERSION"
+              $componentVersion = [System.Environment]::GetEnvironmentVariable($versionName)
               $projectionPath = "$($document.metadataLocalPath)"
-              $projectionIsUsable = $false
-              if (-not [string]::IsNullOrWhiteSpace($projectionPath) -and [System.IO.Path]::IsPathRooted($projectionPath) -and (Test-Path -LiteralPath $projectionPath -PathType Leaf)) {
-                $workspaceFull = [System.IO.Path]::GetFullPath($env:GITHUB_WORKSPACE).TrimEnd([System.IO.Path]::DirectorySeparatorChar)
-                $projectionFull = [System.IO.Path]::GetFullPath($projectionPath)
-                $projectionIsUsable = $projectionFull.StartsWith($workspaceFull + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::Ordinal)
-              }
-              if ($projectionIsUsable) {
-                $projection = Get-Content -LiteralPath $projectionPath -Raw | ConvertFrom-Json
-                $projectionArchive = "$($projection.archiveSha256)"
-                if (-not [string]::IsNullOrWhiteSpace($projectionArchive) -and $projectionArchive -ceq $published.archiveSha256 -and -not [string]::IsNullOrWhiteSpace("$($projection.manifestSha256)") -and -not [string]::IsNullOrWhiteSpace("$($projection.publishedRevision)")) {
-                  Copy-Item -LiteralPath $projectionPath -Destination (Join-Path $evidenceRoot "published-metadata-$component.json") -Force
-                  $projectionKind = "verified-projection"
-                  $verified = $true
-                } else {
-                  $diagnostics += "the projection at '$projectionPath' does not carry the verified published archive hash, manifest hash and revision"
-                }
+              $locationFault = $null
+              if ([string]::IsNullOrWhiteSpace($temp) -or [string]::IsNullOrWhiteSpace($env:GITHUB_WORKSPACE)) {
+                $locationFault = "this step cannot derive the trusted publication path without RUNNER_TEMP and GITHUB_WORKSPACE"
+              } elseif ([string]::IsNullOrWhiteSpace($componentVersion)) {
+                $locationFault = "the trusted projection carries no '$versionName' value; the expected metadata asset name cannot be derived"
               } else {
-                $diagnostics += "no verified projection file was present inside the workspace root"
+                $publicationRoot = ([System.IO.Path]::GetFullPath((Join-Path $temp "publication"))).TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+                $expectedPath = [System.IO.Path]::GetFullPath((Join-Path $publicationRoot "$component-$componentVersion-metadata.json"))
+                $workspaceFull = ([System.IO.Path]::GetFullPath($env:GITHUB_WORKSPACE)).TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+                $projectionFull = $null
+                if (-not [string]::IsNullOrWhiteSpace($projectionPath) -and [System.IO.Path]::IsPathRooted($projectionPath)) {
+                  try { $projectionFull = [System.IO.Path]::GetFullPath($projectionPath) } catch { $projectionFull = $null }
+                }
+                if ([string]::IsNullOrWhiteSpace($projectionPath)) {
+                  $locationFault = "the runner reported no metadata local path where the trusted publication path is '$expectedPath'"
+                } elseif (-not [System.IO.Path]::IsPathRooted($projectionPath)) {
+                  $locationFault = "the runner reported the non-rooted metadata path '$projectionPath' where the trusted publication path is '$expectedPath'"
+                } elseif ($null -eq $projectionFull) {
+                  $locationFault = "the runner reported the unusable metadata path '$projectionPath' where the trusted publication path is '$expectedPath'"
+                } elseif ($projectionFull.StartsWith($workspaceFull + [System.IO.Path]::DirectorySeparatorChar, $pathComparison)) {
+                  $locationFault = "the runner reported the metadata projection inside the checkout ('$projectionFull') where the trusted publication path is '$expectedPath'"
+                } elseif ($projectionFull.Equals($expectedPath, $pathComparison)) {
+                  if (-not (Test-Path -LiteralPath $expectedPath -PathType Leaf)) {
+                    $locationFault = "no verified metadata projection exists at the trusted publication path '$expectedPath'"
+                  }
+                } elseif ($projectionFull.StartsWith($publicationRoot + [System.IO.Path]::DirectorySeparatorChar, $pathComparison)) {
+                  $locationFault = "the runner reported the metadata projection '$projectionFull' inside the trusted publication root instead of '$expectedPath'"
+                } else {
+                  $locationFault = "the runner reported the metadata projection '$projectionFull' where the trusted publication path is '$expectedPath'"
+                }
+              }
+              if ($null -ne $locationFault) {
+                $diagnostics += $locationFault
+                $unverified += $component
+              } else {
+                $projection = $null
+                $projectionBytes = $null
+                $parsedProjection = $false
+                # The exact projection bytes are read once and are the only bytes this step parses, hashes and copies, so
+                # the evidence copy cannot differ from the bytes the trusted digest proves and no read/copy race exists.
+                try {
+                  $projectionBytes = [System.IO.File]::ReadAllBytes($expectedPath)
+                  $projection = ([System.Text.Encoding]::UTF8.GetString($projectionBytes) | ConvertFrom-Json -ErrorAction Stop)
+                  $parsedProjection = $true
+                } catch { $parsedProjection = $false }
+                if (-not $parsedProjection) {
+                  $diagnostics += "the verified projection at '$expectedPath' is not parseable JSON"
+                  $unverified += $component
+                } else {
+                  # Every published hash, the published revision and the candidate/policy identity must match exactly;
+                  # mere presence is not evidence. The candidate archive hash is deliberately not the compared value,
+                  # because a revision-only-equivalent no-op legitimately publishes bytes whose hash differs from the
+                  # current candidate, and the published revision is the remote archive's revision, not the event SHA.
+                  # The projection's toolchain fields are informational for consumer pinning and are not compared.
+                  # Each field also declares the JSON type the verified projection must carry. ConvertFrom-Json
+                  # parses a JSON integer into Int32/Int64 and every other JSON type into its own CLR type, while
+                  # string interpolation would render the JSON number 1.0, the JSON array [1], the JSON string "1"
+                  # and the JSON boolean true as interchangeable text, so text equality alone is not proof of the
+                  # projection's JSON type. The parsed type is proven before any value is compared; a field that is
+                  # absent, JSON null or empty keeps the same "carries no" diagnostic as before.
+                  $expectedFields = [ordered]@{
+                    schemaVersion     = @{ JsonType = "integer"; Value = 1 }
+                    componentId       = @{ JsonType = "string"; Value = $component }
+                    version           = @{ JsonType = "string"; Value = $componentVersion }
+                    assetUri          = @{ JsonType = "string"; Value = "$($document.assetUri)" }
+                    archiveName       = @{ JsonType = "string"; Value = "$($document.archiveName)" }
+                    archiveSha256     = @{ JsonType = "string"; Value = $published.archiveSha256 }
+                    manifestSha256    = @{ JsonType = "string"; Value = $published.manifestSha256 }
+                    publishedRevision = @{ JsonType = "string"; Value = $published.revision }
+                  }
+                  $projectionFaults = @()
+                  foreach ($field in $expectedFields.Keys) {
+                    $expected = $expectedFields[$field]
+                    $expectedValue = "$($expected.Value)"
+                    $observed = $projection.$field
+                    $observedValue = if ($null -eq $observed) { "" } else { "$observed" }
+                    $observedIsInteger = $observed -is [int] -or $observed -is [long]
+                    $observedJsonType =
+                      if ($null -eq $observed) { "null" }
+                      elseif ($observed -is [string]) { "string" }
+                      elseif ($observedIsInteger) { "integer" }
+                      elseif ($observed -is [double] -or $observed -is [float] -or $observed -is [decimal]) { "number" }
+                      elseif ($observed -is [bool]) { "boolean" }
+                      elseif ($observed -is [System.Array]) { "array" }
+                      elseif ($observed -is [System.Management.Automation.PSCustomObject]) { "object" }
+                      else { "non-standard value" }
+                    if ([string]::IsNullOrWhiteSpace($expectedValue)) {
+                      $projectionFaults += "the verified publisher result carries no '$field' value to prove against the projection"
+                    } elseif ([string]::IsNullOrWhiteSpace($observedValue)) {
+                      $projectionFaults += "the verified projection at '$expectedPath' carries no '$field'"
+                    } elseif ($expected.JsonType -eq "integer" -and -not $observedIsInteger) {
+                      $projectionFaults += "the verified projection '$field' is a JSON $observedJsonType, not the JSON integer '$expectedValue'"
+                    } elseif ($expected.JsonType -eq "string" -and -not ($observed -is [string])) {
+                      $projectionFaults += "the verified projection '$field' is a JSON $observedJsonType, not the JSON string '$expectedValue'"
+                    } elseif ($expected.JsonType -eq "integer") {
+                      if ([long]$observed -ne [long]$expected.Value) {
+                        $projectionFaults += "the verified projection '$field' is '$observedValue', not the verified '$expectedValue'"
+                      }
+                    } elseif ($observed -cne $expectedValue) {
+                      $projectionFaults += "the verified projection '$field' is '$observedValue', not the verified '$expectedValue'"
+                    }
+                  }
+                  # The eight typed fields above prove the projection's declared content, not that these exact bytes are
+                  # the bytes the runner published: the runner's publishedMetadataSha256 is the remote-verified digest
+                  # of the published metadata asset, so it is the only trusted statement about those bytes and this
+                  # projection must hash to it. The bytes read once above are hashed as they are on disk; nothing is
+                  # reserialized between this proof and the evidence write below, so changed, extra or stale local bytes
+                  # are never recorded as verified evidence. The digest is required in the bare lowercase form the runner
+                  # emits (Convert.ToHexString of the SHA-256, lower-cased), never a prefixed or upper-cased platform
+                  # digest, so a non-canonical value is refused instead of normalized.
+                  $trustedMetadataSha = $published.metadataSha256
+                  if ([string]::IsNullOrWhiteSpace($trustedMetadataSha)) {
+                    $projectionFaults += "the verified publisher result carries no 'publishedMetadataSha256' value to prove the verified projection bytes at '$expectedPath'"
+                  } elseif ($trustedMetadataSha -cnotmatch '^[0-9a-f]{64}$') {
+                    $projectionFaults += "the verified publisher result carries the malformed 'publishedMetadataSha256' value '$trustedMetadataSha', not a bare lowercase SHA-256"
+                  } else {
+                    $observedMetadataSha = [System.Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($projectionBytes)).ToLowerInvariant()
+                    if ($observedMetadataSha -cne $trustedMetadataSha) {
+                      $projectionFaults += "the verified projection at '$expectedPath' hashes to $observedMetadataSha, not the verified published metadata SHA-256 $trustedMetadataSha"
+                    }
+                  }
+                  if ($projectionFaults.Count -eq 0) {
+                    # One read, one hash, one write of the same byte array: the evidence copy is exactly the proved bytes.
+                    [System.IO.File]::WriteAllBytes((Join-Path $evidenceRoot "published-metadata-$component.json"), $projectionBytes)
+                    $projectionKind = "verified-projection"
+                    $verified = $true
+                  } else {
+                    $diagnostics += $projectionFaults
+                    $unverified += $component
+                  }
+                }
               }
             } elseif ($structured) {
               $diagnostics += "the runner reported '$status' with reason '$reason'"
@@ -750,12 +875,19 @@ jobs:
             Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value $summary.ToString()
           }
           "evidenceRoot=$evidenceRoot" >> $env:GITHUB_OUTPUT
+          # An unproven projection is recorded, never hidden: this step runs after the irreversible publication, so a
+          # hard failure here could not prevent the publish and would misreport a successful publication as failed.
+          # The evidence artifact and the run annotation carry the incomplete proof instead.
+          if ($unverified.Count -gt 0) {
+            Write-Host "::warning::the published projection was not verified for [$($unverified -join ', ')]; the recorded published hashes and revision come from the runner's own verified summary without a locally proven projection"
+          }
 
       - name: upload the release metadata evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          # The verified projections are copied above only when they matched the observed published archive.
+          # The verified projections are copied above only when every published hash, the published revision and the
+          # candidate/policy identity matched the trusted publication path.
           name: release-metadata
           path: ${{ runner.temp }}/release-evidence
           if-no-files-found: warn
