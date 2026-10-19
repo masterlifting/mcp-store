@@ -4,6 +4,7 @@
 
 open System
 open System.IO
+open SharedFailure
 open BuildProvenance
 
 let root = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", ".."))

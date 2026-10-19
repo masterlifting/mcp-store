@@ -8,7 +8,7 @@ module DistributionPin
 open System
 open System.Text.Json
 open System.Text.Json.Nodes
-open BuildProvenance
+open SharedFailure
 
 // A mismatched schema version is rejected so a schema change cannot bypass the strict field check.
 let schemaVersion = 1

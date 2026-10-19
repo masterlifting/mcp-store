@@ -4,6 +4,7 @@
 // provenance, publish, staging, manifest, and archive identical across producers.
 module DistributionBuild
 
+#load "Failure.fs"
 #load "Provenance.fs"
 #load "distribution/Contract.fs"
 #load "release/Policy.fs"
@@ -13,6 +14,7 @@ open System.IO
 open System.IO.Compression
 open System.Text
 open System.Threading
+open SharedFailure
 open BuildProvenance
 open DistributionContract
 open ReleasePolicy

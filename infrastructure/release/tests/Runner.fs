@@ -7,6 +7,7 @@ open System
 open System.Diagnostics
 open System.IO
 open System.Text.Json.Nodes
+open SharedFailure
 open BuildProvenance
 open ReleaseTestProcess
 

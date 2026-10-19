@@ -11,13 +11,14 @@ open System.IO
 open System.IO.Compression
 open System.Security.Cryptography
 open System.Text
+open SharedFailure
 open BuildProvenance
 open DistributionContract
 
 // `Raw` is the exact archive entry the comparison normalizes against, so no local/central metadata is discarded.
 type EntryObservation =
     { Name: string
-      Raw: ReleaseArchive.Entry
+      Raw: DistributionArchive.Entry
       PayloadSha256: string }
 
 // `ManifestBody`/`ManifestSha256` retain the published manifest bytes and hash; the revision it carries stays distinct from the evaluated HEAD.
@@ -78,11 +79,11 @@ let private readArchiveBytes (path: string) : Result<byte[], ReleaseError> =
 
         if not info.Exists then
             Error(MissingArtifact path)
-        elif info.Length > ReleaseArchive.maxArchiveBytes then
+        elif info.Length > DistributionArchive.maxArchiveBytes then
             Error(
                 MalformedArtifact(
                     path,
-                    $"the archive is {info.Length} bytes which exceeds the {ReleaseArchive.maxArchiveBytes}-byte bound"))
+                    $"the archive is {info.Length} bytes which exceeds the {DistributionArchive.maxArchiveBytes}-byte bound"))
         else
             use stream = File.OpenRead path
             let length = int info.Length
@@ -130,7 +131,7 @@ let private validateRuntimeConfiguration
                 manifestEntryName,
                 $"the manifest 'runtime.config' '{manifest.Runtime.Config}' is absent from the archive"))
     | Some entry ->
-        match ReleaseArchive.decompress entry.Raw with
+        match DistributionArchive.decompress entry.Raw with
         | Error error -> Error error
         | Ok payload ->
             match runtimeRequirementFromConfig manifest.Runtime.Config payload with
@@ -183,7 +184,7 @@ let private selfConsistency (observation: ArchiveObservation) : Result<unit, Rel
 // verifies self-consistency. The single source of validation truth lives here
 // so the path-based and byte-based public entries share the exact same checks.
 let private validateParsedArchive
-    (parsed: ReleaseArchive.Archive)
+    (parsed: DistributionArchive.Archive)
     (path: string)
     (bytes: byte[])
     : Result<ArchiveObservation, ReleaseError> =
@@ -197,7 +198,7 @@ let private validateParsedArchive
         match failure with
         | Some _ -> ()
         | None ->
-            match ReleaseArchive.decompress raw with
+            match DistributionArchive.decompress raw with
             | Error error -> failure <- Some error
             | Ok payload ->
                 let payloadSha256 = sha256Hex payload
@@ -239,7 +240,7 @@ let observe (path: string) : Async<Result<ArchiveObservation, ReleaseError>> =
         match readArchiveBytes path with
         | Error error -> return Error error
         | Ok bytes ->
-            match ReleaseArchive.parse path bytes with
+            match DistributionArchive.parse path bytes with
             | Error error -> return Error error
             | Ok parsed -> return validateParsedArchive parsed path bytes
     }
@@ -248,7 +249,7 @@ let observe (path: string) : Async<Result<ArchiveObservation, ReleaseError>> =
 // this entrypoint re-uses the exact same validation pipeline without ever
 // touching the filesystem.
 let observeBytes (path: string) (bytes: byte[]) : Result<ArchiveObservation, ReleaseError> =
-    match ReleaseArchive.parse path bytes with
+    match DistributionArchive.parse path bytes with
     | Error error -> Error error
     | Ok parsed -> validateParsedArchive parsed path bytes
 
@@ -293,7 +294,7 @@ let validate (contract: ComponentContract) (observation: ArchiveObservation) (la
                     Ok()
 
 // Excludes the derived local-header offset; every stored byte, including the compressed payload, must match.
-let private compareRawEntries (published: ReleaseArchive.Entry) (candidate: ReleaseArchive.Entry) : string option =
+let private compareRawEntries (published: DistributionArchive.Entry) (candidate: DistributionArchive.Entry) : string option =
     if published.NameBytes <> candidate.NameBytes then
         Some $"entry '{published.Name}' name bytes differ"
     elif published.VersionMadeBy <> candidate.VersionMadeBy || published.VersionNeeded <> candidate.VersionNeeded then
@@ -370,7 +371,7 @@ let private compareManifestMetadata (published: EntryObservation) (candidate: En
         None
 
 // Re-proves that the stored manifest bytes are the canonical Deflate(Optimal) encoding, so a compressed difference is body-derived.
-let private confirmCanonicalDeflate (entry: ReleaseArchive.Entry) (payload: byte[]) : Result<unit, ReleaseError> =
+let private confirmCanonicalDeflate (entry: DistributionArchive.Entry) (payload: byte[]) : Result<unit, ReleaseError> =
     use output = new MemoryStream()
 
     do
@@ -473,7 +474,7 @@ let private compareInternal
                         match compareManifestMetadata publishedEntry candidateEntry with
                         | Some reason -> differs reason
                         | None ->
-                            match ReleaseArchive.decompress publishedEntry.Raw, ReleaseArchive.decompress candidateEntry.Raw with
+                            match DistributionArchive.decompress publishedEntry.Raw, DistributionArchive.decompress candidateEntry.Raw with
                             | Error error, _ -> Error error
                             | _, Error error -> Error error
                             | Ok publishedBytes, Ok candidateBytes ->

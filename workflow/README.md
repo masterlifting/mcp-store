@@ -110,11 +110,12 @@ The v1 release build produces the immutable `v1.0.6.zip`
 framework-dependent `net11.0` distribution. The archive filename encodes the
 version only; the producer identity already comes from the producer directory,
 the manifest `id`, the project/assembly identity, the release context, and
-the consumer descriptor. The consumer must invoke the entry DLL with `dotnet exec`
-and pass the manifest-declared required arguments in order —
+the consumer descriptor. Installation, verification, and launch are owned by the
+shared resolver (`infrastructure/resolver/README.md`), which starts the entry DLL
+with `dotnet exec` and supplies the manifest-declared required arguments in order —
 `--profile-catalog <absolute path>` and
-`--profile-catalog-sha256 <lowercase SHA-256>`; it must not run source scripts or
-restore/build the producer at runtime.
+`--profile-catalog-sha256 <lowercase SHA-256>`; a consumer must not run source
+scripts or restore/build the producer at runtime.
 
 ```text
 dotnet build workflow/Mcp.Workflow.fsproj -c Release

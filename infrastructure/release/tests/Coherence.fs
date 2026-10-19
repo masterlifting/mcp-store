@@ -7,6 +7,7 @@ open System.Text.RegularExpressions
 open System.Text.Json.Nodes
 open Expecto
 open ReleaseTestProcess
+open SharedFailure
 open BuildProvenance
 
 let private repoRoot = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "..", ".."))

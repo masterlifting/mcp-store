@@ -12,6 +12,7 @@ open System.Net.Http.Headers
 open System.Security.Cryptography
 open System.Text
 open System.Text.Json
+open SharedFailure
 open BuildProvenance
 
 type ReleaseLocator =
@@ -425,7 +426,7 @@ let gitHubObserver (auth: AuthToken) (downloadDir: string) (transport: HttpTrans
                     | Error error -> return Error error
                     | Ok None -> return Ok Absent
                     | Ok (Some (claimedDigest, assetId)) ->
-                        match! downloadAssetBytes transport auth locator assetId ReleaseArchive.maxArchiveBytes with
+                        match! downloadAssetBytes transport auth locator assetId DistributionArchive.maxArchiveBytes with
                         | Error error -> return Error error
                         | Ok bytes ->
                             match verifyAssetDigest assetName claimedDigest bytes with
@@ -610,7 +611,7 @@ let uploadCandidateBytes
                     "application/octet-stream"
                     candidateBytes
                     verifiedDigest
-                    ReleaseArchive.maxArchiveBytes
+                    DistributionArchive.maxArchiveBytes
                     verifyArchiveBytes
                     transport
     }

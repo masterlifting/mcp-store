@@ -7,22 +7,26 @@ do not build or run this source checkout at runtime.
 
 ## Consumer installation
 
-The consumer provisions the release asset into an extraction root **it** selects
-and verifies the archive SHA-256 and `distribution.json` manifest SHA-256 before
-use. The manifest describes launch metadata only: extraction-root selection,
-caching, and resolution are consumer-owned and are not part of this distribution.
+Installation, verification, and launch are owned by the shared resolver
+(`infrastructure/resolver/README.md`). The consumer declares this component's pin
+from `dotnet/dist/consumer-pins.json` and starts the MCP through that boundary;
+it does not select an extraction root, verify release hashes, or compose the
+process itself.
 
-The entry assembly is started through an absolute .NET host with the ordered
-required arguments the manifest declares:
+The manifest describes launch metadata only: `kind = dotnet-exec`, the entry
+assembly, and the ordered required arguments the resolver supplies from validated
+launch inputs. The resulting child command line is:
 
 ```text
-<absolute-dotnet-host> exec <extraction-root>/Mcp.Dotnet.dll --dotnet-host <absolute-dotnet-host> --artifact-root <absolute path>
+<absolute-dotnet-host> exec <install>/Mcp.Dotnet.dll --dotnet-host <absolute-dotnet-host> --artifact-root <absolute path>
 ```
 
-The host path is intentionally supplied by the consumer. The producer rejects
-relative, non-canonical, workspace-local, missing, or reparse-point hosts.
+The host path is supplied through the resolver, which launches the entrypoint with
+the caller's absolute host and rejects a non-absolute or missing value. The
+producer itself also rejects relative, non-canonical, workspace-local, missing, or
+reparse-point hosts.
 
-The producer requires an explicit `artifactRoot` supplied by the consumer. It
+The producer requires an explicit `artifactRoot` passed as a launch input. It
 must be a fully-qualified local absolute path outside the trusted workspace; the
 producer never resolves a relative path and never derives an OpenCode-specific
 path. Roots are canonicalized, validated without side effects, and rejected when

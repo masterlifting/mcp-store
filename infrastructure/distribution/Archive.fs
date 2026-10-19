@@ -1,13 +1,13 @@
 // role: reusable module/helper
-// Raw ZIP32 reader for the deterministic producer archives.
+// Raw ZIP32 reader for the deterministic producer archives, shared by the release pipeline and the resolver.
 // It validates the exact local/central layout and exposes every byte a strict comparison must preserve.
 // Only the canonical Deflate32 shape the producer emits is accepted; any other layout fails closed.
-module ReleaseArchive
+module DistributionArchive
 
 open System
 open System.IO
 open System.IO.Compression
-open BuildProvenance
+open SharedFailure
 
 // Untrusted-input caps applied before any allocation or decompression.
 let maxArchiveBytes = 256L * 1024L * 1024L

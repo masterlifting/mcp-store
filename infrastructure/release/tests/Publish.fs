@@ -15,6 +15,7 @@ open System.Text.Json
 open System.Text.Json.Nodes
 open System.Threading
 open System.Threading.Tasks
+open SharedFailure
 open BuildProvenance
 open ReleaseCompare
 open ReleaseMetadata

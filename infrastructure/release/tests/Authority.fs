@@ -34,6 +34,7 @@ open System.Text.Json.Nodes
 open Expecto
 open Microsoft.FSharp.Core
 
+open SharedFailure
 open BuildProvenance
 open DistributionContract
 
@@ -79,7 +80,7 @@ let private runPublishPipelineMethod =
     method
 
 // WHY: the inner producer archive must use the canonical Deflate (method 8) the strict
-//   ReleaseArchive.parse accepts; one helper, one shape.
+//   DistributionArchive.parse accepts; one helper, one shape.
 let private zipBytes (level: CompressionLevel) (entries: (string * byte[]) list) =
     use output = new MemoryStream()
     do
@@ -107,7 +108,7 @@ let private releasePolicy componentId =
     ReleasePolicy.parseBytes path (File.ReadAllBytes path)
     |> function
         | Ok policy -> policy
-        | Error error -> failwithf "%s canonical policy failed to parse: %s" componentId (BuildProvenance.ReleaseError.message error)
+        | Error error -> failwithf "%s canonical policy failed to parse: %s" componentId (ReleaseError.message error)
 
 // WHY: build the inner producer archive + manifest bytes that the production data-only
 //   candidate directory carries. The 2-entry candidate directory (archive + distribution.json)
@@ -139,7 +140,7 @@ let private buildFixture (componentId: string) (commitSha: string) : Fixture =
     let snapshot =
         match readCandidateSnapshot policy commitSha with
         | Ok value -> value
-        | Error error -> failwithf "%s readCandidate rejected the fixture: %s" componentId (BuildProvenance.ReleaseError.message error)
+        | Error error -> failwithf "%s readCandidate rejected the fixture: %s" componentId (ReleaseError.message error)
     { Policy = policy
       Snapshot = snapshot
       Owner = "masterlifting"
@@ -259,7 +260,7 @@ let private emitProbeResult
 let private resolveCommitHead () = async {
     match! BuildProvenance.committedHead repositoryRoot with
     | Ok head -> return head
-    | Error error -> return failwithf "failed to resolve committed HEAD: %s" (BuildProvenance.ReleaseError.message error)
+    | Error error -> return failwithf "failed to resolve committed HEAD: %s" (ReleaseError.message error)
 }
 
 // internal entry invoked from Main.fs --authority-probe; runs through normal Expecto

@@ -184,6 +184,23 @@ let literalCalls = @"pendingTask.Result pendingTask.Wait()"
             let blocked = checkText relative extraBridge |> violations
             Expect.equal (blocked |> List.map _.Pattern) [ "Async.RunSynchronously"; "Async.RunSynchronously"; "Async.RunSynchronously" ] "an extra bridge invalidates the exact allowlist"
 
+        testCase "compiled resolver CLI allows only its one exact entry bridge" <| fun _ ->
+            let root = repositoryRoot ()
+            let relative = "infrastructure/resolver/Main.fs"
+            let source = File.ReadAllText(Path.Combine(root, "infrastructure", "resolver", "Main.fs"))
+            Expect.isEmpty (violations (checkText relative source)) "the documented host-boundary bridge is allowed"
+
+            let withoutDoc = source.Replace("the compiled CLI must finish", "no compiled-CLI doc")
+            Expect.equal (violations (checkText relative withoutDoc) |> List.length) 1 "the bridge without the compiled-CLI WHY comment is blocked"
+
+            Expect.equal (violations (checkText "other.fs" source) |> List.length) 1 "the exact bridge is not allowlisted at another path"
+
+            let extraBridge = source + Environment.NewLine + "let unexpected () = Async.RunSynchronously(work)"
+            Expect.equal
+                (checkText relative extraBridge |> violations |> List.map _.Pattern)
+                [ "Async.RunSynchronously"; "Async.RunSynchronously" ]
+                "an extra bridge invalidates the exact allowlist"
+
         testCase "supporting artifact test entry bridges require exact paths, shapes, and documentation" <| fun _ ->
             let supportingArtifact =
                 "// Standalone entry bridge: FSI owns the process entry for this asynchronous script.\n|> Async.RunSynchronously\n"

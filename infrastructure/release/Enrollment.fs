@@ -7,6 +7,7 @@ open System
 open System.IO
 open System.Text.Json
 open System.Text.Json.Nodes
+open SharedFailure
 open BuildProvenance
 
 // One roster entry: only the identity needed to look up the canonical Config.json. No policy values.

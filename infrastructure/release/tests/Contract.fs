@@ -10,6 +10,7 @@ open System
 open System.IO
 open System.Text
 open System.Text.Json.Nodes
+open SharedFailure
 open BuildProvenance
 open DistributionContract
 

@@ -5,6 +5,7 @@ open System
 open System.IO
 open System.Text
 open System.Text.Json.Nodes
+open SharedFailure
 open BuildProvenance
 
 let persistVerifiedProjection
@@ -66,14 +67,14 @@ let private buildRemoteObserverWith
                     | None ->
                         return
                             Error(
-                                BuildProvenance.FileFailure(
+                                ReleaseError.FileFailure(
                                     "transport",
                                     tag,
                                     "GITHUB_TOKEN is not set; the production transport cannot run"))
                 else
                     return
                         Error(
-                            BuildProvenance.FileFailure(
+                            ReleaseError.FileFailure(
                                 "transport",
                                 tag,
                                 "the production transport is not selected; set MCP_RELEASE_GITHUB_OWNER + MCP_RELEASE_GITHUB_REPOSITORY + GITHUB_TOKEN to enable remote observation"))
@@ -99,7 +100,7 @@ let private buildRemoteObserverWith
                         return
                             Ok(
                                 ReleaseEvaluate.MetadataCorrupt(
-                                    BuildProvenance.FileFailure(
+                                    ReleaseError.FileFailure(
                                         "metadata",
                                         tag,
                                         "GITHUB_TOKEN is not set; the metadata observation cannot run")))
@@ -107,7 +108,7 @@ let private buildRemoteObserverWith
                     return
                         Ok(
                             ReleaseEvaluate.MetadataCorrupt(
-                                BuildProvenance.FileFailure(
+                                ReleaseError.FileFailure(
                                     "metadata",
                                     tag,
                                     "the local mirror cannot satisfy the metadata probe; the GitHub transport is required for recovery")))

@@ -205,6 +205,9 @@ Assert-JobCount -Job "publisher" -Name "publisher restores from the cleared isol
 Assert-JobCount -Job "publisher" -Name "twelve non-packaging Workflow entrypoints" -Pattern '^\s+"workflow/tests/[A-Za-z]+\.fsx",?\s*$' -Expected 12
 Assert-JobCount -Job "publisher" -Name "publisher runs the producer Expecto gate" -Pattern 'dotnet run --project dotnet/tests/Mcp\.Dotnet\.Tests' -Expected 1
 Assert-JobCount -Job "publisher" -Name "publisher builds the compiled release regression project" -Pattern 'dotnet build infrastructure/release/tests/Tests\.fsproj' -Expected 1
+Assert-JobCount -Job "publisher" -Name "publisher builds the compiled resolver project" -Pattern 'dotnet build infrastructure/resolver/Resolver\.fsproj -c Release' -Expected 1
+Assert-JobCount -Job "publisher" -Name "publisher builds the compiled resolver Expecto project" -Pattern 'dotnet build infrastructure/resolver/tests/Tests\.fsproj -c Release' -Expected 1
+Assert-JobCount -Job "publisher" -Name "publisher runs the resolver Expecto gate" -Pattern 'dotnet run --project infrastructure/resolver/tests/Tests\.fsproj' -Expected 1
 Assert-JobCount -Job "publisher" -Name "publisher runs the complete compiled release gate" -Pattern '^ {8}run: pwsh infrastructure/release/Suite\.ps1\s*$' -Expected 1
 Assert-JobCount -Job "publisher" -Name "publisher typechecks the retained release scripts" -Pattern 'Typecheck\.ps1 -SdkVersion' -Expected 1
 

@@ -8,6 +8,7 @@ open System.Diagnostics
 open System.IO
 open System.Threading
 open System.Threading.Tasks
+open SharedFailure
 open BuildProvenance
 
 // Bound so a hung child cannot deadlock the wrapper or the compiled runner

@@ -192,7 +192,7 @@ jobs:
           path: ${{ env.PUBLISHER_STAGE_ROOT }}/publish
           if-no-files-found: error
 
-      - name: build the producer projects and both compiled Expecto projects
+      - name: build the producer projects, the resolver and the compiled Expecto projects
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -205,6 +205,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "producer Expecto test project build failed (exit $LASTEXITCODE)" }
           dotnet build infrastructure/release/tests/Tests.fsproj -c Release
           if ($LASTEXITCODE -ne 0) { throw "compiled release Expecto project build failed (exit $LASTEXITCODE)" }
+          # The resolver is the shared install and launch boundary for both producers, so a build break must fail before publication.
+          dotnet build infrastructure/resolver/Resolver.fsproj -c Release
+          if ($LASTEXITCODE -ne 0) { throw "resolver build failed (exit $LASTEXITCODE)" }
+          dotnet build infrastructure/resolver/tests/Tests.fsproj -c Release
+          if ($LASTEXITCODE -ne 0) { throw "resolver Expecto test project build failed (exit $LASTEXITCODE)" }
 
       - name: run the producer Expecto gate (native exit preserved)
         shell: pwsh
@@ -212,6 +217,14 @@ jobs:
           $ErrorActionPreference = "Stop"
           # Actual compiled Expecto entrypoint: no --ignore, no filter, no result rewriting; the native failure exit blocks the release job.
           dotnet run --project dotnet/tests/Mcp.Dotnet.Tests/Mcp.Dotnet.Tests.fsproj -c Release --no-build
+          exit $LASTEXITCODE
+
+      - name: run the resolver Expecto gate (native exit preserved)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # dotnet test reports no counts for a console Expecto entrypoint, so the runner's own failure exit is the gate.
+          dotnet run --project infrastructure/resolver/tests/Tests.fsproj -c Release --no-build
           exit $LASTEXITCODE
 
       - name: run the non-packaging Workflow test entrypoints (native exit preserved)

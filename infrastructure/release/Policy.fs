@@ -8,6 +8,7 @@ open System.Collections.Generic
 open System.IO
 open System.Security.Cryptography
 open System.Text.Json
+open SharedFailure
 open BuildProvenance
 open DistributionContract
 
