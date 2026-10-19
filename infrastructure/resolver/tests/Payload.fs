@@ -14,16 +14,18 @@ let private expectError (result: Result<'a, ReleaseError>) : ReleaseError =
     | Ok _ -> failtest "the resolver accepted content that must fail closed"
     | Error error -> error
 
+// The archive fields are little-endian at the offsets the format declares, so the reader never follows the host byte order.
+let private u16At (bytes: byte[]) (offset: int) : uint16 =
+    uint16 bytes.[offset] ||| (uint16 bytes.[offset + 1] <<< 8)
+
+let private u32At (bytes: byte[]) (offset: int) : uint32 =
+    uint32 bytes.[offset]
+    ||| (uint32 bytes.[offset + 1] <<< 8)
+    ||| (uint32 bytes.[offset + 2] <<< 16)
+    ||| (uint32 bytes.[offset + 3] <<< 24)
+
 // The creator metadata is located through the central directory the archive itself declares, so no payload byte is scanned for a signature.
 let private centralEntryOffsets (bytes: byte[]) : int list =
-    let u16 (offset: int) = int bytes.[offset] ||| (int bytes.[offset + 1] <<< 8)
-
-    let u32 (offset: int) =
-        int bytes.[offset]
-        ||| (int bytes.[offset + 1] <<< 8)
-        ||| (int bytes.[offset + 2] <<< 16)
-        ||| (int bytes.[offset + 3] <<< 24)
-
     let mutable eocd = -1
     let mutable probe = bytes.Length - 22
     let floor = max 0 (bytes.Length - 22 - 65535)
@@ -40,12 +42,33 @@ let private centralEntryOffsets (bytes: byte[]) : int list =
     if eocd < 0 then
         failtest "the fixture archive carries no end-of-central-directory record"
 
-    let mutable cursor = u32 (eocd + 16)
+    let mutable cursor = int (u32At bytes (eocd + 16))
 
-    [ for _ in 1 .. u16 (eocd + 10) do
+    [ for _ in 1 .. int (u16At bytes (eocd + 10)) do
         let offset = cursor
-        cursor <- cursor + 46 + u16 (cursor + 28) + u16 (cursor + 30) + u16 (cursor + 32)
+
+        cursor <-
+            cursor
+            + 46
+            + int (u16At bytes (cursor + 28))
+            + int (u16At bytes (cursor + 30))
+            + int (u16At bytes (cursor + 32))
+
         yield offset ]
+
+// A Unix writer stamps the entry mode into the attribute fields, so a case that must stay refused writes those exact bytes.
+let private withEntryAttributes (bytes: byte[]) (internalAttributes: uint16) (externalAttributes: uint32) : byte[] =
+    let copy = Array.copy bytes
+
+    for offset in centralEntryOffsets bytes do
+        copy.[offset + 36] <- byte internalAttributes
+        copy.[offset + 37] <- byte (internalAttributes >>> 8)
+        copy.[offset + 38] <- byte externalAttributes
+        copy.[offset + 39] <- byte (externalAttributes >>> 8)
+        copy.[offset + 40] <- byte (externalAttributes >>> 16)
+        copy.[offset + 41] <- byte (externalAttributes >>> 24)
+
+    copy
 
 // The writer records its own platform in the creator host byte, so a case emulates another writer platform by rewriting that byte alone.
 let private withVersionMadeBy (bytes: byte[]) (version: byte) (host: byte) : byte[] =
@@ -82,6 +105,17 @@ let private writerTests =
                   Expect.equal (sha256 bytes) (sha256 canonical) "the canonical archive is returned byte for byte"
                   Expect.equal (sha256 canonical) (sha256 input) "the canonicalizer leaves its input buffer unmutated"
 
+          testCase "the constructed fixture archive carries zero entry attributes"
+          <| fun () ->
+              let _, canonical = fixture dotnetSpec
+              let offsets = centralEntryOffsets canonical
+
+              Expect.isTrue (offsets.Length > 0) "the fixture archive declares central directory entries"
+
+              for offset in offsets do
+                  Expect.equal (u16At canonical (offset + 36)) 0us "the internal attributes are the canonical zero"
+                  Expect.equal (u32At canonical (offset + 38)) 0u "the external attributes are the canonical zero"
+
           testCase "a Unix creator archive canonicalizes to the canonical bytes and verifies against the same pin"
           <| fun () ->
               let pinValue, canonical = fixture dotnetSpec
@@ -102,6 +136,37 @@ let private writerTests =
                   | Ok verified ->
                       Expect.equal verified.Members.Length 4 "the canonicalized archive carries the same members"
                       Expect.equal (ResolverIdentity.pinKey pinValue) verified.Key "the canonicalized archive keeps the same installation identity"
+
+          testCase "nonzero entry attributes are refused rather than laundered"
+          <| fun () ->
+              let members = bodies dotnetSpec
+              let content = manifestBytes dotnetSpec dotnetSpec.Revision members
+              let _, canonical = fixture dotnetSpec
+              let mutated = withEntryAttributes canonical 1us 0x81A40000u
+              let unix = withVersionMadeBy mutated 20uy 3uy
+
+              // The canonicalizer repairs only the creator byte, so attribute bits stay refused.
+              for label, archive in [ "canonical creator", mutated; "unix creator", unix ] do
+                  match DistributionArchive.canonicalizeWriterBytes dotnetSpec.ArchiveName archive with
+                  | Ok _ -> failtestf "the %s archive had its attributes repaired instead of refused" label
+                  | Error (MalformedArtifact (_, detail)) ->
+                      Expect.stringContains detail "attributes" $"the {label} archive is refused for its attribute bits"
+                  | Error error -> failtestf "expected a malformed-archive failure, got %s" (ReleaseError.message error)
+
+              match DistributionArchive.parse dotnetSpec.ArchiveName mutated with
+              | Ok _ -> failtest "the strict reader accepted nonzero entry attributes"
+              | Error (MalformedArtifact (_, detail)) ->
+                  Expect.stringContains detail "attributes" "the strict reader refuses the attribute bits"
+              | Error error -> failtestf "expected a malformed-archive failure, got %s" (ReleaseError.message error)
+
+              match DistributionArchive.parse dotnetSpec.ArchiveName unix with
+              | Ok _ -> failtest "the strict reader accepted a Unix creator archive with nonzero entry attributes"
+              | Error _ -> ()
+
+              match expectError (ResolverPayload.verify (pin dotnetSpec content mutated) mutated) with
+              | MalformedArtifact (_, detail) ->
+                  Expect.stringContains detail "attributes" "the resolver refuses the attribute bits"
+              | error -> failtestf "expected a malformed-archive failure, got %s" (ReleaseError.message error)
 
           testCase "the strict reader still refuses raw Unix creator metadata"
           <| fun () ->

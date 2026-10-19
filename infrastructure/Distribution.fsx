@@ -95,6 +95,8 @@ let private createArchive archivePath sourceRoot files : Async<Result<unit, Rele
 
             for relativePath in files do
                 let entry = archive.CreateEntry(relativePath, CompressionLevel.Optimal)
+                // Zero attributes keep platform-specific BCL defaults out of the strict archive format.
+                entry.ExternalAttributes <- 0
                 entry.LastWriteTime <- DateTimeOffset(1980, 1, 1, 0, 0, 0, TimeSpan.Zero)
 
                 use source = File.OpenRead(Path.Combine(sourceRoot, relativePath))

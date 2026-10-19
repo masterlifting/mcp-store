@@ -112,6 +112,8 @@ let private writeArchiveBytes
 
         let add (name: string) (payload: byte[]) =
             let entry = archive.CreateEntry(name, level)
+            // The strict entry shape admits no attribute bits, so the platform default must not reach the fixture bytes.
+            entry.ExternalAttributes <- 0
             // A fixed timestamp keeps the fixture bytes deterministic across runs.
             entry.LastWriteTime <- DateTimeOffset(1980, 1, 1, 0, 0, 0, TimeSpan.Zero)
             use stream = entry.Open()
