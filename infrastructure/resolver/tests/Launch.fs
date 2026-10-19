@@ -241,16 +241,7 @@ let private exchange (arguments: string list) : Async<Capture> =
             let! err = stderr |> Async.AwaitTask
 
             if readError <> "" then
-                // DEBUG-REMOVE The captured stderr and the child's own exit code are the only evidence of the launch failure, so the message carries both.
-                let diagnosticLimit = 2000
-
-                let diagnostic =
-                    if err.Length <= diagnosticLimit then
-                        err
-                    else
-                        err.Substring(0, diagnosticLimit) + "...<truncated>"
-
-                return failwith $"{readError} (exit code {child.ExitCode}; stderr: {diagnostic})"
+                return failwith readError
 
             return { ExitCode = child.ExitCode; Stdout = stdout; Stderr = err }
         finally

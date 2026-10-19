@@ -206,27 +206,38 @@ resolver provisions no runtime and does not substitute another revision.
 These are current, unverified, or unimplemented properties. Do not read this
 document as a claim beyond them.
 
-- **Runtime evidence is Windows-only.** The native resolver suite passed 49/49
-  twice, including real local launches of Dotnet 1.0.5 and Workflow 1.0.6 from
-  canonical archives built from `95f0baa`, with spaced and hostile `global.json`
-  workspaces. These were local canonical archives, not published-release
-  verification. Linux, macOS, and hosted CI have not been executed.
-- **Unix coordination evidence is source-level.** The guard's exclusivity is
-  proven at each acquisition and fails closed, but that proof has only ever been
-  executed on Windows. On Unix, .NET implements `FileShare.None` as a
-  non-blocking `flock(LOCK_EX)` and every other share value as `LOCK_SH`, and it
-  ignores lock failures other than `EWOULDBLOCK` — exactly the silent absence the
-  acquisition probe detects. The shared lease stays a best-effort usage claim; no
-  safety property depends on it, because an existing installation is never
-  replaced automatically. Locking behavior on NFS/SMB, or against writers that do
-  not use .NET, is unverified; neither file is a cross-machine lock.
+- **Runtime qualification is bounded to the executed targets.** The native
+  resolver suite passed 77/77 locally on Windows (with its Windows-specific
+  platform gates). Hosted run
+  [39319894447](https://github.com/masterlifting/mcp-store/actions/runs/39319894447)
+  passed all three Unix jobs at commit `ecd9e32e3c58e85daf970fb285ee9a8f9922e7ae`
+  with .NET SDK 11.0.100-rc.1: `linux-x64` on Ubuntu 24, `osx-arm64` on macOS 15,
+  and `osx-x64` on macOS 15. Each job passed clean producer builds, strict pin
+  and archive acceptance, and MCP initialize. The combined Unix inventory
+  reported 91/91; this includes 17 Unix filesystem cases and 14 `Stat` cases,
+  which were included in the inventory/count rather than individually printed
+  as successful cases.
+  The Windows 77/77 and Unix 91/91 counts use different platform gates and are
+  not directly comparable. These runs qualify only the listed hosted targets;
+  they do not establish support for all Linux architectures, musl, or other OS
+  versions. No published-release HTTP download was verified.
+- **Unix coordination has bounded runtime evidence.** The guard's exclusivity
+  acquisition probe passed on the filesystems used by the three hosted Unix
+  runners. On Unix, .NET implements `FileShare.None` as a non-blocking
+  `flock(LOCK_EX)` and every other share value as `LOCK_SH`, and it ignores lock
+  failures other than `EWOULDBLOCK` — exactly the silent absence the acquisition
+  probe detects. The shared lease remains a best-effort usage claim; no safety
+  property depends on it, because an existing installation is never replaced
+  automatically. This evidence is not a guarantee for all filesystems. Locking
+  behavior on NFS/SMB, or against writers that do not use .NET, is unverified;
+  neither file is a cross-machine lock.
 - **Unix entry-kind classification uses the platform `stat` utility.** Linux
   requires GNU `stat` at `/usr/bin/stat`; macOS requires its BSD `stat` at that
   path. The implementation invokes it directly with fixed platform arguments,
   bounds each call to at most two seconds, and fails closed on unsupported
-  platforms, execution errors, timeout, or malformed output. This is provisional:
-  no Unix runtime qualification is claimed until the Linux, macOS ARM, and macOS
-  Intel CI jobs have all completed successfully.
+  platforms, execution errors, timeout, or malformed output. Its runtime
+  behavior was exercised in the three hosted Unix targets listed above; that
+  does not qualify other Unix platforms or runtime versions.
 - **Classification has subprocess cost.** Inventory and cleanup classify entries
   sequentially and may launch one process per entry (up to the 8,192-entry
   bound). Each scan/cleanup has a cooperative 60-second deadline, with the
