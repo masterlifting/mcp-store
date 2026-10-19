@@ -7,6 +7,7 @@ module DistributionBuild
 #load "Failure.fs"
 #load "Provenance.fs"
 #load "distribution/Contract.fs"
+#load "distribution/Archive.fs"
 #load "release/Policy.fs"
 
 open System
@@ -74,6 +75,17 @@ let private attempt operation path (work: unit -> unit) : Result<unit, ReleaseEr
     with
     | :? IOException as error -> Error(FileFailure(operation, path, error.Message))
     | :? UnauthorizedAccessException as error -> Error(FileFailure(operation, path, error.Message))
+
+let private normalizeArchive archivePath : Result<unit, ReleaseError> =
+    try
+        match DistributionArchive.canonicalizeWriterBytes archivePath (File.ReadAllBytes archivePath) with
+        | Error error -> Error error
+        | Ok bytes ->
+            File.WriteAllBytes(archivePath, bytes)
+            Ok()
+    with
+    | :? IOException as error -> Error(FileFailure("normalize archive", archivePath, error.Message))
+    | :? UnauthorizedAccessException as error -> Error(FileFailure("normalize archive", archivePath, error.Message))
 
 // Entry timestamps are pinned so archive bytes do not depend on the build clock.
 let private createArchive archivePath sourceRoot files : Async<Result<unit, ReleaseError>> =
@@ -206,6 +218,7 @@ let private buildWith
             do! attempt "clear previous archive" archivePath (fun () -> File.Delete archivePath)
 
         do! createArchive archivePath destination archiveFiles
+        do! normalizeArchive archivePath
         let! archiveSha256 = sha256FileAsync archivePath
         let! manifestSha256 = sha256FileAsync manifestPath
 

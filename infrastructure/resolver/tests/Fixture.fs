@@ -100,7 +100,7 @@ let manifest (spec: Spec) (revision: string) (members: (string * byte[]) list) :
 let manifestBytes (spec: Spec) (revision: string) (members: (string * byte[]) list) : byte[] =
     utf8 (DistributionContract.render (manifest spec revision members))
 
-let archiveBytesWith
+let private writeArchiveBytes
     (level: CompressionLevel)
     (manifestContent: byte[])
     (members: (string * byte[]) list)
@@ -124,6 +124,24 @@ let archiveBytesWith
 
     write ()
     output.ToArray()
+
+// The writer records its own platform in the creator byte, so the fixture carries the canonical creator metadata the released archive carries.
+let archiveBytesWith
+    (level: CompressionLevel)
+    (manifestContent: byte[])
+    (members: (string * byte[]) list)
+    : byte[] =
+    match DistributionArchive.canonicalizeWriterBytes "fixture-archive.zip" (writeArchiveBytes level manifestContent members) with
+    | Ok bytes -> bytes
+    | Error error -> failtestf "the fixture archive is not a canonical archive: %s" (ReleaseError.message error)
+
+// A fixture that must carry a defect the canonicalizer refuses is written without it, so the reader's own refusal is what the case observes.
+let rawArchiveBytesWith
+    (level: CompressionLevel)
+    (manifestContent: byte[])
+    (members: (string * byte[]) list)
+    : byte[] =
+    writeArchiveBytes level manifestContent members
 
 let archiveBytes (manifestContent: byte[]) (members: (string * byte[]) list) : byte[] =
     archiveBytesWith CompressionLevel.Optimal manifestContent members

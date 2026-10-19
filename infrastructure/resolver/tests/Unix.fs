@@ -76,7 +76,7 @@ let private socketEntry () : string =
     let token = (Guid.NewGuid().ToString "N").Substring(0, 8)
     Path.Combine(tempDirectory, "ghi29-" + token + ".sock")
 
-// Disposal closes the descriptor but leaves the socket node behind, so the case classifies the entry the filesystem actually keeps.
+// The platform removes the socket node when the descriptor closes, so the socket stays bound while the case classifies the entry the filesystem keeps.
 let private withSocket (body: string -> Async<unit>) : Async<unit> = async {
     let path = socketEntry ()
 
@@ -88,12 +88,11 @@ let private withSocket (body: string -> Async<unit>) : Async<unit> = async {
     try
         socket.Bind(UnixDomainSocketEndPoint path)
         socket.Listen 1
+
+        do! body path
     finally
         socket.Dispose()
 
-    try
-        do! body path
-    finally
         if File.Exists path then
             File.Delete path
 }
@@ -233,7 +232,7 @@ let private kindTests =
               do!
                   withSocket (fun path ->
                       async {
-                          Expect.isTrue (File.Exists path) "the closed socket leaves its entry on the filesystem"
+                          Expect.isTrue (File.Exists path) "the bound socket leaves its entry on the filesystem"
 
                           let! kind = kindOf path
                           Expect.equal kind specialName "a socket entry is not a regular file"
@@ -621,7 +620,11 @@ let private callerTests =
                               let pipe = Path.Combine(tree, "pipe")
                               do! makePipe pipe
 
-                              let child = startProbe "special" [ base'; pipe; tree ]
+                              // A launch input must be outside the immutable storage root while a read and a cleanup must be inside it, so the child receives both roots.
+                              let launchRoot = Path.Combine(base', "launch root")
+                              Directory.CreateDirectory(launchRoot) |> ignore
+
+                              let child = startProbe "special" [ launchRoot; base'; pipe; tree ]
                               let! code, out, err = awaitProbeWithin (TimeSpan.FromSeconds 60.) child
 
                               Expect.equal code 0 $"every caller refuses the pipe by kind (stderr: {err})"

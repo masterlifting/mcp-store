@@ -241,7 +241,16 @@ let private exchange (arguments: string list) : Async<Capture> =
             let! err = stderr |> Async.AwaitTask
 
             if readError <> "" then
-                return failwith readError
+                // DEBUG-REMOVE The captured stderr and the child's own exit code are the only evidence of the launch failure, so the message carries both.
+                let diagnosticLimit = 2000
+
+                let diagnostic =
+                    if err.Length <= diagnosticLimit then
+                        err
+                    else
+                        err.Substring(0, diagnosticLimit) + "...<truncated>"
+
+                return failwith $"{readError} (exit code {child.ExitCode}; stderr: {diagnostic})"
 
             return { ExitCode = child.ExitCode; Stdout = stdout; Stderr = err }
         finally
@@ -314,29 +323,45 @@ let private launchCase (producer: string) =
     }
 
 let private typedInputTests =
+    // A typed input is declared absolute, so the fixture states it in the host's own absolute shape rather than a path from another platform.
+    let absolute (segments: string list) : string =
+        segments |> List.fold (fun path segment -> Path.Combine(path, segment)) tempDirectory
+
+    let hostFile = absolute [ "host"; "dotnet.exe" ]
+    let otherHostFile = absolute [ "other"; "dotnet.exe" ]
+    let artifacts = absolute [ "artifacts" ]
+    let catalog = absolute [ "catalog.json" ]
+    let pinFile = absolute [ "pin.json" ]
+    let otherPinFile = absolute [ "other"; "pin.json" ]
+    let workspace = absolute [ "workspace" ]
+
     testList
         "typed inputs"
         [ testCase "declared inputs compose into the manifest's own flag order" <| fun _ ->
             let descriptor = (manifest dotnetSpec dotnetSpec.Revision (bodies dotnetSpec)).Launch
             let arguments =
-                [ "artifactRoot", @"C:\artifacts"
-                  "dotnetHost", @"C:\host\dotnet.exe" ]
+                [ "artifactRoot", artifacts
+                  "dotnetHost", hostFile ]
                 |> ResolverLaunch.compose descriptor
 
             Expect.equal
                 arguments
-                (Ok [ "--dotnet-host"; @"C:\host\dotnet.exe"; "--artifact-root"; @"C:\artifacts" ])
+                (Ok [ "--dotnet-host"; hostFile; "--artifact-root"; artifacts ])
                 "values follow the declared descriptor order, not the supplied order"
 
           testCase "an undeclared, repeated, or missing input is refused before any launch" <| fun _ ->
             let descriptor = (manifest dotnetSpec dotnetSpec.Revision (bodies dotnetSpec)).Launch
 
-            let refused (inputs: (string * string) list) =
-                Expect.isFalse (ResolverLaunch.compose descriptor inputs |> Result.isOk) "the composition is refused"
+            let refused (expected: string) (inputs: (string * string) list) =
+                match ResolverLaunch.compose descriptor inputs with
+                | Ok _ -> failtestf "the composition accepted the %s input" expected
+                | Error(LaunchInputRejected(input, _)) ->
+                    Expect.equal input expected "the refusal names the input it refused"
+                | Error error -> failtestf "expected a refused input, got %s" (ReleaseError.message error)
 
-            refused [ "dotnetHost", @"C:\host\dotnet.exe"; "artifactRoot", @"C:\artifacts"; "unknown", @"C:\x" ]
-            refused [ "dotnetHost", @"C:\host\dotnet.exe"; "dotnetHost", @"C:\other\dotnet.exe" ]
-            refused [ "dotnetHost", @"C:\host\dotnet.exe" ]
+            refused "unknown" [ "dotnetHost", hostFile; "artifactRoot", artifacts; "unknown", absolute [ "x" ] ]
+            refused "dotnetHost" [ "dotnetHost", hostFile; "dotnetHost", otherHostFile ]
+            refused "artifactRoot" [ "dotnetHost", hostFile ]
 
           testCase "a relative path and a non-digest value are refused by their declared type" <| fun _ ->
             let dotnet = (manifest dotnetSpec dotnetSpec.Revision (bodies dotnetSpec)).Launch
@@ -352,11 +377,11 @@ let private typedInputTests =
                             Input = "profileCatalogSha256"
                             Type = DistributionContract.LaunchArgumentType.Sha256 } ] }
 
-            match ResolverLaunch.compose dotnet [ "dotnetHost", "dotnet.exe"; "artifactRoot", @"C:\artifacts" ] with
+            match ResolverLaunch.compose dotnet [ "dotnetHost", "dotnet.exe"; "artifactRoot", artifacts ] with
             | Error(LaunchInputRejected(input, _)) -> Expect.equal input "dotnetHost" "the relative host names its input"
             | other -> failtestf "expected a rejected relative host, got %A" other
 
-            match ResolverLaunch.compose workflow [ "profileCatalog", @"C:\catalog.json"; "profileCatalogSha256", "NOT-A-DIGEST" ] with
+            match ResolverLaunch.compose workflow [ "profileCatalog", catalog; "profileCatalogSha256", "NOT-A-DIGEST" ] with
             | Error(LaunchInputRejected(input, _)) -> Expect.equal input "profileCatalogSha256" "the non-digest names its input"
             | other -> failtestf "expected a rejected non-digest, got %A" other
 
@@ -366,15 +391,15 @@ let private typedInputTests =
                 | Error(UsageRejected _) -> ()
                 | other -> failtestf "expected a rejected command line, got %A" other
 
-            refused [ "run"; "--pin"; "pin.json"; "--workspace"; @"C:\w"; "--host"; @"C:\h" ]
-            refused [ "resolve"; "--pin"; @"C:\pin.json"; "--host"; @"C:\h" ]
-            refused [ "run"; "--pin"; @"C:\pin.json"; "--pin"; @"C:\other.json"; "--workspace"; @"C:\w"; "--host"; @"C:\h" ]
-            refused [ "run"; "--pin"; @"C:\pin.json"; "--workspace"; @"C:\w"; "--host"; @"C:\h"; "--input"; "no-equals-sign" ]
-            refused [ "run"; "--pin"; @"C:\pin.json"; "--workspace"; @"C:\w"; "--host"; @"C:\h"; "--unknown"; "x" ]
+            refused [ "run"; "--pin"; "pin.json"; "--workspace"; workspace; "--host"; hostFile ]
+            refused [ "resolve"; "--pin"; pinFile; "--host"; hostFile ]
+            refused [ "run"; "--pin"; pinFile; "--pin"; otherPinFile; "--workspace"; workspace; "--host"; hostFile ]
+            refused [ "run"; "--pin"; pinFile; "--workspace"; workspace; "--host"; hostFile; "--input"; "no-equals-sign" ]
+            refused [ "run"; "--pin"; pinFile; "--workspace"; workspace; "--host"; hostFile; "--unknown"; "x" ]
 
-            match ResolverCli.parse [ "run"; "--pin"; @"C:\pin.json"; "--workspace"; @"C:\w"; "--host"; @"C:\h"; "--input"; "dotnetHost=C:\dotnet.exe" ] with
+            match ResolverCli.parse [ "run"; "--pin"; pinFile; "--workspace"; workspace; "--host"; hostFile; "--input"; "dotnetHost=" + hostFile ] with
             | Ok(ResolverCli.Run options) ->
-                Expect.equal options.Inputs [ "dotnetHost", @"C:\dotnet.exe" ] "a well-formed input pair is accepted"
+                Expect.equal options.Inputs [ "dotnetHost", hostFile ] "a well-formed input pair is accepted"
                 Expect.isNone options.Root "an omitted root stays unclaimed"
             | other -> failtestf "expected a parsed run command, got %A" other ]
 

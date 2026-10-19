@@ -105,7 +105,7 @@ let private launch (arguments: string list) : Async<int> =
 let private special (arguments: string list) : Async<int> =
     async {
         match arguments with
-        | [ root; pipe; tree ] ->
+        | [ launchRoot; storageRoot; pipe; tree ] ->
             let expected = ResolverKind.name ResolverKind.Other
             let failures = ResizeArray<string>()
 
@@ -118,13 +118,14 @@ let private special (arguments: string list) : Async<int> =
                     if not (reported.Contains(expected, StringComparison.Ordinal)) then
                         failures.Add(sprintf "%s expected '%s', got %s" label expected reported)
 
-            let! inputOutcome = ResolverInput.file root "host" pipe
+            // A launch input is refused for being inside the immutable storage root before its kind is read, so that refusal needs a root the pipe is not under.
+            let! inputOutcome = ResolverInput.file launchRoot "host" pipe
             refuse "the launch input" inputOutcome
 
             let! pinOutcome = ResolverInput.pin pipe
             refuse "the pin" (Result.map ignore pinOutcome)
 
-            let! readOutcome = ResolverDisk.read root pipe 1024L
+            let! readOutcome = ResolverDisk.read storageRoot pipe 1024L
             refuse "the read" (Result.map ignore readOutcome)
 
             let! guardOutcome = ResolverLock.exclusive pipe
@@ -136,7 +137,7 @@ let private special (arguments: string list) : Async<int> =
             let! inventoryOutcome = ResolverDisk.inventory tree
             refuse "the inventory" (Result.map ignore inventoryOutcome)
 
-            let! cleanupOutcome = ResolverDisk.remove root pipe
+            let! cleanupOutcome = ResolverDisk.remove storageRoot pipe
             refuse "the cleanup" cleanupOutcome
 
             if not (File.Exists pipe) then
@@ -152,7 +153,7 @@ let private special (arguments: string list) : Async<int> =
                 return 0
 
         | _ ->
-            eprintfn "probe special expects <root> <pipe> <tree>"
+            eprintfn "probe special expects <launchRoot> <storageRoot> <pipe> <tree>"
             return 2
     }
 
