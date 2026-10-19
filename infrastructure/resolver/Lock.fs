@@ -22,9 +22,10 @@ type private Attempt =
     | Busy of string
     | Refused of ReleaseError
 
-let private admit (path: string) : Result<unit, ReleaseError> =
+let private admit (path: string) : Async<Result<unit, ReleaseError>> =
+    async {
     match ResolverDisk.chain path with
-    | Error error -> Error error
+    | Error error -> return Error error
     | Ok () ->
         let full = Path.GetFullPath path
         let root = Path.GetPathRoot full
@@ -42,32 +43,38 @@ let private admit (path: string) : Result<unit, ReleaseError> =
 
         for ancestor in ancestors do
             if failure.IsNone then
-                match ResolverKind.classify ancestor with
+                match! ResolverKind.classify ancestor with
                 | Ok ResolverKind.Directory -> ()
                 | Ok kind -> failure <- Some(FileFailure("lock", ancestor, $"an ancestor is a {ResolverKind.name kind}, not a directory"))
                 | Error error -> failure <- Some error
 
         match failure with
-        | Some error -> Error error
-        | None when not (ResolverDisk.exists full) -> Ok()
+        | Some error -> return Error error
         | None ->
-            match ResolverKind.classify full with
-            | Ok ResolverKind.Regular -> Ok()
-            | Ok kind -> Error(FileFailure("lock", full, $"the coordination entry is a {ResolverKind.name kind}, not a regular file"))
-            | Error error -> Error error
+            match ResolverDisk.tryExists "lock" full with
+            | Error error -> return Error error
+            | Ok false -> return Ok()
+            | Ok true ->
+                match! ResolverKind.classify full with
+                | Ok ResolverKind.Regular -> return Ok()
+                | Ok kind -> return Error(FileFailure("lock", full, $"the coordination entry is a {ResolverKind.name kind}, not a regular file"))
+                | Error error -> return Error error
+    }
 
-let private openFile (path: string) (access: FileAccess) (share: FileShare) : Attempt =
-    match admit path with
-    | Error error -> Refused error
+let private openFile (path: string) (access: FileAccess) (share: FileShare) : Async<Attempt> =
+    async {
+    match! admit path with
+    | Error error -> return Refused error
     | Ok () ->
         try
-            Acquired(new FileStream(path, FileMode.OpenOrCreate, access, share, 1, FileOptions.None))
+            return Acquired(new FileStream(path, FileMode.OpenOrCreate, access, share, 1, FileOptions.None))
         with
         // Preserve the IO detail because unrelated failures otherwise resemble contention.
-        | :? IOException as error -> Busy error.Message
-        | :? UnauthorizedAccessException as error -> Refused(FileFailure("lock", path, error.Message))
-        | :? NotSupportedException as error -> Refused(FileFailure("lock", path, error.Message))
-        | :? ArgumentException as error -> Refused(FileFailure("lock", path, error.Message))
+        | :? IOException as error -> return Busy error.Message
+        | :? UnauthorizedAccessException as error -> return Refused(FileFailure("lock", path, error.Message))
+        | :? NotSupportedException as error -> return Refused(FileFailure("lock", path, error.Message))
+        | :? ArgumentException as error -> return Refused(FileFailure("lock", path, error.Message))
+    }
 
 // The second open detects filesystems that silently skip the exclusivity contract.
 let private proven (path: string) : Result<unit, string> =
@@ -87,7 +94,7 @@ let private acquire
     : Async<Result<Lock, ReleaseError>> =
     let rec step (remaining: int) (last: string) =
         async {
-            match openFile path access share with
+            match! openFile path access share with
             | Acquired stream ->
                 let verdict = if proof then proven path else Ok()
 

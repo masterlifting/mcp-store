@@ -9,6 +9,8 @@ let private suites =
             "resolver"
             [ Payload.tests
               Tree.tests
+              Unix.tests
+              Stat.tests
               Install.tests
               Launch.tests
               Storage.tests

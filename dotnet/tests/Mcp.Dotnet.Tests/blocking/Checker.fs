@@ -48,10 +48,7 @@ let private topLevelBridgeSites =
           "infrastructure/scripts/tests/Regression.fsx", [ "runTests () |> Async.RunSynchronously" ]
           "infrastructure/scripts/Validate.fs", [ "run args |> Async.RunSynchronously" ]
           "infrastructure/resolver/Main.fs", [ "match Async.RunSynchronously work with" ]
-          "infrastructure/resolver/tests/Probe.fs",
-          [ "| \"--probe\" :: \"install\" :: rest -> Some(Async.RunSynchronously(install rest))"
-            "| \"--probe\" :: \"guard\" :: rest -> Some(Async.RunSynchronously(hold rest))"
-            "| \"--probe\" :: \"run\" :: rest -> Some(Async.RunSynchronously(launch rest))" ]
+          "infrastructure/resolver/tests/Probe.fs", [ "dispatched |> Option.map Async.RunSynchronously" ]
           "infrastructure/distribution/tests/Smoke.fsx", [ "|> Async.RunSynchronously" ]
           "dotnet/protocol/Host.fs", [ "McpHost.run service |> Async.RunSynchronously" ]
           "workflow/release/Build.fsx", [ "match run () |> Async.RunSynchronously with" ]

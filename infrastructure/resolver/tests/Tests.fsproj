@@ -13,6 +13,8 @@
     <Compile Include="Payload.fs" />
     <Compile Include="Tree.fs" />
     <Compile Include="Probe.fs" />
+    <Compile Include="Unix.fs" />
+    <Compile Include="Stat.fs" />
     <Compile Include="Install.fs" />
     <Compile Include="Launch.fs" />
     <Compile Include="Storage.fs" />

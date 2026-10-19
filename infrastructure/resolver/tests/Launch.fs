@@ -28,7 +28,7 @@ let private initializeRequest =
     """{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"resolver-launch-smoke","version":"1"}}}"""
 
 // A space in every path segment is the consumer-environment hazard a shell command string would lose.
-let private baseDirectory = Path.Combine(Path.GetTempPath(), "mcp-store resolver launch smoke")
+let private baseDirectory = Path.Combine(tempDirectory, "mcp-store resolver launch smoke")
 
 let private jsonString (owner: JsonNode) (name: string) : string =
     let value = if isNull owner then null else owner.[name]
@@ -45,10 +45,14 @@ let private jsonString (owner: JsonNode) (name: string) : string =
 let private discoverMuxer () : string =
     let executable = if OperatingSystem.IsWindows() then "dotnet.exe" else "dotnet"
 
+    // The resolver refuses a linked host path, so a muxer reached through a link is presented at the entry the launch executes.
     let regular (path: string option) =
         path
         |> Option.filter (fun value -> not (String.IsNullOrWhiteSpace value) && File.Exists value)
-        |> Option.map Path.GetFullPath
+        |> Option.map (fun value ->
+            match (FileInfo value).ResolveLinkTarget(true) with
+            | null -> Path.GetFullPath value
+            | target -> target.FullName)
 
     let hostProcess =
         Environment.ProcessPath

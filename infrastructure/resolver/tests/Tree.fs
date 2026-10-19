@@ -1,4 +1,4 @@
-// Filesystem safety on the real Windows tree: link-free external chains, immutable-root containment, kind classification without opening, and bounded staging recovery.
+// Filesystem safety on the real host tree: link-free external chains, immutable-root containment, kind classification without opening, and bounded staging recovery.
 module Resolver.Tests.Tree
 
 open System
@@ -58,7 +58,7 @@ let private admission (error: ReleaseError) (operation: string) (path: string) (
     | InstallInUse _ -> failtest "the refused entry was retried as coordination contention instead of refused"
     | other -> failtestf "expected an admission refusal, got %s" (ReleaseError.message other)
 
-// One physical entry answers to one name on a case-folding host and two on a case-sensitive one, so the case-differing refusals are only decided where both names reach the same entry.
+// One physical entry answers to one name on a case-folding host and two on a case-sensitive one, so the case-differing refusals run only where the host is known to fold case rather than merely configured to.
 let private caseTests =
     if OperatingSystem.IsWindows() then
         [ testCaseAsync "the run path refuses in-store launch inputs that differ from the root only by case"
@@ -106,8 +106,8 @@ let private caseTests =
                           })
           }
 
-          testCase "a declared typed input naming an in-store path is refused"
-          <| fun () ->
+          testCaseAsync "a declared typed input naming an in-store path is refused"
+          <| async {
               let base' = root "case-input"
 
               try
@@ -123,21 +123,22 @@ let private caseTests =
                       [ "dotnetHost", hostFile
                         "artifactRoot", stored.ToUpperInvariant() ]
 
-                  match ResolverInput.inputs store descriptor supplied with
-                  | Ok () -> failtest "mutable state inside the immutable store must be refused"
+                  match! ResolverInput.inputs store descriptor supplied with
+                  | Ok () -> return failtest "mutable state inside the immutable store must be refused"
                   | Error(LaunchInputRejected (input, detail)) ->
                       Expect.equal input "artifactRoot" "the in-store input names itself"
                       Expect.stringContains detail "immutable storage root" "the refusal names the immutable root"
-                  | Error error -> failtestf "expected a launch-input refusal, got %s" (ReleaseError.message error)
+                  | Error error -> return failtestf "expected a launch-input refusal, got %s" (ReleaseError.message error)
               finally
-                  discard base' ]
+                  discard base'
+          } ]
     else
         []
 
 let tests =
     testList
         "tree"
-        [ testCaseAsync "a junction on an external path chain is refused"
+        [ testCaseAsync "a directory link on an external path chain is refused"
           <| async {
               let base' = root "chain"
 
@@ -146,51 +147,56 @@ let tests =
                   let link = Path.Combine(base', "link")
                   Directory.CreateDirectory target |> ignore
                   File.WriteAllText(Path.Combine(target, "data.txt"), "payload")
-                  let! created = junctionAsync link target
-                  Expect.isTrue created "the fixture creates a junction"
+                  let! created = directoryLinkAsync link target
+                  Expect.isTrue created "the fixture creates a directory link"
 
                   match ResolverDisk.chain (Path.Combine(link, "data.txt")) with
-                  | Ok () -> failtest "a junction in the chain must be refused"
+                  | Ok () -> failtest "a link in the chain must be refused"
                   | Error (FileFailure (_, path, _)) ->
-                      Expect.equal (Path.GetFullPath link) (Path.GetFullPath path) "the junction component is named"
+                      Expect.equal (Path.GetFullPath link) (Path.GetFullPath path) "the link component is named"
                   | Error error -> failtestf "expected a link failure, got %s" (ReleaseError.message error)
               finally
                   discard base'
           }
 
-          testCase "a mutable input inside the immutable storage root is refused"
-          <| fun () ->
+          testCaseAsync "a mutable input inside the immutable storage root is refused"
+          <| async {
               let base' = root "mutable"
 
               try
                   let file = Path.Combine(base', "state.json")
                   File.WriteAllText(file, "{}")
 
-                  match ResolverInput.file base' "host" file with
-                  | Ok () -> failtest "mutable state inside the immutable root must be refused"
+                  match! ResolverInput.file base' "host" file with
+                  | Ok () -> return failtest "mutable state inside the immutable root must be refused"
                   | Error (LaunchInputRejected (_, detail)) ->
                       Expect.isTrue
                           (detail.Contains("immutable storage root", StringComparison.Ordinal))
                           "the refusal names the immutable root"
-                  | Error error -> failtestf "expected a launch-input failure, got %s" (ReleaseError.message error)
+                  | Error error -> return failtestf "expected a launch-input failure, got %s" (ReleaseError.message error)
               finally
                   discard base'
+          }
 
-          testCase "a directory where a file is required is refused"
-          <| fun () ->
+          testCaseAsync "a directory where a file is required is refused"
+          <| async {
               let base' = root "kind"
 
               try
+                  let store = Path.Combine(base', "immutable store")
                   let directory = Path.Combine(base', "workspace")
+                  Directory.CreateDirectory store |> ignore
                   Directory.CreateDirectory directory |> ignore
 
-                  match ResolverInput.file base' "host" directory with
-                  | Ok () -> failtest "a directory must not be accepted where a file is declared"
+                  // Containment is decided before the kind is, so only a directory outside the store reaches the wrong-kind refusal.
+                  match! ResolverInput.file store "host" directory with
+                  | Ok () -> return failtest "a directory must not be accepted where a file is declared"
                   | Error (LaunchInputRejected (_, detail)) ->
                       Expect.isTrue (detail.Contains("directory", StringComparison.Ordinal)) "the wrong kind is identified"
-                  | Error error -> failtestf "expected a launch-input failure, got %s" (ReleaseError.message error)
+                  | Error error -> return failtestf "expected a launch-input failure, got %s" (ReleaseError.message error)
               finally
                   discard base'
+          }
 
           testCaseAsync "a linked installation tree and a linked scan entry fail closed"
           <| async {
@@ -202,29 +208,29 @@ let tests =
                   let target = Path.Combine(base', "target")
                   Directory.CreateDirectory target |> ignore
                   unwrap (ResolverDisk.ensureDirectory storage.Root (Path.GetDirectoryName storage.Install))
-                  let! installed = junctionAsync storage.Install target
-                  Expect.isTrue installed "the fixture creates the installation junction"
+                  let! installed = directoryLinkAsync storage.Install target
+                  Expect.isTrue installed "the fixture creates the installation link"
                   Expect.isTrue (ResolverDisk.linked storage.Install) "the installation path is reported as a link"
 
-                  match ResolverDisk.inventory storage.Install with
-                  | Ok _ -> failtest "a linked installation tree must not be scanned"
+                  match! ResolverDisk.inventory storage.Install with
+                  | Ok _ -> return failtest "a linked installation tree must not be scanned"
                   | Error (FileFailure _) -> ()
-                  | Error error -> failtestf "expected a scan failure, got %s" (ReleaseError.message error)
+                  | Error error -> return failtestf "expected a scan failure, got %s" (ReleaseError.message error)
 
                   match ResolverDisk.entries storage.Install with
-                  | Ok _ -> failtest "a linked directory must not be listed"
+                  | Ok _ -> return failtest "a linked directory must not be listed"
                   | Error (FileFailure _) -> ()
-                  | Error error -> failtestf "expected an entries failure, got %s" (ReleaseError.message error)
+                  | Error error -> return failtestf "expected an entries failure, got %s" (ReleaseError.message error)
 
                   let tree = Path.Combine(base', "tree")
                   Directory.CreateDirectory tree |> ignore
-                  let! nested = junctionAsync (Path.Combine(tree, "nested")) target
-                  Expect.isTrue nested "the fixture creates a nested junction"
+                  let! nested = directoryLinkAsync (Path.Combine(tree, "nested")) target
+                  Expect.isTrue nested "the fixture creates a nested directory link"
 
-                  match ResolverDisk.inventory tree with
-                  | Ok _ -> failtest "a tree containing a link must not be scanned"
+                  match! ResolverDisk.inventory tree with
+                  | Ok _ -> return failtest "a tree containing a link must not be scanned"
                   | Error (FileFailure _) -> ()
-                  | Error error -> failtestf "expected a scan failure, got %s" (ReleaseError.message error)
+                  | Error error -> return failtestf "expected a scan failure, got %s" (ReleaseError.message error)
               finally
                   discard base'
           }
@@ -239,7 +245,7 @@ let tests =
                               let pinValue, archive = fixture dotnetSpec
                               let storage = unwrap (ResolverStorage.layout base' pinValue)
                               let! _ = installOnce base' pinValue archive
-                              unwrap (ResolverDisk.remove storage.Root storage.Install)
+                              let! _ = okAsync (ResolverDisk.remove storage.Root storage.Install)
 
                               // A byte-identical partial tree is reproducible resolver output.
                               let staged = Path.Combine(storage.Staging, Guid.NewGuid().ToString "N")
@@ -276,7 +282,7 @@ let tests =
                               let pinValue, archive = fixture dotnetSpec
                               let storage = unwrap (ResolverStorage.layout base' pinValue)
                               let! _ = installOnce base' pinValue archive
-                              unwrap (ResolverDisk.remove storage.Root storage.Install)
+                              let! _ = okAsync (ResolverDisk.remove storage.Root storage.Install)
 
                               let outside = Path.Combine(base', "outside")
                               Directory.CreateDirectory outside |> ignore
@@ -284,8 +290,8 @@ let tests =
 
                               let staged = Path.Combine(storage.Staging, Guid.NewGuid().ToString "N")
                               Directory.CreateDirectory staged |> ignore
-                              let! linked = junctionAsync (Path.Combine(staged, "link")) outside
-                              Expect.isTrue linked "the fixture creates a junction"
+                              let! linked = directoryLinkAsync (Path.Combine(staged, "link")) outside
+                              Expect.isTrue linked "the fixture creates a directory link"
 
                               let! _ = resolveOffline base' pinValue
                               Expect.isTrue (Directory.Exists(Path.Combine(staged, "link"))) "the linked staging entry survives"
@@ -311,8 +317,9 @@ let tests =
                   | Error(FileFailure ("containment", _, _)) -> ()
                   | Error error -> failtestf "expected a containment failure, got %s" (ReleaseError.message error)
 
-                  let folding = OperatingSystem.IsWindows()
-                  let cased = if folding then descendant.ToUpperInvariant() else descendant
+                  // macOS volumes may fold case as Windows ones do, so the compared policy follows that pair rather than the host that runs the suite.
+                  let folding = OperatingSystem.IsWindows() || OperatingSystem.IsMacOS()
+                  let cased = descendant.ToUpperInvariant()
 
                   match ResolverDisk.under store cased, folding with
                   | Ok contained, true -> Expect.equal contained (Path.GetFullPath cased) "a case-folded host contains the case-differing name"
@@ -332,7 +339,7 @@ let tests =
                               let pinValue, archive = fixture dotnetSpec
                               let storage = unwrap (ResolverStorage.layout base' pinValue)
                               let! _ = installOnce base' pinValue archive
-                              unwrap (ResolverDisk.remove storage.Root storage.Install)
+                              let! _ = okAsync (ResolverDisk.remove storage.Root storage.Install)
 
                               // Every candidate is a byte-identical copy of verified members, so the number removed is the number the pass evaluated, in any order it sees.
                               let candidates =
@@ -363,7 +370,7 @@ let tests =
                               let pinValue, archive = fixture dotnetSpec
                               let storage = unwrap (ResolverStorage.layout base' pinValue)
                               let! _ = installOnce base' pinValue archive
-                              unwrap (ResolverDisk.remove storage.Root storage.Install)
+                              let! _ = okAsync (ResolverDisk.remove storage.Root storage.Install)
 
                               // A link fails every inventory of the entry, so no evaluation can decide it is resolver output and the bounded pass must leave it for the operator.
                               let outside = Path.Combine(base', "operator")
@@ -375,7 +382,7 @@ let tests =
                               for _ in 1 .. 20 do
                                   let entry = Path.Combine(storage.Staging, Guid.NewGuid().ToString "N")
                                   Directory.CreateDirectory entry |> ignore
-                                  let! linked = junctionAsync (Path.Combine(entry, "link")) outside
+                                  let! linked = directoryLinkAsync (Path.Combine(entry, "link")) outside
                                   Expect.isTrue linked "the fixture guards a staging entry behind a link"
                                   guarded.Add entry
 
@@ -494,11 +501,11 @@ let tests =
                               Directory.CreateDirectory outside |> ignore
                               File.WriteAllText(Path.Combine(outside, "operator.txt"), "operator content")
 
-                              // An unguarded open of a junction leaf creates the coordination entry inside a tree the store never owns, so the refusal is asserted with that tree still holding exactly the operator content it started with.
+                              // An unguarded open of a link leaf creates the coordination entry inside a tree the store never owns, so the refusal is asserted with that tree still holding exactly the operator content it started with.
                               for planted, acquire in [ Path.Combine(locks, "planted.guard"), ResolverLock.exclusive;
                                                          Path.Combine(locks, "planted.lease"), ResolverLock.shared ] do
-                                  let! created = junctionAsync planted outside
-                                  Expect.isTrue created "the fixture plants a junction where the coordination entry belongs"
+                                  let! created = directoryLinkAsync planted outside
+                                  Expect.isTrue created "the fixture plants a directory link where the coordination entry belongs"
 
                                   match! acquire planted with
                                   | Ok held ->
@@ -506,7 +513,7 @@ let tests =
                                       return failtestf "the coordination entry '%s' was opened through a link" planted
                                   | Error error -> admission error "link" planted "the path is a link or reparse point"
 
-                              Expect.equal (Directory.GetFileSystemEntries outside).Length 1 "no coordination entry was created behind the junction"
+                              Expect.equal (Directory.GetFileSystemEntries outside).Length 1 "no coordination entry was created behind the link"
                               Expect.equal (File.ReadAllText(Path.Combine(outside, "operator.txt"))) "operator content" "content outside the store is untouched"
                               Expect.isFalse (tryOpenExclusively (Path.Combine(outside, "operator.txt"))) "a refused admission leaves no handle on the tree it refused"
                           })
@@ -537,8 +544,10 @@ let tests =
                               | Ok (), Ok () ->
                                   for planted, acquire in [ absentLink, ResolverLock.exclusive;
                                                             presentLink, ResolverLock.shared ] do
+                                      let! classified = ResolverKind.classify planted
+
                                       Expect.equal
-                                          (ResolverKind.classify planted |> Result.map ResolverKind.name |> Result.defaultValue "")
+                                          (classified |> Result.map ResolverKind.name |> Result.defaultValue "")
                                           "link or reparse point"
                                           "the planted entry is a link before any open"
 
@@ -552,10 +561,10 @@ let tests =
                                   Expect.equal (File.ReadAllBytes present) marker "an existing target keeps its bytes through a refused link"
                                   Expect.isFalse (tryOpenExclusively present) "a refused link leaves no handle on its target"
                               | unavailable, _ ->
-                                  // The privilege is absent here, so the file-symlink coverage is named rather than passed over, and the same leaf rule is still proven with a junction.
+                                  // The privilege is absent here, so the file-symlink coverage is named rather than passed over, and the same leaf rule is still proven with a directory link.
                                   eprintfn "the file-symlink coordination cases did not run: %A" unavailable
-                                  let! created = junctionAsync absentLink outside
-                                  Expect.isTrue created "the fixture plants a junction where the file symlink was unavailable"
+                                  let! created = directoryLinkAsync absentLink outside
+                                  Expect.isTrue created "the fixture plants a directory link where the file symlink was unavailable"
 
                                   match! ResolverLock.exclusive absentLink with
                                   | Ok held ->
@@ -563,7 +572,7 @@ let tests =
                                       return failtest "a linked coordination entry was opened"
                                   | Error error -> admission error "link" absentLink "the path is a link or reparse point"
 
-                                  Expect.equal (Directory.GetFileSystemEntries outside).Length 1 "no coordination entry was created behind the junction"
+                                  Expect.equal (Directory.GetFileSystemEntries outside).Length 1 "no coordination entry was created behind the link"
                                   Expect.equal (File.ReadAllBytes present) marker "content outside the store is untouched"
                           })
           }
@@ -610,8 +619,8 @@ let tests =
                               Directory.CreateDirectory outside |> ignore
                               File.WriteAllText(Path.Combine(outside, "operator.txt"), "operator content")
                               let linkedLocks = Path.Combine(base', "linked locks")
-                              let! created = junctionAsync linkedLocks outside
-                              Expect.isTrue created "the fixture plants a junction where the locks directory belongs"
+                              let! created = directoryLinkAsync linkedLocks outside
+                              Expect.isTrue created "the fixture plants a directory link where the locks directory belongs"
 
                               for planted, acquire in [ Path.Combine(linkedLocks, Path.GetFileName storage.Guard), ResolverLock.exclusive;
                                                         Path.Combine(linkedLocks, Path.GetFileName storage.Lease), ResolverLock.shared ] do

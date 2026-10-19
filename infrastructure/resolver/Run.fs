@@ -9,10 +9,11 @@ let private root (overrideRoot: string option) : Result<string, ReleaseError> =
     | Some value -> Ok value
     | None -> ResolverStorage.canonicalRoot ()
 
-let private read (path: string) : Result<DistributionPin.Pin, ReleaseError> =
-    match ResolverInput.pin path with
-    | Error error -> Error error
-    | Ok text -> DistributionPin.parse text
+let private read (path: string) : Async<Result<DistributionPin.Pin, ReleaseError>> = async {
+    match! ResolverInput.pin path with
+    | Error error -> return Error error
+    | Ok text -> return DistributionPin.parse text
+}
 
 let private resolveTarget
     (transport: ResolverTransport.Transport)
@@ -23,7 +24,7 @@ let private resolveTarget
         match root overrideRoot with
         | Error error -> return Error error
         | Ok storageRoot ->
-            match read pinPath with
+            match! read pinPath with
             | Error error -> return Error error
             | Ok pin ->
                 match! ResolverInstall.resolve transport storageRoot pin with
@@ -53,10 +54,10 @@ let run
         match root options.Root with
         | Error error -> return Error error
         | Ok storageRoot ->
-            match ResolverInput.directory storageRoot "workspace" options.Workspace with
+            match! ResolverInput.directory storageRoot "workspace" options.Workspace with
             | Error error -> return Error error
             | Ok () ->
-                match ResolverInput.file storageRoot "host" options.Host with
+                match! ResolverInput.file storageRoot "host" options.Host with
                 | Error error -> return Error error
                 | Ok () ->
                     match! resolveTarget transport options.Pin options.Root with
@@ -64,13 +65,15 @@ let run
                     | Ok(_, resolution) ->
                         let descriptor = resolution.Manifest.Launch
 
-                        let prepared =
-                            match ResolverLaunch.compose descriptor options.Inputs with
-                            | Error error -> Error error
-                            | Ok arguments ->
-                                match ResolverInput.inputs storageRoot descriptor options.Inputs with
-                                | Error error -> Error error
-                                | Ok () -> Ok arguments
+                        let! prepared =
+                            async {
+                                match ResolverLaunch.compose descriptor options.Inputs with
+                                | Error error -> return Error error
+                                | Ok arguments ->
+                                    match! ResolverInput.inputs storageRoot descriptor options.Inputs with
+                                    | Error error -> return Error error
+                                    | Ok () -> return Ok arguments
+                            }
 
                         match prepared with
                         | Error error ->

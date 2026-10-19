@@ -10,7 +10,7 @@ function Get-ReleaseRoster {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][string]$Root)
 
-    $rosterPath = Join-Path $Root "infrastructure\release\Participants.json"
+    $rosterPath = Join-Path $Root "infrastructure/release/Participants.json"
 
     if (-not (Test-Path -LiteralPath $rosterPath)) {
         throw "enrollment roster not found: $rosterPath"

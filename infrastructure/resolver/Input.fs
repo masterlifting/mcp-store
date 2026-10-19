@@ -23,86 +23,98 @@ let private free (name: string) (path: string) : Result<unit, ReleaseError> =
     | Ok () -> Ok()
     | Error error -> rejected name (ReleaseError.message error)
 
-let file (root: string) (name: string) (path: string) : Result<unit, ReleaseError> =
+let file (root: string) (name: string) (path: string) : Async<Result<unit, ReleaseError>> = async {
     if not (ResolverPath.isAbsolute path) then
-        rejected name $"'{path}' is not an absolute path"
-    elif Directory.Exists path then
-        rejected name $"'{path}' is a directory, not a file"
-    elif not (File.Exists path) then
-        rejected name $"the file '{path}' does not exist"
+        return rejected name $"'{path}' is not an absolute path"
     else
-        match free name path with
-        | Error error -> Error error
+        match outside root name path with
+        | Error error -> return Error error
         | Ok () ->
-            // Kind is checked without opening, because opening a FIFO or device can block.
-            match ResolverKind.classify path with
-            | Error error -> rejected name (ReleaseError.message error)
-            | Ok ResolverKind.Regular -> outside root name path
-            | Ok kind -> rejected name $"'{path}' is a {ResolverKind.name kind}, not a regular file"
+            match free name path with
+            | Error error -> return Error error
+            | Ok () ->
+                if Directory.Exists path then
+                    return rejected name $"'{path}' is a directory, not a file"
+                elif not (File.Exists path) then
+                    return rejected name $"the file '{path}' does not exist"
+                else
+                    // Kind is checked without opening, because opening a FIFO or device can block.
+                    match! ResolverKind.classify path with
+                    | Error error -> return rejected name (ReleaseError.message error)
+                    | Ok ResolverKind.Regular -> return Ok()
+                    | Ok kind -> return rejected name $"'{path}' is a {ResolverKind.name kind}, not a regular file"
+}
 
-let directory (root: string) (name: string) (path: string) : Result<unit, ReleaseError> =
+let directory (root: string) (name: string) (path: string) : Async<Result<unit, ReleaseError>> = async {
     if not (ResolverPath.isAbsolute path) then
-        rejected name $"'{path}' is not an absolute path"
-    elif File.Exists path then
-        rejected name $"'{path}' is a file, not a directory"
-    elif not (Directory.Exists path) then
-        rejected name $"the directory '{path}' does not exist"
+        return rejected name $"'{path}' is not an absolute path"
     else
-        match free name path with
-        | Error error -> Error error
+        match outside root name path with
+        | Error error -> return Error error
         | Ok () ->
-            match ResolverKind.classify path with
-            | Error error -> rejected name (ReleaseError.message error)
-            | Ok ResolverKind.Directory -> outside root name path
-            | Ok kind -> rejected name $"'{path}' is a {ResolverKind.name kind}, not a directory"
+            match free name path with
+            | Error error -> return Error error
+            | Ok () ->
+                if File.Exists path then
+                    return rejected name $"'{path}' is a file, not a directory"
+                elif not (Directory.Exists path) then
+                    return rejected name $"the directory '{path}' does not exist"
+                else
+                    match! ResolverKind.classify path with
+                    | Error error -> return rejected name (ReleaseError.message error)
+                    | Ok ResolverKind.Directory -> return Ok()
+                    | Ok kind -> return rejected name $"'{path}' is a {ResolverKind.name kind}, not a directory"
+}
 
 let inputs
     (root: string)
     (descriptor: DistributionContract.LaunchDescriptor)
     (supplied: (string * string) list)
-    : Result<unit, ReleaseError> =
-    let mutable failure: ReleaseError option = None
+    : Async<Result<unit, ReleaseError>> =
+    async {
+        let rec validate remaining = async {
+            match remaining with
+            | [] -> return Ok()
+            | (name, value) :: rest ->
+                match descriptor.Arguments |> List.tryFind (fun argument -> argument.Input = name) with
+                | None -> return! validate rest
+                | Some argument ->
+                    let! result =
+                        match argument.Type with
+                        | DistributionContract.LaunchArgumentType.AbsoluteFile -> file root name value
+                        | DistributionContract.LaunchArgumentType.AbsoluteDirectory -> directory root name value
+                        | DistributionContract.LaunchArgumentType.Sha256 -> async { return Ok() }
+                    match result with
+                    | Error error -> return Error error
+                    | Ok () -> return! validate rest
+        }
+        return! validate supplied
+    }
 
-    for name, value in supplied do
-        if failure.IsNone then
-            match descriptor.Arguments |> List.tryFind (fun argument -> argument.Input = name) with
-            | Some argument ->
-                let validation =
-                    match argument.Type with
-                    | DistributionContract.LaunchArgumentType.AbsoluteFile -> file root name value
-                    | DistributionContract.LaunchArgumentType.AbsoluteDirectory -> directory root name value
-                    | DistributionContract.LaunchArgumentType.Sha256 -> Ok()
-                match validation with
-                | Ok () -> ()
-                | Error error -> failure <- Some error
-            | None -> ()
-
-    match failure with
-    | Some error -> Error error
-    | None -> Ok()
-
-let pin (path: string) : Result<string, ReleaseError> =
+let pin (path: string) : Async<Result<string, ReleaseError>> = async {
     if not (ResolverPath.isAbsolute path) then
-        invalid path "the pin path is not absolute"
-    elif Directory.Exists path then
-        invalid path "the pin path is a directory"
-    elif not (File.Exists path) then
-        invalid path "the pin file does not exist"
+        return invalid path "the pin path is not absolute"
     else
         match ResolverDisk.chain path with
-        | Error error -> invalid path (ReleaseError.message error)
+        | Error error -> return invalid path (ReleaseError.message error)
         | Ok () ->
-            match ResolverKind.classify path with
-            | Error error -> invalid path (ReleaseError.message error)
-            | Ok ResolverKind.Regular ->
-                try
-                    let info = FileInfo path
+            if Directory.Exists path then
+                return invalid path "the pin path is a directory"
+            elif not (File.Exists path) then
+                return invalid path "the pin file does not exist"
+            else
+                match! ResolverKind.classify path with
+                | Error error -> return invalid path (ReleaseError.message error)
+                | Ok ResolverKind.Regular ->
+                    try
+                        let info = FileInfo path
 
-                    if info.Length > pinBound then
-                        invalid path $"the pin file is {info.Length} bytes which exceeds the {pinBound}-byte bound"
-                    else
-                        Ok(File.ReadAllText path)
-                with
-                | :? IOException as error -> invalid path error.Message
-                | :? UnauthorizedAccessException as error -> invalid path error.Message
-            | Ok kind -> invalid path $"the pin path is a {ResolverKind.name kind}, not a regular file"
+                        if info.Length > pinBound then
+                            return invalid path $"the pin file is {info.Length} bytes which exceeds the {pinBound}-byte bound"
+                        else
+                            return Ok(File.ReadAllText path)
+                    with
+                    | :? IOException as error -> return invalid path error.Message
+                    | :? UnauthorizedAccessException as error -> return invalid path error.Message
+                | Ok kind -> return invalid path $"the pin path is a {ResolverKind.name kind}, not a regular file"
+}

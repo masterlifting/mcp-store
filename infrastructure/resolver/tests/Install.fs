@@ -14,13 +14,6 @@ let private unwrap (work: Result<'a, ReleaseError>) : 'a =
     | Ok value -> value
     | Error error -> failtestf "%s" (ReleaseError.message error)
 
-let private okAsync (work: Async<Result<'a, ReleaseError>>) : Async<'a> =
-    async {
-        match! work with
-        | Ok value -> return value
-        | Error error -> return failtestf "expected success, got %s" (ReleaseError.message error)
-    }
-
 let private anyPartial (directory: string) : bool =
     Directory.Exists directory
     && Directory.GetFiles(directory, "*.partial", SearchOption.AllDirectories).Length > 0
@@ -50,7 +43,7 @@ let tests =
                               Expect.isTrue (File.Exists storage.Lease) "the coordination lease file is retained"
 
                               let verified = unwrap (ResolverPayload.verify pinValue (File.ReadAllBytes storage.Retained))
-                              let present = unwrap (ResolverDisk.inventory storage.Install)
+                              let! present = okAsync (ResolverDisk.inventory storage.Install)
                               Expect.equal (ResolverPayload.difference verified present) None "the installed tree equals the verified inventory"
                               resolution.Lease.Release()
                           })
@@ -89,7 +82,7 @@ let tests =
                               let storage = unwrap (ResolverStorage.layout base' pinValue)
                               let! first = okAsync (ResolverInstall.resolve (serving archive (ref 0)) base' pinValue)
                               first.Lease.Release()
-                              unwrap (ResolverDisk.remove storage.Root storage.Install)
+                              let! _ = okAsync (ResolverDisk.remove storage.Root storage.Install)
 
                               let offlineDownloads = ref 0
                               let! again = okAsync (ResolverInstall.resolve (offline offlineDownloads) base' pinValue)

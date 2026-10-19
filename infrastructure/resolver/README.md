@@ -220,12 +220,19 @@ document as a claim beyond them.
   safety property depends on it, because an existing installation is never
   replaced automatically. Locking behavior on NFS/SMB, or against writers that do
   not use .NET, is unverified; neither file is a cross-machine lock.
-- **Unix entry-kind classification relies on a private runtime ABI.**
-  `SystemNative_LStat` in `libSystem.Native` is not a supported public API, and
-  its `FileStatus` layout is pinned to the .NET 11 baseline. Missing shim or
-  entry-point errors are reported as unclassifiable, but a layout mismatch is
-  not guaranteed to raise an exception and could be misclassified. That branch
-  is compiled but unexercised on this repository's Windows-only evidence.
+- **Unix entry-kind classification uses the platform `stat` utility.** Linux
+  requires GNU `stat` at `/usr/bin/stat`; macOS requires its BSD `stat` at that
+  path. The implementation invokes it directly with fixed platform arguments,
+  bounds each call to at most two seconds, and fails closed on unsupported
+  platforms, execution errors, timeout, or malformed output. This is provisional:
+  no Unix runtime qualification is claimed until the Linux, macOS ARM, and macOS
+  Intel CI jobs have all completed successfully.
+- **Classification has subprocess cost.** Inventory and cleanup classify entries
+  sequentially and may launch one process per entry (up to the 8,192-entry
+  bound). Each scan/cleanup has a cooperative 60-second deadline, with the
+  remaining time limiting each classification call; inventory also checks its
+  deadline between digest chunks. These bounds do not interrupt an arbitrary
+  kernel filesystem stall, and no hosted timing evidence has qualified the cost.
 - **An installation that fails re-verification needs an operator.** Nothing here
   moves, renames, or deletes an existing installation, so a tree whose trusted
   names carry different bytes stays in place and blocks that pin until an operator
@@ -240,6 +247,9 @@ document as a claim beyond them.
   pin, host, workspace, or typed input is refused, because containment is decided
   on path text; supply the resolved path. Hard links, bind mounts, and mount
   points that make two textual paths the same physical entry are not detected.
+- **Path admission is not atomic with filesystem operations.** Link and kind
+  checks precede opens and deletes, but another same-user writer can mutate a
+  path between the check and operation.
 - **Input content hashes are the product's contract.** The resolver validates
   shape, kind, existence, and location for typed launch inputs; a declared
   SHA-256 input value is passed through, and the product that consumes it owns

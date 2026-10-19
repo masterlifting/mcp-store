@@ -11,6 +11,7 @@ open System.Security.Cryptography
 open System.Text
 open System.Text.Json.Nodes
 open System.Threading.Tasks
+open Expecto
 open SharedFailure
 open DistributionContract
 open DistributionPin
@@ -203,13 +204,48 @@ let offline (downloads: int ref) : ResolverTransport.Transport =
             downloads.Value <- downloads.Value + 1
             new HttpClient(new RefusingHandler()) }
 
-let private baseDirectory = Path.Combine(Path.GetTempPath(), "mcp-store-resolver-tests")
+// A temp base reached through an alias such as /tmp or /var is itself a link, and the resolver refuses a linked chain, so each component is walked to the entry it names.
+let private canonicalDirectory (path: string) : string =
+    let absolute = Path.TrimEndingDirectorySeparator(Path.GetFullPath path)
+    let root = Path.GetPathRoot absolute
+
+    let rec step (current: string) (remaining: string list) =
+        match remaining with
+        | [] -> current
+        | segment :: rest ->
+            let next = Path.Combine(current, segment)
+            let info = DirectoryInfo next
+
+            let target =
+                if isNull info.LinkTarget then
+                    next
+                else
+                    match info.ResolveLinkTarget true with
+                    | null -> next
+                    | resolved -> resolved.FullName
+
+            step target rest
+
+    if String.IsNullOrEmpty root then
+        absolute
+    else
+        let relative =
+            absolute.Substring(root.Length)
+            |> fun rest -> rest.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+
+        let segments = relative |> Array.filter (fun segment -> segment <> "") |> Array.toList
+        step root segments
+
+let tempDirectory = canonicalDirectory (Path.GetTempPath())
+
+let private baseDirectory = Path.Combine(tempDirectory, "mcp-store-resolver-tests")
 
 let root (label: string) : string =
     let path = Path.Combine(baseDirectory, $"{label}-{Guid.NewGuid():N}")
     Directory.CreateDirectory path |> ignore
     path
 
+// Every link these fixtures plant targets a directory inside the same fixture root, so a recursive delete cannot reach content the resolver or the operator owns.
 let discard (path: string) : unit =
     try
         Directory.Delete(path, true)
@@ -238,6 +274,13 @@ let scopedAsync (label: string) (body: string -> Async<unit>) : Async<unit> =
             return raise error
     }
 
+let okAsync (work: Async<Result<'a, ReleaseError>>) : Async<'a> =
+    async {
+        match! work with
+        | Ok value -> return value
+        | Error error -> return failtestf "expected success, got %s" (ReleaseError.message error)
+    }
+
 let writePin (directory: string) (value: Pin) : string =
     let path = Path.Combine(directory, "pin.json")
     File.WriteAllText(path, DistributionPin.render value)
@@ -247,30 +290,37 @@ let writeArchive (path: string) (bytes: byte[]) : string =
     File.WriteAllBytes(path, bytes)
     path
 
-// A file symlink needs a privilege a junction does not, so the fixture reports why it could not plant one rather than letting a case claim a link it never created.
+// On Windows a file symlink needs a privilege a junction does not, so the fixture reports why it could not plant one rather than letting a case claim a link it never created.
 let fileSymlink (link: string) (target: string) : Result<unit, string> =
     try
         File.CreateSymbolicLink(link, target) |> ignore
         Ok()
     with error -> Error $"{error.GetType().Name}: {error.Message}"
 
-// Junctions need no elevated privilege, so link rejection is exercised on a normal Windows host.
-let junctionAsync (link: string) (target: string) : Async<bool> =
+// A directory link must be creatable without an elevated privilege everywhere, so Windows uses the junction command and Unix uses the supported symbolic-link API.
+let directoryLinkAsync (link: string) (target: string) : Async<bool> =
     async {
-        let info = ProcessStartInfo("cmd")
-        info.UseShellExecute <- false
-        info.RedirectStandardOutput <- true
-        info.RedirectStandardError <- true
-        info.CreateNoWindow <- true
-
-        for argument in [ "/c"; "mklink"; "/J"; link; target ] do
-            info.ArgumentList.Add argument
-
-        use child = new Process(StartInfo = info)
-
-        if not (child.Start()) then
-            return false
+        if not (OperatingSystem.IsWindows()) then
+            try
+                Directory.CreateSymbolicLink(link, target) |> ignore
+                return Directory.Exists link
+            with _ ->
+                return false
         else
-            do! child.WaitForExitAsync() |> Async.AwaitTask
-            return child.ExitCode = 0 && Directory.Exists link
+            let info = ProcessStartInfo("cmd")
+            info.UseShellExecute <- false
+            info.RedirectStandardOutput <- true
+            info.RedirectStandardError <- true
+            info.CreateNoWindow <- true
+
+            for argument in [ "/c"; "mklink"; "/J"; link; target ] do
+                info.ArgumentList.Add argument
+
+            use child = new Process(StartInfo = info)
+
+            if not (child.Start()) then
+                return false
+            else
+                do! child.WaitForExitAsync() |> Async.AwaitTask
+                return child.ExitCode = 0 && Directory.Exists link
     }

@@ -201,6 +201,23 @@ let literalCalls = @"pendingTask.Result pendingTask.Wait()"
                 [ "Async.RunSynchronously"; "Async.RunSynchronously" ]
                 "an extra bridge invalidates the exact allowlist"
 
+        testCase "the resolver probe allows only its one exact child entry bridge" <| fun _ ->
+            let root = repositoryRoot ()
+            let relative = "infrastructure/resolver/tests/Probe.fs"
+            let source = File.ReadAllText(Path.Combine(root, "infrastructure", "resolver", "tests", "Probe.fs"))
+            Expect.isEmpty (violations (checkText relative source)) "the documented standalone child entry bridge is allowed"
+
+            let withoutDoc = source.Replace("Standalone entry bridge", "no entry-bridge doc")
+            Expect.isTrue ((violations (checkText relative withoutDoc) |> List.length) >= 1) "the bridge without its WHY comment is blocked"
+
+            Expect.isTrue ((violations (checkText "other.fs" source) |> List.length) >= 1) "the exact bridge is not allowlisted at another path"
+
+            let extraBridge = source + Environment.NewLine + "let unexpected () = Async.RunSynchronously(work)"
+            Expect.equal
+                (checkText relative extraBridge |> violations |> List.length)
+                2
+                "an extra bridge invalidates the exact allowlist"
+
         testCase "supporting artifact test entry bridges require exact paths, shapes, and documentation" <| fun _ ->
             let supportingArtifact =
                 "// Standalone entry bridge: FSI owns the process entry for this asynchronous script.\n|> Async.RunSynchronously\n"
