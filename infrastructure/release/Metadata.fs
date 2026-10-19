@@ -9,6 +9,7 @@ open System
 open System.IO
 open System.Security.Cryptography
 open System.Text
+open SharedFailure
 open BuildProvenance
 
 // The canonical pin/release-metadata schema version (owned by the shared contract).

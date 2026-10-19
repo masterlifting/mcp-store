@@ -9,6 +9,7 @@ open System.IO.Compression
 open System.Text
 open System.Text.Json
 open System.Text.Json.Nodes
+open SharedFailure
 open BuildProvenance
 open ReleaseCompare
 
@@ -510,7 +511,7 @@ let zip64MarkerRejected () = async {
 }
 let archiveSizeBoundRejection () = async {
     let path = Path.Combine(tempRoot, "oversize.zip")
-    let payloadSize = ReleaseArchive.maxArchiveBytes + 1L |> int
+    let payloadSize = DistributionArchive.maxArchiveBytes + 1L |> int
     let buffer = Array.zeroCreate<byte> payloadSize
     let eocdOffset = payloadSize - 22
     buffer.[eocdOffset] <- 0x50uy
@@ -765,7 +766,7 @@ let entryCommentRejected () = async {
 }
 let totalUncompressedBoundRejection () = async {
     let path = Path.Combine(tempRoot, "total-uncompressed.zip")
-    let perEntryLyingSize = ReleaseArchive.maxEntryUncompressedBytes - 1L |> int
+    let perEntryLyingSize = DistributionArchive.maxEntryUncompressedBytes - 1L |> int
     let entryCount = 2
     do
         use archive = ZipFile.Open(path, ZipArchiveMode.Create)
@@ -839,7 +840,7 @@ let nonCanonicalDeflateBody () = async {
 let boundsAtValidate () = async {
     let path = Path.Combine(tempRoot, "oversize-entry.zip")
     let entryBytes = Encoding.UTF8.GetBytes "small-payload"
-    let lyingSize = ReleaseArchive.maxEntryUncompressedBytes + 1L |> int
+    let lyingSize = DistributionArchive.maxEntryUncompressedBytes + 1L |> int
     do
         use archive = ZipFile.Open(path, ZipArchiveMode.Create)
         let entry = archive.CreateEntry("FSharp.Core.dll", CompressionLevel.Optimal)

@@ -4,8 +4,10 @@
 // provenance, publish, staging, manifest, and archive identical across producers.
 module DistributionBuild
 
+#load "Failure.fs"
 #load "Provenance.fs"
 #load "distribution/Contract.fs"
+#load "distribution/Archive.fs"
 #load "release/Policy.fs"
 
 open System
@@ -13,6 +15,7 @@ open System.IO
 open System.IO.Compression
 open System.Text
 open System.Threading
+open SharedFailure
 open BuildProvenance
 open DistributionContract
 open ReleasePolicy
@@ -73,6 +76,17 @@ let private attempt operation path (work: unit -> unit) : Result<unit, ReleaseEr
     | :? IOException as error -> Error(FileFailure(operation, path, error.Message))
     | :? UnauthorizedAccessException as error -> Error(FileFailure(operation, path, error.Message))
 
+let private normalizeArchive archivePath : Result<unit, ReleaseError> =
+    try
+        match DistributionArchive.canonicalizeWriterBytes archivePath (File.ReadAllBytes archivePath) with
+        | Error error -> Error error
+        | Ok bytes ->
+            File.WriteAllBytes(archivePath, bytes)
+            Ok()
+    with
+    | :? IOException as error -> Error(FileFailure("normalize archive", archivePath, error.Message))
+    | :? UnauthorizedAccessException as error -> Error(FileFailure("normalize archive", archivePath, error.Message))
+
 // Entry timestamps are pinned so archive bytes do not depend on the build clock.
 let private createArchive archivePath sourceRoot files : Async<Result<unit, ReleaseError>> =
     async {
@@ -81,6 +95,8 @@ let private createArchive archivePath sourceRoot files : Async<Result<unit, Rele
 
             for relativePath in files do
                 let entry = archive.CreateEntry(relativePath, CompressionLevel.Optimal)
+                // Zero attributes keep platform-specific BCL defaults out of the strict archive format.
+                entry.ExternalAttributes <- 0
                 entry.LastWriteTime <- DateTimeOffset(1980, 1, 1, 0, 0, 0, TimeSpan.Zero)
 
                 use source = File.OpenRead(Path.Combine(sourceRoot, relativePath))
@@ -204,6 +220,7 @@ let private buildWith
             do! attempt "clear previous archive" archivePath (fun () -> File.Delete archivePath)
 
         do! createArchive archivePath destination archiveFiles
+        do! normalizeArchive archivePath
         let! archiveSha256 = sha256FileAsync archivePath
         let! manifestSha256 = sha256FileAsync manifestPath
 

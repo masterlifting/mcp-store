@@ -6,6 +6,7 @@ open System.IO
 open System.Text.Json.Nodes
 open System.Text.RegularExpressions
 open Expecto
+open SharedFailure
 open BuildProvenance
 open DistributionContract
 open ReleaseCompare

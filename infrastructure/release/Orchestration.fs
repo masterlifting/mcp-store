@@ -8,6 +8,7 @@ open System.Text
 open System.Text.Json
 open System.Text.Json.Nodes
 open System.Threading
+open SharedFailure
 open BuildProvenance
 
 // Snapshot of the preparation phases for one component. The publisher re-reads
@@ -61,14 +62,14 @@ let private sha256OfFile (path: string) : Async<Result<string, ReleaseError>> =
 
 // Reads the archive, extracts the embedded `distribution.json` entry, hashes its
 // bytes, and returns the embedded manifest SHA. Reuses the canonical
-// `ReleaseArchive.parse` so the same transport checks apply; the standalone
+// `DistributionArchive.parse` so the same transport checks apply; the standalone
 // manifest at `<component>/dist/<componentId>/distribution.json` is hashed
 // byte-for-byte here so the publisher can independently re-confirm equality.
 let private embeddedManifestSha256 (archivePath: string) : Async<Result<string, ReleaseError>> =
     async {
         try
             let bytes = File.ReadAllBytes archivePath
-            match ReleaseArchive.parse archivePath bytes with
+            match DistributionArchive.parse archivePath bytes with
             | Error error -> return Error error
             | Ok archive ->
                 let mutable failure : ReleaseError option = None
@@ -81,7 +82,7 @@ let private embeddedManifestSha256 (archivePath: string) : Async<Result<string, 
                     | None ->
                         if entry.Name = DistributionContract.manifestEntryName then
                             manifestCount <- manifestCount + 1
-                            match ReleaseArchive.decompress entry with
+                            match DistributionArchive.decompress entry with
                             | Error error -> failure <- Some error
                             | Ok payload ->
                                 if manifestCount > 1 then

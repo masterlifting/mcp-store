@@ -7,6 +7,7 @@ open System.Text
 open System.Text.Json
 open System.Text.Json.Nodes
 open Expecto
+open SharedFailure
 open BuildProvenance
 open Release.Tests.FixtureHelpers
 

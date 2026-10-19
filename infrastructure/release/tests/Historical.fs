@@ -11,6 +11,7 @@ open Release.Tests
 open System
 open System.IO
 open System.Text
+open SharedFailure
 open BuildProvenance
 open ReleaseCompare
 

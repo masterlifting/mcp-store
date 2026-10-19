@@ -122,9 +122,9 @@ Assert-Count -Name "the coherence guard receives the projection value" -Pattern 
 Assert-Count -Name "the coherence guard reads no step-local output file" -Pattern 'Coherence\.ps1 -OutputFile' -Expected 0
 Assert-Count -Name "every SDK install is fed by the canonical projection" -Pattern '^ {10}dotnet-version: \$\{\{ steps\.project\.outputs\.sdk \}\}\s*$' -Expected 3
 Assert-Count -Name "SDK installs never name a literal version" -Pattern 'dotnet-version: (?!\$\{\{)' -Expected 0
-# The publisher job derives no participant list of its own: it consumes the projection through the coherence step's
-# own value and the SDK install above, so only the two candidate jobs read the projection into a loop variable.
-Assert-Count -Name "every stage reads the projection instead of a literal participant list" -Pattern 'ConvertFrom-Json \$env:RELEASE_COMPONENTS' -Expected 4
+# One projection drives every job's participant list, so a hand-edited roster cannot drift from the enrolled components.
+Assert-Count -Name "every stage reads the projection instead of a literal participant list" -Pattern 'ConvertFrom-Json \$env:RELEASE_COMPONENTS' -Expected 5
+Assert-JobCount -Job "publisher" -Name "publisher reads the projected components" -Pattern 'ConvertFrom-Json \$env:RELEASE_COMPONENTS' -Expected 1
 Assert-JobCount -Job "preparation" -Name "preparation reads the projected components" -Pattern 'ConvertFrom-Json \$env:RELEASE_COMPONENTS' -Expected 2
 Assert-JobCount -Job "publication" -Name "publication reads the projected components" -Pattern 'ConvertFrom-Json \$env:RELEASE_COMPONENTS' -Expected 2
 
@@ -205,6 +205,15 @@ Assert-JobCount -Job "publisher" -Name "publisher restores from the cleared isol
 Assert-JobCount -Job "publisher" -Name "twelve non-packaging Workflow entrypoints" -Pattern '^\s+"workflow/tests/[A-Za-z]+\.fsx",?\s*$' -Expected 12
 Assert-JobCount -Job "publisher" -Name "publisher runs the producer Expecto gate" -Pattern 'dotnet run --project dotnet/tests/Mcp\.Dotnet\.Tests' -Expected 1
 Assert-JobCount -Job "publisher" -Name "publisher builds the compiled release regression project" -Pattern 'dotnet build infrastructure/release/tests/Tests\.fsproj' -Expected 1
+Assert-JobCount -Job "publisher" -Name "publisher builds the compiled resolver project" -Pattern 'dotnet build infrastructure/resolver/Resolver\.fsproj -c Release' -Expected 1
+Assert-JobCount -Job "publisher" -Name "publisher builds the compiled resolver Expecto project" -Pattern 'dotnet build infrastructure/resolver/tests/Tests\.fsproj -c Release' -Expected 1
+Assert-JobCount -Job "publisher" -Name "publisher runs the resolver Expecto gate" -Pattern 'dotnet run --project infrastructure/resolver/tests/Tests\.fsproj' -Expected 1
+Assert-JobCount -Job "publisher" -Name "publisher builds each enrolled producer's canonical local distribution" -Pattern '^ {12}& dotnet fsi --nologo "\$component/release/Build\.fsx"\s*$' -Expected 1
+Assert-JobCount -Job "publisher" -Name "publisher writes each enrolled producer's canonical consumer pin" -Pattern '^ {12}& dotnet fsi --nologo "\$component/release/Pins\.fsx"\s*$' -Expected 1
+Assert-Before -Job "publisher" -Name "the canonical toolchain is verified before local packaging" -First 'run: pwsh infrastructure/release/Update.ps1 -Verify' -Second '& dotnet fsi --nologo "$component/release/Build.fsx"'
+Assert-Before -Job "publisher" -Name "each producer is packed before its consumer pin" -First '& dotnet fsi --nologo "$component/release/Build.fsx"' -Second '& dotnet fsi --nologo "$component/release/Pins.fsx"'
+Assert-Before -Job "publisher" -Name "local packaging precedes the resolver launch gate" -First '& dotnet fsi --nologo "$component/release/Pins.fsx"' -Second 'dotnet run --project infrastructure/resolver/tests/Tests.fsproj'
+Assert-Before -Job "publisher" -Name "local packaging precedes the checkout build gates" -First '& dotnet fsi --nologo "$component/release/Pins.fsx"' -Second 'dotnet build dotnet/Mcp.Dotnet.fsproj -c Release'
 Assert-JobCount -Job "publisher" -Name "publisher runs the complete compiled release gate" -Pattern '^ {8}run: pwsh infrastructure/release/Suite\.ps1\s*$' -Expected 1
 Assert-JobCount -Job "publisher" -Name "publisher typechecks the retained release scripts" -Pattern 'Typecheck\.ps1 -SdkVersion' -Expected 1
 

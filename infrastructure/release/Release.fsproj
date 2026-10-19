@@ -11,10 +11,11 @@
     <DebugSymbols>false</DebugSymbols>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../../infrastructure/Failure.fs" />
     <Compile Include="../../infrastructure/Provenance.fs" />
     <Compile Include="../distribution/Contract.fs" />
     <Compile Include="../distribution/Pin.fs" />
-    <Compile Include="Archive.fs" />
+    <Compile Include="../distribution/Archive.fs" />
     <Compile Include="Policy.fs" />
     <Compile Include="Compare.fs" />
     <Compile Include="Metadata.fs" />

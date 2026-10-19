@@ -9,6 +9,7 @@ open System.Diagnostics
 open System.IO
 open System.IO.Compression
 open System.Text.Json.Nodes
+open SharedFailure
 open BuildProvenance
 open DistributionBuild
 open DistributionContract

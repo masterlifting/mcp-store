@@ -4,6 +4,7 @@
 // exception while only effectful acquisition is asynchronous and Result-valued.
 module DistributionTestHelper
 
+#load "Failure.fs"
 #load "Provenance.fs"
 
 open System
@@ -14,6 +15,7 @@ open System.Text
 open System.Text.Json
 open System.Text.Json.Nodes
 open System.Threading
+open SharedFailure
 open BuildProvenance
 
 // Producer-supplied identity for the shared v2 distribution contract. The launch

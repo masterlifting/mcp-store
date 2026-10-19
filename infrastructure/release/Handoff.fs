@@ -6,6 +6,7 @@ open System.IO
 open System.IO.Compression
 open System.Security.Cryptography
 open System.Text
+open SharedFailure
 open BuildProvenance
 
 let private maxArchiveBytes = 256L * 1024L * 1024L
@@ -105,7 +106,7 @@ let readCandidate (candidatePath: string) (policy: ReleasePolicy.PolicyProjectio
                                 | MissingArtifact name -> Error(MalformedArtifact(name, $"candidate producer archive is missing {DistributionContract.manifestEntryName}"))
                                 | _ -> Error error
                             | Ok embeddedManifestBytes ->
-                                match ReleaseArchive.parse policy.ArchiveName bytes with
+                                match DistributionArchive.parse policy.ArchiveName bytes with
                                 | Error error -> Error error
                                 | Ok _ ->
                                     match ReleaseCompare.observeBytes policy.ArchiveName bytes with

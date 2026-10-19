@@ -89,7 +89,7 @@ let private parsePolicy configPath =
     ReleasePolicy.parseBytes configPath (File.ReadAllBytes configPath)
     |> function
         | Ok policy -> policy
-        | Error error -> failwithf "fixture policy failed to parse: %s" (BuildProvenance.ReleaseError.message error)
+        | Error error -> failwithf "fixture policy failed to parse: %s" (SharedFailure.ReleaseError.message error)
 
 let private writeProducerArchive (root: string) (policy: ReleasePolicy.PolicyProjection) (revision: string) =
     let payloads = Fixture.policyPayloads policy "fixture"

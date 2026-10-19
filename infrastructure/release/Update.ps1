@@ -15,14 +15,14 @@ param(
     [Parameter(Mandatory = $true, ParameterSetName = "Verify")]
     [switch]$Verify,
 
-    [string]$Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+    [string]$Root = (Resolve-Path (Join-Path $PSScriptRoot "../..")).Path
 )
 
 $ErrorActionPreference = "Stop"
 
 . (Join-Path $PSScriptRoot "Roster.ps1")
 
-$rosterPath = Join-Path $Root "infrastructure\release\Participants.json"
+$rosterPath = Join-Path $Root "infrastructure/release/Participants.json"
 
 # The exact policy field set the compiled reader also accepts; a drift here fails before any SDK install.
 $script:PolicyFields = @(

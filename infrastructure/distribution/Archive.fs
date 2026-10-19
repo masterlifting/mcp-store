@@ -1,13 +1,13 @@
 // role: reusable module/helper
-// Raw ZIP32 reader for the deterministic producer archives.
+// Raw ZIP32 reader for the deterministic producer archives, shared by the release pipeline and the resolver.
 // It validates the exact local/central layout and exposes every byte a strict comparison must preserve.
 // Only the canonical Deflate32 shape the producer emits is accepted; any other layout fails closed.
-module ReleaseArchive
+module DistributionArchive
 
 open System
 open System.IO
 open System.IO.Compression
-open BuildProvenance
+open SharedFailure
 
 // Untrusted-input caps applied before any allocation or decompression.
 let maxArchiveBytes = 256L * 1024L * 1024L
@@ -80,7 +80,7 @@ let crc32 (bytes: byte[]) : uint32 =
 
     value ^^^ 0xFFFFFFFFu
 
-let private parseBytes (path: string) (bytes: byte[]) : Archive =
+let private parseBytes (allowUnixCreator: bool) (path: string) (bytes: byte[]) : Archive =
     let length = int64 bytes.Length
 
     if length > maxArchiveBytes then
@@ -190,7 +190,8 @@ let private parseBytes (path: string) (bytes: byte[]) : Archive =
         if method <> deflateMethod then
             bad "only the canonical Deflate method is supported"
 
-        if versionNeeded <> canonicalVersion || versionMadeBy <> canonicalVersion then
+        if versionNeeded <> canonicalVersion
+           || (versionMadeBy <> canonicalVersion && not (allowUnixCreator && versionMadeBy = 0x0314us)) then
             bad "entry version metadata is not the canonical value"
 
         if extraLength <> 0us || entryCommentLength <> 0us then
@@ -316,7 +317,30 @@ let private parseBytes (path: string) (bytes: byte[]) : Archive =
 
 let parse (path: string) (bytes: byte[]) : Result<Archive, ReleaseError> =
     try
-        Ok(parseBytes path bytes)
+        Ok(parseBytes false path bytes)
+    with
+    | ArchiveFormat detail -> Error(MalformedArtifact(path, detail))
+    | :? InvalidDataException as error -> Error(MalformedArtifact(path, error.Message))
+
+// BCL output can differ only in the Unix creator-OS byte; the strict reader stays unchanged.
+let canonicalizeWriterBytes (path: string) (bytes: byte[]) : Result<byte[], ReleaseError> =
+    try
+        let archive = parseBytes true path bytes
+
+        if archive.Entries |> List.forall (fun entry -> entry.VersionMadeBy = canonicalVersion) then
+            Ok bytes
+        else
+            let normalized = Array.copy bytes
+            let mutable cursor = archive.CentralDirectoryOffset
+
+            for entry in archive.Entries do
+                normalized[int (cursor + 4L)] <- byte canonicalVersion
+                normalized[int (cursor + 5L)] <- byte (canonicalVersion >>> 8)
+                cursor <- cursor + 46L + int64 entry.NameBytes.Length
+
+            match parse path normalized with
+            | Ok _ -> Ok normalized
+            | Error error -> Error error
     with
     | ArchiveFormat detail -> Error(MalformedArtifact(path, detail))
     | :? InvalidDataException as error -> Error(MalformedArtifact(path, error.Message))

@@ -5,11 +5,13 @@
 // published release-metadata projection.
 module ReleasePins
 
+#load "Failure.fs"
 #load "Provenance.fs"
 #load "distribution/Contract.fs"
 #load "distribution/Pin.fs"
 #load "release/Policy.fs"
 
+open SharedFailure
 open BuildProvenance
 open DistributionContract
 open DistributionPin

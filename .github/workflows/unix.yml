@@ -1,0 +1,125 @@
+name: unix
+
+# This workflow is a read-only pull-request qualification path; it never publishes, never holds a write token, and never shares the main-only release graph.
+# Explicit images and RIDs prevent a floating runner label from silently changing the qualified platform.
+# The projection supplies the SDK and producer roster, so this file carries no toolchain or participant literal.
+
+on:
+  pull_request:
+
+concurrency:
+  group: unix-${{ github.event.pull_request.number }}
+  # Cancelling a superseded run discards no shared publication state: this path is pull-request-only, read-only and non-publishing.
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_NOLOGO: "1"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: "1"
+
+jobs:
+  qualification:
+    name: qualify (${{ matrix.image }}, ${{ matrix.rid }})
+    runs-on: ${{ matrix.image }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: ubuntu-24.04
+            rid: linux-x64
+          - image: macos-15
+            rid: osx-arm64
+          - image: macos-15-intel
+            rid: osx-x64
+    steps:
+      - name: checkout the exact pull request head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # A pull request defaults to a synthetic merge commit; only the author's head commit is the qualification input.
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: project the canonical toolchain from the policy JSON
+        id: project
+        shell: pwsh
+        run: pwsh infrastructure/release/Update.ps1 -Project
+
+      - name: setup the canonical .NET SDK
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: ${{ steps.project.outputs.sdk }}
+
+      - name: verify the executing SDK and record the runner toolchain
+        shell: pwsh
+        env:
+          SDK: ${{ steps.project.outputs.sdk }}
+          IMAGE: ${{ matrix.image }}
+          RID: ${{ matrix.rid }}
+          # The expected revision comes from the trusted event rather than from the checkout being verified, and never from free text such as a title.
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $expectedHead = $env:HEAD_SHA
+          $actualHead = (& git "rev-parse" "HEAD").Trim()
+          if ($LASTEXITCODE -ne 0) { throw "git rev-parse HEAD failed (exit $LASTEXITCODE)" }
+          Write-Host "checked out head=$actualHead expected head=$expectedHead"
+          if ($actualHead -cne $expectedHead) { throw "the checked out HEAD '$actualHead' is not the pull request head '$expectedHead'" }
+          $sdk = $env:SDK
+          if ([string]::IsNullOrWhiteSpace($sdk)) { throw "the canonical projection emitted no SDK version" }
+          $lines = @(& dotnet "--list-sdks")
+          if ($LASTEXITCODE -ne 0) { throw "dotnet --list-sdks failed (exit $LASTEXITCODE)" }
+          $versions = @($lines | ForEach-Object { if ($_ -match '^(?<version>\S+)\s+\[') { $Matches['version'] } })
+          $current = (& dotnet "--version").Trim()
+          if ($LASTEXITCODE -ne 0) { throw "dotnet --version failed (exit $LASTEXITCODE)" }
+          $rid = [System.Runtime.InteropServices.RuntimeInformation]::RuntimeIdentifier
+          Write-Host "matrix image=$($env:IMAGE) rid=$($env:RID)"
+          Write-Host "runtime rid=$rid os=$([System.Runtime.InteropServices.RuntimeInformation]::OSDescription) arch=$([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture) process=$([System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture)"
+          Write-Host "pwsh=$($PSVersionTable.PSVersion) git=$(& git "--version")"
+          Write-Host "canonical sdk=$sdk selected=$current installed=[$($versions -join ', ')]"
+          if ($versions -cnotcontains $sdk) { throw "the canonical SDK '$sdk' is not installed; observed [$($versions -join ', ')]" }
+          if ($current -cne $sdk) { throw "the selected SDK is '$current' where the canonical projection declares '$sdk'" }
+          if ($rid -cne $env:RID) { throw "the runner reports RID '$rid' where the matrix declares '$($env:RID)'" }
+          & dotnet "--info"
+          if ($LASTEXITCODE -ne 0) { throw "dotnet --info failed (exit $LASTEXITCODE)" }
+
+      - name: pack both canonical producer distributions from the exact head
+        shell: pwsh
+        # The resolver launch tests consume the canonical local distributions, so both packed products precede the Expecto gate.
+        run: |
+          $ErrorActionPreference = "Stop"
+          if (Test-Path variable:PSNativeCommandUseErrorActionPreference) { $PSNativeCommandUseErrorActionPreference = $false }
+          $components = @(ConvertFrom-Json $env:RELEASE_COMPONENTS)
+          if ($components.Count -eq 0) { throw "the projection declares no enrolled component" }
+          foreach ($component in $components) {
+            & dotnet fsi --nologo "$component/release/Build.fsx"
+            if ($LASTEXITCODE -ne 0) { throw "$component distribution build failed (exit $LASTEXITCODE)" }
+            & dotnet fsi --nologo "$component/release/Pins.fsx"
+            if ($LASTEXITCODE -ne 0) { throw "$component consumer pin failed (exit $LASTEXITCODE)" }
+          }
+
+      - name: build the compiled resolver and its test project
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          & dotnet build infrastructure/resolver/Resolver.fsproj -c Release
+          if ($LASTEXITCODE -ne 0) { throw "resolver build failed (exit $LASTEXITCODE)" }
+          & dotnet build infrastructure/resolver/tests/Tests.fsproj -c Release
+          if ($LASTEXITCODE -ne 0) { throw "resolver test build failed (exit $LASTEXITCODE)" }
+
+      - name: run the full resolver Expecto suite with the native exit
+        shell: pwsh
+        # No filter, ignore list or result rewrite: the suite's own exit code is the qualification gate.
+        run: |
+          $ErrorActionPreference = "Stop"
+          if (Test-Path variable:PSNativeCommandUseErrorActionPreference) { $PSNativeCommandUseErrorActionPreference = $false }
+          $watch = [System.Diagnostics.Stopwatch]::StartNew()
+          & dotnet run --project infrastructure/resolver/tests/Tests.fsproj -c Release --no-build
+          $code = $LASTEXITCODE
+          $watch.Stop()
+          Write-Host "resolver suite exit=$code elapsed=$([math]::Round($watch.Elapsed.TotalSeconds, 3))s"
+          exit $code

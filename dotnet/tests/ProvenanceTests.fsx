@@ -3,6 +3,7 @@
 // distribution tests this runs from a dirty tree because it exercises only manifest
 // revision validation, not packaging or the clean-tree precondition.
 
+#load "../../infrastructure/Failure.fs"
 #load "../../infrastructure/Provenance.fs"
 
 open System
@@ -10,6 +11,7 @@ open System.Diagnostics
 open System.IO
 open System.Threading
 open System.Threading.Tasks
+open SharedFailure
 open BuildProvenance
 
 let private assertEqual name expected actual =

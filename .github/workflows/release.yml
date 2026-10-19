@@ -1,17 +1,8 @@
 name: release
 
-# Three isolated fresh jobs. The read-only publisher job compiles the release application from the project's own
-# explicit ordered compile list in an isolated stage and runs the complete release regression gate. The read-only
-# preparation job runs both producers' package gates and uploads one candidate transport per producer. The
-# write-capable publication job alone holds a credential, downloads the exact declared artifact ids through the pinned
-# official transfer action, verifies every file against the publisher job's own independent inventory and only then
-# runs the verified publisher.
-# Every action reference is a reviewed 40-hex commit whose published runtime is node24, so no stage runs on a retired
-# node16/node20 runtime and no floating tag can move a step's behavior.
-# A single artifact requested by id is extracted directly into the exact path this workflow declares, so each verified
-# volume is that declared root itself rather than a discovered child directory named after the artifact.
-# `Participants.json` is the only enrollment authority and each producer's `*/release/Config.json` is the only source
-# of SDK/version/runtime/platform, so no stage restates those values in YAML or global.json.
+# Provenance comes from each producer's canonical local distribution and consumer pin, packed in the read-only publisher before any gate.
+# Only the publication job holds the platform token; it transfers declared artifact ids through pinned actions and verifies every file against the publisher's independent inventory before executing.
+# Every action reference is a reviewed 40-hex commit on node24, so no floating tag or retired runtime can move a step's behavior.
 
 run-name: release ${{ github.sha }}
 
@@ -81,6 +72,21 @@ jobs:
       - name: verify the executing toolchain against the policy JSON
         shell: pwsh
         run: pwsh infrastructure/release/Update.ps1 -Verify
+
+      - name: pack each enrolled producer's canonical local distribution and consumer pin
+        shell: pwsh
+        # The resolver launch gate installs the canonical local product bytes, so both producers must be packed first.
+        run: |
+          $ErrorActionPreference = "Stop"
+          if (Test-Path variable:PSNativeCommandUseErrorActionPreference) { $PSNativeCommandUseErrorActionPreference = $false }
+          $components = @(ConvertFrom-Json $env:RELEASE_COMPONENTS)
+          if ($components.Count -eq 0) { throw "the projection declares no enrolled component" }
+          foreach ($component in $components) {
+            & dotnet fsi --nologo "$component/release/Build.fsx"
+            if ($LASTEXITCODE -ne 0) { throw "$component distribution build failed (exit $LASTEXITCODE)" }
+            & dotnet fsi --nologo "$component/release/Pins.fsx"
+            if ($LASTEXITCODE -ne 0) { throw "$component consumer pin failed (exit $LASTEXITCODE)" }
+          }
 
       - name: stage the publisher project from the explicit ordered compile list
         id: stage
@@ -192,7 +198,7 @@ jobs:
           path: ${{ env.PUBLISHER_STAGE_ROOT }}/publish
           if-no-files-found: error
 
-      - name: build the producer projects and both compiled Expecto projects
+      - name: build the producer projects, the resolver and the compiled Expecto projects
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -205,6 +211,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "producer Expecto test project build failed (exit $LASTEXITCODE)" }
           dotnet build infrastructure/release/tests/Tests.fsproj -c Release
           if ($LASTEXITCODE -ne 0) { throw "compiled release Expecto project build failed (exit $LASTEXITCODE)" }
+          # The resolver is the shared install and launch boundary for both producers, so a build break must fail before publication.
+          dotnet build infrastructure/resolver/Resolver.fsproj -c Release
+          if ($LASTEXITCODE -ne 0) { throw "resolver build failed (exit $LASTEXITCODE)" }
+          dotnet build infrastructure/resolver/tests/Tests.fsproj -c Release
+          if ($LASTEXITCODE -ne 0) { throw "resolver Expecto test project build failed (exit $LASTEXITCODE)" }
 
       - name: run the producer Expecto gate (native exit preserved)
         shell: pwsh
@@ -212,6 +223,14 @@ jobs:
           $ErrorActionPreference = "Stop"
           # Actual compiled Expecto entrypoint: no --ignore, no filter, no result rewriting; the native failure exit blocks the release job.
           dotnet run --project dotnet/tests/Mcp.Dotnet.Tests/Mcp.Dotnet.Tests.fsproj -c Release --no-build
+          exit $LASTEXITCODE
+
+      - name: run the resolver Expecto gate (native exit preserved)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # dotnet test reports no counts for a console Expecto entrypoint, so the runner's own failure exit is the gate.
+          dotnet run --project infrastructure/resolver/tests/Tests.fsproj -c Release --no-build
           exit $LASTEXITCODE
 
       - name: run the non-packaging Workflow test entrypoints (native exit preserved)

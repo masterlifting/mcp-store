@@ -8,7 +8,7 @@ open System.IO
 open System.Text
 open System.Text.Json
 open System.Text.Json.Nodes
-open BuildProvenance
+open SharedFailure
 
 // A future schema change must update this constant, the parser, and the renderer together.
 let schemaVersion = 2

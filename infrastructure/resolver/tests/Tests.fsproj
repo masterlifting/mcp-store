@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net11.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>Resolver.Tests</AssemblyName>
+    <RootNamespace>Resolver.Tests</RootNamespace>
+    <IsPackable>false</IsPackable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <LangVersion>9.0</LangVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="Fixture.fs" />
+    <Compile Include="Payload.fs" />
+    <Compile Include="Tree.fs" />
+    <Compile Include="Probe.fs" />
+    <Compile Include="Unix.fs" />
+    <Compile Include="Stat.fs" />
+    <Compile Include="Install.fs" />
+    <Compile Include="Launch.fs" />
+    <Compile Include="Storage.fs" />
+    <Compile Include="Transport.fs" />
+    <Compile Include="Main.fs" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Expecto" Version="10.2.3" />
+    <PackageReference Include="Expecto.FsCheck" Version="10.2.3" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Resolver.fsproj" />
+  </ItemGroup>
+</Project>

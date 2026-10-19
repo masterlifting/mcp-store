@@ -186,7 +186,7 @@ let runnerSourceExcludesTelegram () =
 let productionModulesExcludeTelegram () =
     let moduleFiles =
         [
-            Path.Combine(repoRoot, "infrastructure", "release", "Archive.fs")
+            Path.Combine(repoRoot, "infrastructure", "distribution", "Archive.fs")
             Path.Combine(repoRoot, "infrastructure", "release", "Compare.fs")
             Path.Combine(repoRoot, "infrastructure", "release", "Evaluate.fs")
             Path.Combine(repoRoot, "infrastructure", "release", "Metadata.fs")

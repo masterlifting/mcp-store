@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net11.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>Resolver</AssemblyName>
+    <RootNamespace>Resolver</RootNamespace>
+    <LangVersion>9.0</LangVersion>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <DebugType>None</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+  </PropertyGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Resolver.Tests" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="../../infrastructure/Failure.fs" />
+    <Compile Include="../distribution/Contract.fs" />
+    <Compile Include="../distribution/Pin.fs" />
+    <Compile Include="../distribution/Archive.fs" />
+    <Compile Include="Digest.fs" />
+    <Compile Include="Identity.fs" />
+    <Compile Include="Path.fs" />
+    <Compile Include="Kind.fs" />
+    <Compile Include="Runtime.fs" />
+    <Compile Include="Launch.fs" />
+    <Compile Include="Storage.fs" />
+    <Compile Include="Payload.fs" />
+    <Compile Include="Disk.fs" />
+    <Compile Include="Lock.fs" />
+    <Compile Include="Transport.fs" />
+    <Compile Include="Install.fs" />
+    <Compile Include="Cli.fs" />
+    <Compile Include="Input.fs" />
+    <Compile Include="Report.fs" />
+    <Compile Include="Child.fs" />
+    <Compile Include="Run.fs" />
+    <Compile Include="Main.fs" />
+  </ItemGroup>
+</Project>
