@@ -1,13 +1,11 @@
 // role: entrypoint/command
-// Process entry for the documented CLI; the resolve snapshot is the only thing this program
-// writes to stdout, so a child never competes with resolver output for that channel.
+// Only resolve snapshots use stdout; run leaves it to the child.
 module ResolverMain
 
 open System
 open SharedFailure
 
-// 1 marks a resolver failure and 2 a command line the CLI refused; a launched child's own
-// status is reported unchanged and is documented as indistinguishable from these in `run`.
+// Child exit codes are preserved, even when they match resolver failure codes.
 let private failure (error: ReleaseError) : int =
     Console.Error.WriteLine(ReleaseError.message error)
 

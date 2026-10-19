@@ -1,6 +1,5 @@
 // role: reusable module/helper
-// Install identity and pin-versus-manifest identity. The whole canonical pin is hashed,
-// so any field difference, including producer provenance, is a distinct installation.
+// Hashing the whole canonical pin makes every field difference a distinct installation.
 module ResolverIdentity
 
 open System.Text

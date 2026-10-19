@@ -1,6 +1,5 @@
 // role: reusable module/helper
-// Entry kind without opening the entry: .NET reports every Unix special file as Normal, and an
-// open of a FIFO or device can block forever, so kind comes from a stat-level classification.
+// Stat-level classification avoids opening Unix special files, which .NET reports as Normal.
 module ResolverKind
 
 open System
@@ -21,8 +20,7 @@ let name (kind: Kind) : string =
     | Link -> "link or reparse point"
     | Other -> "special file"
 
-// Windows decides kind from the file attributes, where a junction and a symlink both carry the
-// reparse flag and a directory flag can be present at the same time.
+// Windows can mark a junction or symlink as both a reparse point and a directory.
 let private windows (path: string) : Result<Kind, ReleaseError> =
     try
         let attributes = File.GetAttributes path
@@ -37,8 +35,7 @@ let private windows (path: string) : Result<Kind, ReleaseError> =
     | :? IOException as error -> Error(FileFailure("kind", path, error.Message))
     | :? UnauthorizedAccessException as error -> Error(FileFailure("kind", path, error.Message))
 
-// Mode bits of the runtime's own stat shim; only the file-type mask and the four kinds the resolver
-// distinguishes are read.
+// Mode bits of the runtime's private stat shim; only the file-type mask and resolver kinds are read.
 [<Literal>]
 let private typeMask = 0xF000
 
@@ -51,8 +48,7 @@ let private directoryMask = 0x4000
 [<Literal>]
 let private linkMask = 0xA000
 
-// The field order is the runtime's own FileStatus; a mismatch would let the shim write past this
-// struct, so the declaration is re-validated whenever the .NET runtime baseline changes.
+// The field order mirrors the private runtime FileStatus ABI and is not a public compatibility promise.
 [<StructLayout(LayoutKind.Sequential)>]
 type private FileStatus =
     struct
@@ -79,8 +75,7 @@ type private FileStatus =
 [<DllImport("libSystem.Native", EntryPoint = "SystemNative_LStat", CallingConvention = CallingConvention.Cdecl)>]
 extern int private lstat ([<MarshalAs(UnmanagedType.LPUTF8Str)>] string path, FileStatus& output)
 
-// A missing shim or a layout mismatch is a runtime defect, so it is reported as unclassifiable
-// rather than as a safe non-regular entry.
+// Missing shim or entry point errors fail closed, but an ABI mismatch may not raise an exception.
 let private unix (path: string) : Result<Kind, ReleaseError> =
     try
         let mutable status = Unchecked.defaultof<FileStatus>
@@ -101,7 +96,7 @@ let private unix (path: string) : Result<Kind, ReleaseError> =
     with
     | :? DllNotFoundException as error -> Error(FileFailure("kind", path, $"the runtime stat shim is unavailable: {error.Message}"))
     | :? EntryPointNotFoundException as error -> Error(FileFailure("kind", path, $"the runtime stat shim is unavailable: {error.Message}"))
-    | :? TypeLoadException as error -> Error(FileFailure("kind", path, $"the runtime stat shim layout does not match: {error.Message}"))
+    | :? TypeLoadException as error -> Error(FileFailure("kind", path, $"the runtime stat shim could not be loaded: {error.Message}"))
 
 let classify (path: string) : Result<Kind, ReleaseError> =
     if OperatingSystem.IsWindows() then windows path else unix path

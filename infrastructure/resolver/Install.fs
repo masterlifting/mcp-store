@@ -1,7 +1,5 @@
 // role: reusable module/helper
-// Installation orchestration: offline reuse of a re-verified cache, download only for absent
-// or invalid content, same-pin cross-process serialization, and atomic publication of fully
-// verified staging only.
+// Publication uses verified staging so an incomplete install is never visible.
 module ResolverInstall
 
 open System
@@ -18,7 +16,6 @@ type Resolution =
       Runtime: DistributionContract.RuntimeRequirement
       Lease: ResolverLock.Lock }
 
-// One bounded recovery pass keeps stale-staging cleanup proportional to an install attempt.
 let private recoveryLimit = 16
 
 type private State =
@@ -35,8 +32,7 @@ let private prepare (storage: ResolverStorage.Storage) : Result<unit, ReleaseErr
         | Error error -> Error error
         | Ok () -> ResolverDisk.ensureDirectory storage.Root storage.Staging
 
-// The retained archive is the only cached copy of the trusted bytes; an unreadable or
-// mismatching copy is not a failure here, because the caller downloads in that case.
+// An invalid retained archive is replaced only by bytes verified against the trusted pin.
 let private retained
     (pin: DistributionPin.Pin)
     (storage: ResolverStorage.Storage)
@@ -51,8 +47,6 @@ let private retained
             | Ok verified -> Some verified
             | Error _ -> None
 
-// Offline usability is decided against the trusted pin alone: the retained archive is
-// re-verified and the installation inventory must equal its verified member set exactly.
 let private usable
     (pin: DistributionPin.Pin)
     (storage: ResolverStorage.Storage)
@@ -75,8 +69,7 @@ let private stateOf (verified: ResolverPayload.Verified) (storage: ResolverStora
         | Ok present ->
             match ResolverPayload.difference verified present with
             | None -> Usable
-            // An installed tree is never replaced under a possible consumer: a parent that died
-            // without releasing its lease cannot be distinguished from one still running.
+            // A lost consumer lease cannot be distinguished from a live consumer.
             | Some detail ->
                 if ResolverPayload.sameNames verified present then
                     Invalid(
@@ -85,29 +78,38 @@ let private stateOf (verified: ResolverPayload.Verified) (storage: ResolverStora
                 else
                     Blocked detail
 
-// A staging entry is deleted only when its name is resolver-generated and every file in it is a
-// byte-identical copy of a verified member; a name alone is no authority over other content.
+// A generated name alone does not prove staging content is resolver-owned.
 let private stale (verified: ResolverPayload.Verified) (entry: string) : bool =
-    match Guid.TryParseExact(Path.GetFileName entry, "N") with
-    | true, _ ->
-        match ResolverDisk.inventory entry with
-        | Ok present -> ResolverPayload.subset verified present
-        | Error _ -> false
-    | _ -> false
+    match ResolverDisk.inventory entry with
+    | Ok present -> ResolverPayload.subset verified present
+    | Error _ -> false
 
-// Entries that cannot be proven resolver-owned are preserved for the operator, as is any entry the
-// bounded pass does not reach.
 let private recover
     (verified: ResolverPayload.Verified)
     (storage: ResolverStorage.Storage)
     : Result<unit, ReleaseError> =
-    match ResolverDisk.entries storage.Staging with
-    | Error error -> Error error
-    | Ok entries ->
-        for entry in entries |> List.filter (stale verified) |> List.truncate recoveryLimit do
-            ResolverDisk.remove storage.Root entry |> ignore
+    if ResolverDisk.linked storage.Staging then
+        Error(FileFailure("entries", storage.Staging, "the directory is a link or reparse point"))
+    elif not (Directory.Exists storage.Staging) then
+        Error(FileFailure("entries", storage.Staging, "the directory does not exist"))
+    else
+        try
+            let candidates =
+                Directory.EnumerateFileSystemEntries storage.Staging
+                |> Seq.filter (fun entry ->
+                    match Guid.TryParseExact(Path.GetFileName entry, "N") with
+                    | true, _ -> true
+                    | _ -> false)
+                |> Seq.truncate recoveryLimit
 
-        Ok()
+            for entry in candidates do
+                if stale verified entry then
+                    ResolverDisk.remove storage.Root entry |> ignore
+
+            Ok()
+        with
+        | :? IOException as error -> Error(FileFailure("entries", storage.Staging, error.Message))
+        | :? UnauthorizedAccessException as error -> Error(FileFailure("entries", storage.Staging, error.Message))
 
 let private extract
     (staging: string)
@@ -120,8 +122,7 @@ let private extract
         | Error error -> Error error
         | Ok () -> ResolverDisk.write staging target memberFile.Bytes
 
-// Staging is unique per attempt and lives beside the installations, so publication stays a
-// same-filesystem rename and no two attempts can write the same path.
+// Same-volume staging makes publication an atomic rename.
 let private stage
     (verified: ResolverPayload.Verified)
     (storage: ResolverStorage.Storage)
@@ -154,8 +155,7 @@ let private publish (staging: string) (storage: ResolverStorage.Storage) : Resul
     | Error error -> Error error
     | Ok () -> ResolverDisk.move storage.Root staging storage.Install
 
-// A download happens only for content the trusted pin says is absent or invalid, and the
-// fetched bytes are verified before they are retained or staged.
+// Verify fetched bytes before retaining or staging them.
 let private retain
     (transport: ResolverTransport.Transport)
     (pin: DistributionPin.Pin)
@@ -179,8 +179,6 @@ let private retain
                         | Ok () -> return Ok verified
     }
 
-// The caller holds the exclusive guard and the exclusive usage lease for this whole rebuild,
-// so the payload is obtained once and no state can change underneath the mutation.
 let private populate
     (transport: ResolverTransport.Transport)
     (pin: DistributionPin.Pin)
@@ -204,8 +202,7 @@ let private populate
                         match publish staging storage with
                         | Error error -> return Error error
                         | Ok () ->
-                            // Final-state validation of the published tree, so a cache
-                            // hit is never reported for content that did not land.
+                            // Validate publication before reporting a cache hit.
                             match usable pin storage with
                             | Some published -> return Ok published
                             | None ->
@@ -224,23 +221,19 @@ let private populateHeld
     (storage: ResolverStorage.Storage)
     : Async<Result<ResolverPayload.Verified, ReleaseError>> =
     async {
-        // The offline re-check comes before the exclusive lease: a competing process may have
-        // published while this one waited for the guard, and a concurrent consumer holding the
-        // shared lease must not be reported as an install conflict.
+        // Recheck after the guard wait to avoid conflicting with a consumer of a newly published install.
         match usable pin storage with
         | Some current -> return Ok current
         | None ->
             match! ResolverLock.exclusive storage.Lease with
             | Error error -> return Error error
             | Ok held ->
-                // The exclusive lease covers the entire mutation, so no consumer can observe
-                // or use an installation that is being published.
+                // No consumer may observe a tree during publication.
                 use lease = held
                 return! populate transport pin storage
     }
 
-// The guard is still held while the shared lease is taken, so no window exists in which
-// another process could replace the revision between publication and use.
+// Holding the guard through lease acquisition closes the publish-to-use race.
 let private installHeld
     (transport: ResolverTransport.Transport)
     (pin: DistributionPin.Pin)
@@ -280,8 +273,6 @@ let private outcome
               Runtime = verified.Runtime
               Lease = lease }
 
-// The shared lease is taken before any verification and travels with the result, so this consumer's
-// claim exists before the verified state it observed can be republished by anything else.
 let resolve
     (transport: ResolverTransport.Transport)
     (root: string)

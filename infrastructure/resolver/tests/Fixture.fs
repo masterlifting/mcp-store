@@ -1,5 +1,4 @@
-// Canonical resolver fixtures come from the shared distribution renderer and the strict ZIP
-// entry shape the resolver accepts, so no test invents a competing schema or archive layout.
+// Canonical resolver fixtures come from the shared distribution renderer and the strict ZIP entry shape the resolver accepts, so no test invents a competing schema or archive layout.
 module Resolver.Tests.Fixture
 
 open System
@@ -50,8 +49,7 @@ let sha256 (bytes: byte[]) : string =
 
 let utf8 (value: string) : byte[] = Encoding.UTF8.GetBytes value
 
-// The packaged runtime configuration is the authoritative prerequisite, so the fixture bytes
-// actually declare the framework and version the manifest derives rather than assuming one.
+// The packaged runtime configuration is the authoritative prerequisite, so the fixture bytes declare the framework and version the manifest derives rather than assuming one.
 let private runtimeConfigNode (version: string) : JsonObject =
     let framework = JsonObject()
     framework["name"] <- JsonValue.Create "Microsoft.NETCore.App"
@@ -198,8 +196,7 @@ let servingFile (path: string) (delayMs: int) (downloads: int ref) : ResolverTra
             downloads.Value <- downloads.Value + 1
             new HttpClient(new FileHandler(path, delayMs)) }
 
-// Transport-disabled: a caller that reaches the network is refused explicitly, so a resolve that
-// still succeeds proves the cache was used instead of a silent fallback.
+// Transport-disabled: a caller that reaches the network is refused explicitly, so a resolve that still succeeds proves the cache was used instead of a silent fallback.
 let offline (downloads: int ref) : ResolverTransport.Transport =
     { CreateClient =
         fun () ->
@@ -249,6 +246,13 @@ let writePin (directory: string) (value: Pin) : string =
 let writeArchive (path: string) (bytes: byte[]) : string =
     File.WriteAllBytes(path, bytes)
     path
+
+// A file symlink needs a privilege a junction does not, so the fixture reports why it could not plant one rather than letting a case claim a link it never created.
+let fileSymlink (link: string) (target: string) : Result<unit, string> =
+    try
+        File.CreateSymbolicLink(link, target) |> ignore
+        Ok()
+    with error -> Error $"{error.GetType().Name}: {error.Message}"
 
 // Junctions need no elevated privilege, so link rejection is exercised on a normal Windows host.
 let junctionAsync (link: string) (target: string) : Async<bool> =

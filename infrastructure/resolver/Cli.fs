@@ -1,6 +1,5 @@
 // role: reusable module/helper
-// Strict argv parsing for the two subcommands; paths are declared absolute here so no
-// repository- or harness-relative state can be inherited from the caller.
+// Absolute path inputs prevent caller-relative repository or harness state from leaking in.
 module ResolverCli
 
 open System

@@ -32,5 +32,6 @@ Support` on macOS), never to a repository, harness, or workspace directory.
 `infrastructure/resolver/README.md` documents the CLI, the resolution snapshot
 schema, retention and cleanup, and the current limitation list.
 
-Shared immutable contracts live in `infrastructure/distribution/` (manifest
-schema v2 and pin schema v1) and `infrastructure/release/` (publishing).
+Manifest, pin, archive, and failure contracts are shared by the resolver and
+release producer in `infrastructure/distribution/` and `infrastructure/Failure.fs`;
+`infrastructure/release/` owns publishing only.

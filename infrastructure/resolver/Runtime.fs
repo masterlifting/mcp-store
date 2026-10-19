@@ -1,12 +1,10 @@
 // role: reusable module/helper
-// Runtime prerequisite derived from the packaged runtime configuration, never from build
-// provenance; the host enforces the prerequisite, so no resolver-side selector exists.
+// The host enforces the packaged runtime prerequisite, so the resolver needs no selector.
 module ResolverRuntime
 
 open SharedFailure
 
-// The packaged configuration is authoritative, so a manifest that declares a different
-// prerequisite than the hashed member it names is rejected rather than resolved.
+// The manifest must match the hashed runtime configuration to avoid conflicting prerequisites.
 let requirement
     (manifest: DistributionContract.DistributionManifest)
     (configBytes: byte[])

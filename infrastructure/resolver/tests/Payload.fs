@@ -1,5 +1,4 @@
-// Verification is tested through the resolver's own result errors, never through message or
-// snapshot trivia: archive digest, manifest digest, identity, membership, and member hashes.
+// Verification is tested through the resolver's own result errors, never through message or snapshot trivia: archive digest, manifest digest, identity, membership, and member hashes.
 module Resolver.Tests.Payload
 
 open System
@@ -118,8 +117,7 @@ let tests =
 
           testCase "a decompression-ratio-abusing archive is rejected by the resource bound"
           <| fun () ->
-              // Only the producer's emitted entry shape reaches the ratio bound; any other writer
-              // shape is refused by the stricter entry gate first, which would hide the bound.
+              // Only the producer's emitted entry shape reaches the ratio bound; any other writer shape is refused by the stricter entry gate first, which would hide the bound.
               let archive =
                   archiveBytesWith CompressionLevel.Optimal (utf8 "{}") [ "big.txt", Array.zeroCreate<byte> (8 * 1024 * 1024) ]
 

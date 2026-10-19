@@ -1,5 +1,4 @@
-// Install is transactional, offline-capable, cross-process safe, and immutable: these cases
-// assert those invariants through the resolver result and the real published tree bytes.
+// Install is transactional, offline-capable, cross-process safe, and immutable: these cases assert those invariants through the resolver result and the real published tree bytes.
 module Resolver.Tests.Install
 
 open System

@@ -147,6 +147,11 @@ install and a valid revision is never overwritten in place. Competing processes
 serialize on the guard file, and coordination files are never unlinked, so no
 stale-lock reclamation protocol exists to get wrong.
 
+Before opening a guard or lease, the resolver rejects linked paths, non-directory
+ancestors, and existing non-regular leaves; a missing leaf may be created. This
+classification is not atomic with opening, so concurrent same-user filesystem
+mutation remains outside this protection.
+
 Guard exclusivity is proven rather than assumed: the guard is held with
 `FileShare.None` and then re-opened exclusively, and the platform must refuse that
 second open. Where the refusal does not happen — an advisory lock the filesystem
@@ -173,9 +178,10 @@ and operator-owned:
   you have decided no consumer needs. Do not delete them from a harness update
   path to save space.
 - An installed tree that fails re-verification is never moved or replaced by the
-  resolver. The retained archive is still downloaded and verified, and the run
-  then fails closed telling you to move the tree aside offline; a tree a running
-  consumer may be executing stays where it is.
+  resolver. A valid retained archive is re-verified and reused; if it is absent
+  or invalid, the pinned archive is downloaded and verified. The run then fails
+  closed telling you to move the tree aside offline; a tree a running consumer
+  may be executing stays where it is.
 - `<root>/staging/<key>` holds per-attempt trees. An install attempt deletes an
   entry only when its name is a resolver-generated GUID and every file inside is a
   byte-identical copy of a verified member; links, special entries, unrecognized
@@ -200,10 +206,11 @@ resolver provisions no runtime and does not substitute another revision.
 These are current, unverified, or unimplemented properties. Do not read this
 document as a claim beyond them.
 
-- **No runtime launch has been executed yet.** Only compilation is verified.
-  Windows is the only host the repository has built this code on, and no
-  cross-platform runtime behavior is claimed. The Linux and macOS root
-  conventions above are implemented but unexercised.
+- **Runtime evidence is Windows-only.** The native resolver suite passed 49/49
+  twice, including real local launches of Dotnet 1.0.5 and Workflow 1.0.6 from
+  canonical archives built from `95f0baa`, with spaced and hostile `global.json`
+  workspaces. These were local canonical archives, not published-release
+  verification. Linux, macOS, and hosted CI have not been executed.
 - **Unix coordination evidence is source-level.** The guard's exclusivity is
   proven at each acquisition and fails closed, but that proof has only ever been
   executed on Windows. On Unix, .NET implements `FileShare.None` as a
@@ -213,12 +220,12 @@ document as a claim beyond them.
   safety property depends on it, because an existing installation is never
   replaced automatically. Locking behavior on NFS/SMB, or against writers that do
   not use .NET, is unverified; neither file is a cross-machine lock.
-- **Unix entry-kind classification uses an internal runtime export.**
+- **Unix entry-kind classification relies on a private runtime ABI.**
   `SystemNative_LStat` in `libSystem.Native` is not a supported public API, and
-  its `FileStatus` layout is pinned to the .NET 11 baseline; a missing shim, entry
-  point, or layout mismatch makes the resolver fail closed instead of classifying
-  an entry as safe. That branch is compiled but unexercised on this repository's
-  Windows-only evidence.
+  its `FileStatus` layout is pinned to the .NET 11 baseline. Missing shim or
+  entry-point errors are reported as unclassifiable, but a layout mismatch is
+  not guaranteed to raise an exception and could be misclassified. That branch
+  is compiled but unexercised on this repository's Windows-only evidence.
 - **An installation that fails re-verification needs an operator.** Nothing here
   moves, renames, or deletes an existing installation, so a tree whose trusted
   names carry different bytes stays in place and blocks that pin until an operator

@@ -5,9 +5,11 @@ producer-independent: a consumer can resolve identity, integrity, launch
 requirements, and runtime prerequisites without producer-specific knowledge, and
 no producer-ID branch exists anywhere in this module.
 
-The two sources are compiled into `infrastructure/release/Release.fsproj` through
-explicit ordered `<Compile Include>` items and are loaded directly by the producer
-release scripts with script-relative `#load` paths. Both are pure decision logic:
+`Contract.fs`, `Pin.fs`, and `Archive.fs` are compiled into both the resolver and
+`infrastructure/release/Release.fsproj` through explicit ordered `<Compile
+Include>` items. Producer release scripts also load the shared sources with
+script-relative `#load` paths. `infrastructure/Failure.fs` is the shared pure
+failure contract used by both owners. These shared modules contain decision logic:
 no processes, filesystem writes, network, credentials, or harness state.
 
 ## `Contract.fs` — `DistributionContract`
@@ -108,7 +110,7 @@ existing release-metadata schema, not the distribution schema).
   revision-only no-op retains the **published** revision and hashes, never
   candidate values.
 
-## Consumers of this module
+## Consumers of these contracts
 
 - `infrastructure/Distribution.fsx` (`DistributionBuild`) emits the manifest and
   archive.
@@ -116,7 +118,10 @@ existing release-metadata schema, not the distribution schema).
 - `infrastructure/release/Policy.fs` parses the producer `Config.json` only;
   `ReleaseCompare.contractFromPolicy` projects it into the trusted
   `ComponentContract` used by comparison, handoff, evaluate, and orchestration.
+- `infrastructure/resolver/` uses the same manifest, pin, archive, and failure
+  contracts for installation and launch.
 
-Producer release scripts load these sources with script-relative `#load` paths,
-so `Policy.fs` deliberately does not depend on the comparison modules and the
-build/pin scripts never compile the full release graph.
+Release and resolver are separate consumers of these shared sources. Producer
+release scripts load them with script-relative `#load` paths, so `Policy.fs`
+deliberately does not depend on the comparison modules and build/pin scripts
+never compile the full release graph.

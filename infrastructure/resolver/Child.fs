@@ -1,6 +1,5 @@
 // role: reusable module/helper
-// The only process boundary: a shell-free argument list that inherits the parent's standard
-// handles, so the child owns stdout and its own exit status is reported unchanged.
+// Inherited handles keep stdout as the child's channel without involving a shell.
 module ResolverChild
 
 open System
@@ -51,8 +50,7 @@ let start
         | :? Win32Exception as error -> Error(ProcessStartFailure(host, error.Message))
         | :? InvalidOperationException as error -> Error(ProcessStartFailure(host, error.Message))
 
-// A signal terminates the child rather than being forwarded, because a resolver that is going
-// away must not leave the child running.
+// The resolver terminates the child on shutdown so it cannot outlive its supervisor.
 let await (child: Process) : Async<Outcome> =
     async {
         let mutable signalled = 0

@@ -1,6 +1,5 @@
 // role: reusable module/helper
-// External inputs of the CLI: the trusted pin file and the launch-time values, none of which
-// may live inside the immutable installation storage.
+// Mutable launch inputs must stay outside the immutable installation storage.
 module ResolverInput
 
 open System
@@ -13,15 +12,12 @@ let private rejected (name: string) (detail: string) = Error(LaunchInputRejected
 
 let private invalid (path: string) (detail: string) = Error(FileFailure("pin", path, detail))
 
-// Mutable state must not live in the immutable cache, so a supplied path is rejected when it
-// names anything inside the storage root.
 let private outside (root: string) (name: string) (path: string) : Result<unit, ReleaseError> =
     match ResolverDisk.under root path with
     | Ok _ -> rejected name $"'{path}' is inside the immutable storage root '{root}'"
     | Error _ -> Ok()
 
-// A link anywhere in the chain would make the physical target differ from the path validated here,
-// which is what keeps a link out of the immutable root and containment decided on text.
+// Containment is textual, so links could redirect a validated path.
 let private free (name: string) (path: string) : Result<unit, ReleaseError> =
     match ResolverDisk.chain path with
     | Ok () -> Ok()
@@ -60,8 +56,6 @@ let directory (root: string) (name: string) (path: string) : Result<unit, Releas
             | Ok ResolverKind.Directory -> outside root name path
             | Ok kind -> rejected name $"'{path}' is a {ResolverKind.name kind}, not a directory"
 
-// Manifest-declared inputs are read, never created, so only shape, kind, and location are
-// decided here; a declared content hash of an input stays the product's own check.
 let inputs
     (root: string)
     (descriptor: DistributionContract.LaunchDescriptor)
@@ -87,7 +81,6 @@ let inputs
     | Some error -> Error error
     | None -> Ok()
 
-// Only readability and kind are decided here; the pin parser owns every identity and integrity rule.
 let pin (path: string) : Result<string, ReleaseError> =
     if not (ResolverPath.isAbsolute path) then
         invalid path "the pin path is not absolute"

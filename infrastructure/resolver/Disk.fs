@@ -1,6 +1,5 @@
 // role: reusable module/helper
-// Narrow filesystem adapter over the resolver-owned storage tree: regular files only, no
-// reparse point on a traversed path, and every write published by rename.
+// Link-free paths and rename-published writes keep operations within the validated storage tree.
 module ResolverDisk
 
 open System
@@ -20,8 +19,7 @@ let private abort (detail: string) : 'T = raise (WalkAbort detail)
 
 let exists (path: string) : bool = File.Exists path || Directory.Exists path
 
-// A reparse point is refused on an ancestor and on a descendant alike; LinkTarget also
-// reports a link whose target is missing, which an existence test cannot.
+// LinkTarget detects dangling links that existence checks miss.
 let linked (path: string) : bool =
     try
         let info =
@@ -41,14 +39,20 @@ let linked (path: string) : bool =
 
 let private full (value: string) = value.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
 
-// Containment is decided on full paths under an explicit root, so no caller can compose a
-// target that escapes the tree it was given.
+// Textual containment prevents callers from composing a target outside the supplied root.
 let under (root: string) (path: string) : Result<string, ReleaseError> =
     try
         let rootFull = full (Path.GetFullPath root)
         let pathFull = full (Path.GetFullPath path)
 
-        if pathFull = rootFull || pathFull.StartsWith(rootFull + string Path.DirectorySeparatorChar, StringComparison.Ordinal) then
+        let comparison =
+            if OperatingSystem.IsWindows() then
+                StringComparison.OrdinalIgnoreCase
+            else
+                StringComparison.Ordinal
+
+        if pathFull.Equals(rootFull, comparison)
+           || pathFull.StartsWith(rootFull + string Path.DirectorySeparatorChar, comparison) then
             Ok pathFull
         else
             Error(FileFailure("containment", path, $"the path is outside the resolver storage root '{rootFull}'"))
@@ -57,8 +61,7 @@ let under (root: string) (path: string) : Result<string, ReleaseError> =
     | :? NotSupportedException as error -> Error(FileFailure("containment", path, error.Message))
     | :? PathTooLongException as error -> Error(FileFailure("containment", path, error.Message))
 
-// Rejects a link on the start and on every existing component beneath it, so a planted link cannot
-// redirect an operation away from the tree the caller named.
+// Checking every component prevents a planted link from redirecting an operation.
 let private walk (start: string) (segments: string list) : Result<unit, ReleaseError> =
     let rec step (current: string) (remaining: string list) =
         if linked current then
@@ -86,8 +89,7 @@ let rejectLinks (root: string) (target: string) : Result<unit, ReleaseError> =
 
         walk rootFull segments
 
-// An external path is admitted only when its whole chain is link-free: containment is decided on
-// text, so one link anywhere lets the physical target differ from the path that was validated.
+// A link in an external path can make its physical target differ from validated path text.
 let chain (path: string) : Result<unit, ReleaseError> =
     try
         let absolute = Path.GetFullPath path
@@ -146,8 +148,7 @@ let read (root: string) (path: string) (bound: int64) : Result<byte[], ReleaseEr
             | :? UnauthorizedAccessException as error -> Error(FileFailure("read", path, error.Message))
         | Ok kind -> Error(FileFailure("read", path, $"the path is a {ResolverKind.name kind}, not a regular file"))
 
-// A crashed attempt leaves at most one partial per destination, and only a plain file at that name
-// is replaced: any other kind is content this resolver cannot account for.
+// Only a plain-file partial is replaced because other entry kinds are unowned content.
 let private discardPartial (partial: string) : Result<unit, ReleaseError> =
     if not (exists partial) then
         Ok()
@@ -216,8 +217,7 @@ let entries (directory: string) : Result<string list, ReleaseError> =
         | :? IOException as error -> Error(FileFailure("entries", directory, error.Message))
         | :? UnauthorizedAccessException as error -> Error(FileFailure("entries", directory, error.Message))
 
-// Reading is capped by the remaining scan budget, so an entry that changed after classification
-// cannot make the scan unbounded.
+// The remaining scan budget caps reads if an entry changes after classification.
 let private digest (path: string) (budget: int64) : string * int64 =
     use stream = File.OpenRead path
     use hash = IncrementalHash.CreateHash HashAlgorithmName.SHA256
@@ -240,8 +240,7 @@ let private digest (path: string) (budget: int64) : string * int64 =
 
     Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant(), read
 
-// Relative slash paths and SHA-256 of every regular file in the tree; a directory is descended,
-// and any other kind fails closed before it is opened.
+// Special entries fail closed before open because inventories support only files and directories.
 let inventory (tree: string) : Result<(string * string) list, ReleaseError> =
     if linked tree then
         Error(FileFailure("scan", tree, "the tree is a link or reparse point"))
@@ -286,8 +285,7 @@ let inventory (tree: string) : Result<(string * string) list, ReleaseError> =
         | :? IOException as error -> Error(FileFailure("scan", tree, error.Message))
         | :? UnauthorizedAccessException as error -> Error(FileFailure("scan", tree, error.Message))
 
-// Deletes resolver-owned content only: anything that is not a plain file or directory aborts the
-// delete, so no link or special entry is followed or removed.
+// Only plain files and directories are deleted, so links and special entries remain untouched.
 let remove (root: string) (target: string) : Result<unit, ReleaseError> =
     match rejectLinks root target with
     | Error error -> Error error

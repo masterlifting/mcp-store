@@ -1,6 +1,5 @@
 // role: reusable module/helper
-// Strict verification of one trusted pin against its archive bytes: the archive digest is
-// checked before any decompression and the manifest digest before the manifest is parsed.
+// Digests are checked before decompression or parsing so untrusted archive bytes stay inert.
 module ResolverPayload
 
 open System
@@ -54,8 +53,7 @@ let private verifiedManifest
             )
         )
 
-// Archive membership is exactly the declared members plus the manifest, so an extra or
-// missing entry is rejected before any member payload is trusted.
+// Exact membership rejects extra or missing entries before any member payload is trusted.
 let private verifiedMembership
     (manifest: DistributionContract.DistributionManifest)
     (archive: DistributionArchive.Archive)
@@ -156,8 +154,7 @@ let verify (pin: DistributionPin.Pin) (archiveBytes: byte[]) : Result<Verified, 
                               Runtime = runtime
                               Members = members }
 
-// Pure: the first difference between the verified member set and an on-disk inventory of
-// (relative path, SHA-256) entries, or None when the two are identical.
+// The first differing path or digest identifies why the installed inventory is not verified.
 let difference (verified: Verified) (present: (string * string) list) : string option =
     let onDisk = Dictionary<string, string>(StringComparer.Ordinal)
 
@@ -182,15 +179,13 @@ let difference (verified: Verified) (present: (string * string) list) : string o
         | Some(path, _) -> Some $"the content '{path}' is not part of the trusted distribution"
         | None -> None
 
-// Pure: exactly the verified member names, case-insensitively, mark content as proven
-// resolver-owned; any other shape may belong to something else and is never deleted.
+// Only verified member names prove resolver ownership; unknown content may belong to someone else.
 let sameNames (verified: Verified) (present: (string * string) list) : bool =
     let names (paths: string list) = paths |> List.map (fun path -> path.ToLowerInvariant()) |> Set.ofList
 
     names (verified.Members |> List.map (fun memberFile -> memberFile.Path)) = names (present |> List.map fst)
 
-// Pure: every on-disk entry is a byte-identical copy of a verified member, which is what proves a
-// partially extracted staging tree is reproducible resolver output rather than someone else's data.
+// Byte-identical verified entries prove a partial staging tree is reproducible resolver output.
 let subset (verified: Verified) (present: (string * string) list) : bool =
     let known = Dictionary<string, string>(StringComparer.Ordinal)
 

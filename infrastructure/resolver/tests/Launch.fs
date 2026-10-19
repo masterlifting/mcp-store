@@ -1,8 +1,6 @@
 // role: test
-// Real neutral consumer launch: the locally packed canonical Dotnet and Workflow distributions are
-// installed and started through the resolver run path, so packaging, integrity, typed inputs,
-// inherited handles, and child lifecycle are proven on product bytes; a local pack is no evidence
-// that a published immutable release resolves.
+// Real neutral consumer launch: the locally packed canonical distributions install and start through the resolver run path, so packaging, integrity, typed inputs, inherited handles, and child lifecycle are proven on product bytes.
+// A local pack is no evidence that a published immutable release resolves.
 module Resolver.Tests.Launch
 
 open System
@@ -21,8 +19,7 @@ let private repositoryRoot = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__,
 
 let private producers = [ "dotnet"; "workflow" ]
 
-// The workspace pin must be unsatisfiable, otherwise a successful launch would prove nothing about
-// a consumer workspace that cannot select an SDK.
+// The workspace pin must be unsatisfiable, otherwise a successful launch would prove nothing about a workspace that cannot select an SDK.
 let private unavailableSdkVersion = "99.99.99"
 
 let private canonicalProtocolVersion = "2024-11-05"
@@ -44,8 +41,7 @@ let private jsonString (owner: JsonNode) (name: string) : string =
 
     value.GetValue<string>()
 
-// The Dotnet producer validates the injected host before it starts, so the consumer supplies the
-// canonical local muxer rather than a bare command name.
+// The Dotnet producer validates the injected host before it starts, so the consumer supplies the canonical local muxer rather than a bare command name.
 let private discoverMuxer () : string =
     let executable = if OperatingSystem.IsWindows() then "dotnet.exe" else "dotnet"
 
@@ -168,8 +164,7 @@ let private packagedManifest (archivePath: string) : DistributionManifest =
     | Ok value -> value
     | Error error -> failwithf "%s: %s" archivePath (ReleaseError.message error)
 
-// Declared inputs come from the packaged manifest, so an input this consumer does not bind is a
-// coverage gap rather than a silently skipped argument.
+// Declared inputs come from the packaged manifest, so an input this consumer does not bind is a coverage gap rather than a silently skipped argument.
 let private consumerInputs (manifest: DistributionManifest) (place: Layout) =
     let bindings =
         [ "dotnetHost", place.Muxer
@@ -206,8 +201,7 @@ let private launchArguments
     [ place.Root; pinPath; archivePath; place.Workspace; place.Muxer ]
     @ (inputs |> List.map (fun (name, value) -> $"{name}={value}"))
 
-// stdin closes after the single request, so an entry that only answers initialize still terminates
-// and the exit status the resolver reports stays observable.
+// stdin closes after the single request, so an entry that only answers initialize still terminates and the exit status the resolver reports stays observable.
 let private exchange (arguments: string list) : Async<Capture> =
     async {
         let child = startInteractive "run" arguments
@@ -250,8 +244,7 @@ let private exchange (arguments: string list) : Async<Capture> =
             child.Dispose()
     }
 
-// A launch refusal happens before any child exists, so that path only reads the resolver's own
-// outcome; writing to a standard input no child will read would only race its exit.
+// A launch refusal happens before any child exists, so that path only reads the resolver's own outcome; writing to a standard input no child will read would only race its exit.
 let private refuse (arguments: string list) : Async<Capture> =
     async {
         use child = startInteractive "run" arguments
@@ -274,8 +267,8 @@ let private launchCase (producer: string) =
 
         let! pinned = runMuxer place.Muxer place.Workspace [ "--version" ]
         Expect.notEqual pinned.ExitCode 0 "the consumer workspace cannot select an SDK"
-        Expect.stringContains unavailableSdkVersion pinned.Stderr "the workspace failure names the unavailable pin"
-        Expect.stringContains "global.json" pinned.Stderr "the workspace failure names the workspace pin"
+        Expect.stringContains pinned.Stderr unavailableSdkVersion "the workspace failure names the unavailable pin"
+        Expect.stringContains pinned.Stderr "global.json" "the workspace failure names the workspace pin"
         let! unpinned = runMuxer place.Muxer (Path.GetDirectoryName place.Workspace) [ "--version" ]
         Expect.equal unpinned.ExitCode 0 "the same host selects an SDK outside the pinned workspace"
 
@@ -313,7 +306,7 @@ let private launchCase (producer: string) =
         let! refused = refuse (launchArguments place archivePath pinPath misplaced)
 
         Expect.notEqual refused.ExitCode 0 "a launch input inside the immutable storage root never launches"
-        Expect.stringContains "immutable storage root" refused.Stderr "the refusal names the immutable storage root"
+        Expect.stringContains refused.Stderr "immutable storage root" "the refusal names the immutable storage root"
     }
 
 let private typedInputTests =
@@ -344,8 +337,7 @@ let private typedInputTests =
           testCase "a relative path and a non-digest value are refused by their declared type" <| fun _ ->
             let dotnet = (manifest dotnetSpec dotnetSpec.Revision (bodies dotnetSpec)).Launch
 
-            // The shared fixture gives every spec the Dotnet descriptor, so the digest declaration
-            // is stated here rather than inferred from a producer identity.
+            // The shared fixture gives every spec the Dotnet descriptor, so the digest declaration is stated here rather than inferred from a producer identity.
             let workflow =
                 { dotnet with
                     Arguments =

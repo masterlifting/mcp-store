@@ -1,6 +1,5 @@
 // role: reusable module/helper
-// Canonical user-local root and per-pin layout. Only the derived pin hash and the
-// validated archive name appear in a path, so a pin field cannot escape the root.
+// Paths use only the derived pin hash and validated archive name to prevent pin-based escape.
 module ResolverStorage
 
 open System
@@ -23,8 +22,7 @@ type Storage =
 
 let private applicationName = "mcp-store"
 
-// Explicit separators keep root selection a function of the declared platform rather
-// than of the host that runs the resolver.
+// Explicit separators make root selection depend on the declared platform, not the host.
 let private join (platform: Platform) (parts: string list) : string =
     let separator = if platform = Platform.Windows then "\\" else "/"
 
@@ -61,8 +59,7 @@ let rootDirectory
 
     baseDirectory |> Result.map (fun platformRoot -> join platform [ platformRoot; applicationName ])
 
-// The default root follows the host that runs the resolver, unlike a layout, which is composed
-// from the declared platform.
+// The default root follows the running host, unlike layouts composed from a declared platform.
 let hostPlatform () : Platform =
     if OperatingSystem.IsWindows() then
         Platform.Windows

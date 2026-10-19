@@ -1,5 +1,4 @@
-// Child probe contract: the parent starts this same test assembly with `--probe <mode>` so the
-// real cross-process guard, first-install race, crash recovery, and product launch run untouched.
+// Child probe contract: the parent starts this same test assembly with `--probe <mode>` so the real cross-process guard, first-install race, crash recovery, and product launch run untouched.
 // Standalone entry bridge: an independent child must turn its result into a process exit code.
 module Resolver.Tests.Probe
 
@@ -76,8 +75,7 @@ let private launch (arguments: string list) : Async<int> =
     async {
         match arguments with
         | root :: pinPath :: archivePath :: workspace :: host :: supplied ->
-            // The canonical transport reaches the GitHub release only, so locally packed bytes are
-            // served in place; every other boundary in this path stays the real resolver code.
+            // The canonical transport reaches the GitHub release only, so locally packed bytes are served in place; every other boundary in this path stays the real resolver code.
             let argv =
                 [ "run"; "--pin"; pinPath; "--root"; root; "--workspace"; workspace; "--host"; host ]
                 @ (supplied |> List.collect (fun entry -> [ "--input"; entry ]))
@@ -141,8 +139,7 @@ let awaitProbe (child: Process) : Async<int * string * string> =
         return code, out, err
     }
 
-// A launched product inherits this probe's own standard handles, so the parent that owns the
-// conversation must also own the handles this process was started with.
+// A launched product inherits this probe's own standard handles, so the parent that owns the conversation must also own the handles this process was started with.
 let startInteractive (mode: string) (arguments: string list) : Process =
     let info = ProcessStartInfo("dotnet")
     info.UseShellExecute <- false

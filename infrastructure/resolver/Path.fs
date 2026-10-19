@@ -1,6 +1,5 @@
 // role: reusable module/helper
-// Portable filesystem admission: members must be extractable on Windows and unambiguous
-// case-insensitively, so unsafe or colliding names fail before any write.
+// Case-insensitive admission prevents unsafe or colliding names on Windows before any write.
 module ResolverPath
 
 open System
@@ -20,8 +19,7 @@ let isAbsolute (value: string) : bool =
         with :? ArgumentException ->
             false
 
-// Windows resolves a device name even with an extension, so a member that merely looks
-// like a path segment can still name a device outside the install directory.
+// Windows device names remain special even with extensions, so path-like names can escape installs.
 let private deviceNames =
     let numbered prefix = [ for index in 0 .. 9 -> $"{prefix}{index}" ]
 
@@ -63,8 +61,7 @@ let portablePath (relativePath: string) : Result<unit, ReleaseError> =
         | Some detail -> malformed detail
         | None -> Ok()
 
-// No member may also be the directory of another member; the check is case-insensitive
-// because two such names collide on a case-folding host.
+// Case-insensitive comparison rejects a member that collides with another member's directory.
 let portableSet (paths: string list) : Result<unit, ReleaseError> =
     let members = HashSet<string>(StringComparer.OrdinalIgnoreCase)
     let directories = HashSet<string>(StringComparer.OrdinalIgnoreCase)

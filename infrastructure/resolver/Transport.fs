@@ -1,6 +1,5 @@
 // role: reusable module/helper
-// Bounded read-only GitHub Releases transport for one pinned asset: exact canonical
-// HTTPS path, approved hosts only, manual redirects, and no credentials or fallbacks.
+// Redirects are manual and limited to approved hosts to keep the pinned download bounded.
 module ResolverTransport
 
 open System
@@ -111,7 +110,7 @@ let private readBounded (message: HttpResponseMessage) (target: string) : Async<
         | :? IOException as error -> return Error(TransportFailure(target, error.Message))
     }
 
-let private send (transport: Transport) (uri: Uri) : Async<Result<HttpResponseMessage, ReleaseError>> =
+let private send (transport: Transport) (uri: Uri) : Async<Result<HttpClient * HttpResponseMessage, ReleaseError>> =
     let rec loop (current: Uri) (remaining: int) =
         async {
             if not (isApprovedRedirectTarget current) then
@@ -130,6 +129,7 @@ let private send (transport: Transport) (uri: Uri) : Async<Result<HttpResponseMe
                     if isRedirect response.StatusCode then
                         let target = response.Headers.Location
                         response.Dispose()
+                        client.Dispose()
 
                         if isNull target then
                             return
@@ -144,10 +144,14 @@ let private send (transport: Transport) (uri: Uri) : Async<Result<HttpResponseMe
                             // The signed CDN query string survives only when the issued Location is followed verbatim.
                             return! loop next (remaining - 1)
                     else
-                        return Ok response
+                        return Ok(client, response)
                 with
-                | :? OperationCanceledException as error -> return Error(TransportFailure(location current, error.Message))
-                | :? HttpRequestException as error -> return Error(TransportFailure(location current, error.Message))
+                | :? OperationCanceledException as error ->
+                    client.Dispose()
+                    return Error(TransportFailure(location current, error.Message))
+                | :? HttpRequestException as error ->
+                    client.Dispose()
+                    return Error(TransportFailure(location current, error.Message))
         }
 
     loop uri maxRedirects
@@ -159,7 +163,8 @@ let download (transport: Transport) (pin: DistributionPin.Pin) : Async<Result<by
         | Ok uri ->
             match! send transport uri with
             | Error error -> return Error error
-            | Ok response ->
+            | Ok(client, response) ->
+                use clientLifetime = client
                 use message = response
                 let target = location uri
 

@@ -1,6 +1,5 @@
 // role: reusable module/helper
-// Versioned resolution snapshot: the trusted pin identity, the installed revision, the launch
-// descriptor, and the derived runtime prerequisite, with no build provenance.
+// Build provenance is omitted because it is not a consumer requirement.
 module ResolverReport
 
 open System.Text.Json

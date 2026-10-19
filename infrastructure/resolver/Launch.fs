@@ -1,6 +1,5 @@
 // role: reusable module/helper
-// Typed launch composition: manifest arguments become an argument list, never a shell
-// string, and supplied values stay launch-time rather than entering the immutable install.
+// ArgumentList keeps supplied launch-time values out of the immutable install and away from a shell.
 module ResolverLaunch
 
 open System
@@ -34,8 +33,7 @@ let private validate
     | DistributionContract.LaunchArgumentType.AbsoluteDirectory -> absoluteDirectory argument.Input value
     | DistributionContract.LaunchArgumentType.Sha256 -> digest argument.Input value
 
-// Values are matched by declared input name in declared order, so an undeclared, repeated,
-// or missing input is rejected instead of reaching the child as a partial argument list.
+// Declared-name matching rejects incomplete or duplicate input before the child receives arguments.
 let compose
     (descriptor: DistributionContract.LaunchDescriptor)
     (supplied: (string * string) list)

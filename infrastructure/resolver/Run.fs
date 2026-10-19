@@ -1,6 +1,5 @@
 // role: reusable module/helper
-// CLI workflows over the resolver library: resolve snapshots a verified installation, run
-// holds its lease for the child lifetime and reports the child's own outcome.
+// The lease protects the installed payload until a launched child exits.
 module ResolverRun
 
 open SharedFailure
@@ -78,8 +77,7 @@ let run
                             resolution.Lease.Release()
                             return Error error
                         | Ok arguments ->
-                            // The lease outlives the child, so a repair cannot replace the
-                            // payload a running process is executing while the claim is held.
+// The lease prevents repair from replacing a payload while its child is running.
                             try
                                 match ResolverChild.start options.Host options.Workspace resolution.Entrypoint arguments with
                                 | Error error -> return Error error
