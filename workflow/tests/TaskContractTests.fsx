@@ -1,5 +1,5 @@
 // role: test entrypoint
-// Focused deterministic coverage for the strict schema-v1 persistence boundary.
+// Focused deterministic coverage for the strict schema-v2 persistence boundary.
 // runtime.json remains sole managed state; legacy layouts and persisted locks
 // are not runtime inputs.
 
@@ -46,7 +46,7 @@ let request id title =
               DependsOn = []
               Children = [] } ] }
 
-let tempRoot = Path.Combine(Path.GetTempPath(), "opencode", $"workflow-contract-v1-{Guid.NewGuid():N}")
+let tempRoot = Path.Combine(Path.GetTempPath(), "opencode", $"workflow-contract-v2-{Guid.NewGuid():N}")
 Directory.CreateDirectory tempRoot |> ignore
 
 let sidecar root id = Path.Combine(root, ".tasks", id, SidecarFileName)
@@ -60,13 +60,13 @@ async {
         let json = serialize task
         let raw = JsonNode.Parse(json).AsObject()
 
-        assertEqual "persisted schema" 1 (raw["schemaVersion"].GetValue<int>())
+        assertEqual "persisted schema" 2 (raw["schemaVersion"].GetValue<int>())
         let! roundTrip = expectOk "deserialize serialized task" (deserializeAsync json)
         assertEqual "serializer/parser parity" task roundTrip
         assertTrue "serializer emits no schema alias" (not (raw.ContainsKey "version"))
         assertTrue "serializer emits no legacy task document" (not (File.Exists(Path.Combine(Path.GetDirectoryName(sidecar tempRoot "CON-1"), "TASK.md"))))
 
-        for version in [ 0; 2; 3 ] do
+        for version in [ 0; 1; 3 ] do
             let changed = JsonNode.Parse(raw.ToJsonString()).AsObject()
             changed["schemaVersion"] <- JsonValue.Create version
             do!
@@ -105,7 +105,7 @@ async {
         do! expectRejected "persisted lock layout rejected" "unsupported entry" (createTask tempRoot (request "LCK-1" "Locks are ephemeral"))
 
         let! _ = expectOk "apply task" (applyTask tempRoot "CON-1" 0 (StartWorkItem "W1"))
-        assertEqual "updated persisted schema" 1 ((JsonNode.Parse(File.ReadAllText(sidecar tempRoot "CON-1"))).["schemaVersion"].GetValue<int>())
+        assertEqual "updated persisted schema" 2 ((JsonNode.Parse(File.ReadAllText(sidecar tempRoot "CON-1"))).["schemaVersion"].GetValue<int>())
         assertTrue "apply leaves no lock" (not (File.Exists(runtimeLock tempRoot "CON-1")))
 
         let! _ = expectOk "get leaves persisted state" (getTask tempRoot "CON-1")
@@ -113,9 +113,9 @@ async {
         assertTrue "get leaves no lock" (not (File.Exists(runtimeLock tempRoot "CON-1")))
         assertTrue "validate leaves no lock" (not (File.Exists(runtimeLock tempRoot "CON-1")))
 
-        printfn "OK schema-v1 contract: strict version, serializer/parser parity, legacy-layout rejection, and ephemeral locking"
+        printfn "OK schema-v2 contract: strict version, serializer/parser parity, legacy-layout rejection, and ephemeral locking"
     finally
-        if Directory.Exists tempRoot && tempRoot.Contains("workflow-contract-v1-", StringComparison.Ordinal) then
+        if Directory.Exists tempRoot && tempRoot.Contains("workflow-contract-v2-", StringComparison.Ordinal) then
             Directory.Delete(tempRoot, true)
 }
 // Standalone entry bridge: FSI needs one synchronous script entry.

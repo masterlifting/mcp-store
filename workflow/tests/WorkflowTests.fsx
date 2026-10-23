@@ -1,5 +1,5 @@
 // role: test entrypoint
-// Deterministic coverage for the strict schema-v1 Workflow: general + execution,
+// Deterministic coverage for the strict schema-v2 Workflow: general + execution,
 // general + research, typed Evidence, evidence-backed Acceptance-Criterion
 // verification, supersession invalidation, and the recursive Work Tree
 // (dotted IDs, dependencies/readiness, ancestor activation, child-gated parent
@@ -87,6 +87,11 @@ let createRequest id title =
 
 let existingCreateRejectedMessage = SidecarFileName
 
+let evidenceKind value =
+    match parseEvidenceKind value with
+    | Ok kind -> kind
+    | Error error -> failwithf "invalid test evidence kind %A: %s" value (renderError error)
+
 let makeEvidence id kind summary =
     { Id = id
       Kind = kind
@@ -143,7 +148,7 @@ let generalFingerprint = profiles.[GeneralProfileId].Fingerprint
 
 let baselineJson =
     sprintf
-         """{"schemaVersion":1,"id":"TST-9","title":"Wire fixture","created":"2026-09-10T00:00:00.0000000+00:00","kind":"execution","profile":"general","profileFingerprint":"%s","objective":"","scope":"","nonGoals":"","contractState":"draft","contractFingerprint":"","contractRevision":1,"stateRevision":0,"lifecycle":"open","evidence":[],"acceptanceCriteria":[{"id":"AC1","text":"Execution completes","state":"pending","evidenceRefs":[]}],"guards":[],"profileGuardKeys":{},"decisions":[],"questions":[],"workItems":[{"id":"W1","title":"Do the work","state":"pending","result":"","acceptanceRefs":["AC1"],"dependsOn":[],"evidenceRefs":[],"children":[]}],"completionHistory":[]}"""
+         """{"schemaVersion":2,"id":"TST-9","title":"Wire fixture","created":"2026-09-10T00:00:00.0000000+00:00","kind":"execution","profile":"general","profileFingerprint":"%s","objective":"","scope":"","nonGoals":"","contractState":"draft","contractFingerprint":"","contractRevision":1,"stateRevision":0,"lifecycle":"open","evidence":[],"acceptanceCriteria":[{"id":"AC1","text":"Execution completes","state":"pending","evidenceRefs":[]}],"guards":[],"profileGuardKeys":{},"decisions":[],"questions":[],"workItems":[{"id":"W1","title":"Do the work","state":"pending","result":"","acceptanceRefs":["AC1"],"dependsOn":[],"evidenceRefs":[],"children":[]}],"completionHistory":[]}"""
          generalFingerprint
 
 let mutateJson (mutate: JsonObject -> unit) =
@@ -210,7 +215,7 @@ try
 
     do! expectRejectedAsync "verify requires evidence" "evidenceRefs must contain at least one non-empty value" (applyTask tempRoot "TST-1" 2 (VerifyAcceptanceCriterion("AC1", [])))
 
-    let skeletonEvidence = makeEvidence "E1" EvidenceKind.Build "skeleton build passed"
+    let skeletonEvidence = makeEvidence "E1" (evidenceKind "build") "skeleton build passed"
     let! evidenceAdded = expectOkAsync "add E1" (applyTask tempRoot "TST-1" 2 (AddEvidence skeletonEvidence))
     assertEqual "add evidence increments revision" 3 evidenceAdded.StateRevision
     assertEqual "add evidence stores valid record" Valid evidenceAdded.Evidence.Head.Validity
@@ -285,7 +290,7 @@ try
 
     do! async {
     // --- Scenario 3: malformed / unknown wire input rejection ---------------
-    // Schema 1 is the sole canonical persisted shape: contract fields, guards,
+    // Schema 2 is the sole canonical persisted shape: contract fields, guards,
     // key provenance, decisions, questions, work-item dependsOn/evidenceRefs, and
     // completion history are all present even when empty.
     // The fixture itself must be accepted so rejections below are meaningful.
@@ -332,9 +337,8 @@ try
         mutateJson (fun node ->
             node.["workItems"].AsArray().[0].AsObject().["children"].AsArray().Add(JsonNode.Parse """{"id":"W2","title":"Child","state":"pending","result":"","acceptanceRefs":[],"dependsOn":[],"evidenceRefs":[],"children":[]}"""))
 
-    // Strict schema-v1 rejections: non-v1 versions and mismatched fingerprints
-    // are rejected, and every required schema-v1 field must be present.
-    let schemaV2 = mutateJson (fun node -> node.["schemaVersion"] <- JsonValue.Create 2)
+    // Version-1 task documents are rejected rather than upgraded implicitly.
+    let schemaV1 = mutateJson (fun node -> node.["schemaVersion"] <- JsonValue.Create 1)
 
     let legacyGeneralFingerprint =
         mutateJson (fun node -> node.["profileFingerprint"] <- JsonValue.Create "general-v1")
@@ -387,7 +391,7 @@ try
     expectRejectedDeserialize "unknown nested property" "acceptance criterion contains unknown property 'extra'" nestedUnknownProperty
     expectRejectedDeserialize "unknown acceptance reference" "WorkItem references unknown Acceptance Criterion 'AC9'" unknownAcceptanceRef
     expectRejectedDeserialize "invalid JSON syntax" "invalid JSON" "{ not json"
-    expectRejectedDeserialize "schema v2 rejected" "unsupported schemaVersion 2" schemaV2
+    expectRejectedDeserialize "schema v1 rejected" "unsupported schemaVersion 1" schemaV1
     expectRejectedDeserialize "legacy general-v1 fingerprint rejected" "general profile fingerprint does not match" legacyGeneralFingerprint
     expectRejectedDeserialize "missing contractState" "task is missing property 'contractState'" missingContractState
     expectRejectedDeserialize "missing guards" "task is missing property 'guards'" missingGuards
@@ -447,7 +451,7 @@ try
 
     // The persisted wire document keeps the frozen schema and profile identity.
     let raw = JsonNode.Parse(File.ReadAllText(sidecarPath tempRoot persistedId)).AsObject()
-    assertEqual "persisted schema version" 1 (raw.["schemaVersion"].GetValue<int>())
+    assertEqual "persisted schema version" 2 (raw.["schemaVersion"].GetValue<int>())
     assertEqual "persisted kind" "execution" (raw.["kind"].GetValue<string>())
     assertEqual "persisted profile" "general" (raw.["profile"].GetValue<string>())
     assertEqual "persisted fingerprint" generalFingerprint (raw.["profileFingerprint"].GetValue<string>())
@@ -513,7 +517,7 @@ try
         assertEqual (sprintf "concurrent create %s committed winner" raceId) winnerTask.Title committed.Title
 
         // Byte-level post-race equality: the surviving sidecar parses as exactly
-        // one coherent schema-v1 document attributed to the winner, and a
+        // one coherent schema-v2 document attributed to the winner, and a
         // follow-up create attempt leaves runtime.json bytes unchanged.
         let beforeBytes = File.ReadAllBytes(sidecarPath tempRoot raceId)
         let beforeDocument =
@@ -521,7 +525,7 @@ try
             with error -> failwithf "raced sidecar is not valid JSON (%s)" error.Message
 
         assertEqual (sprintf "concurrent create %s sidecar id" raceId) raceId (beforeDocument.["id"].GetValue<string>())
-        assertEqual (sprintf "concurrent create %s sidecar schema version" raceId) 1 (beforeDocument.["schemaVersion"].GetValue<int>())
+        assertEqual (sprintf "concurrent create %s sidecar schema version" raceId) 2 (beforeDocument.["schemaVersion"].GetValue<int>())
         assertEqual (sprintf "concurrent create %s sidecar state revision" raceId) 0 (beforeDocument.["stateRevision"].GetValue<int>())
         assertEqual (sprintf "concurrent create %s sidecar winner title" raceId) winnerTask.Title (beforeDocument.["title"].GetValue<string>())
 
@@ -548,15 +552,15 @@ try
     assertEqual "research round trip evidence" [] researchRoundTrip.Evidence
 
     let researchRaw = JsonNode.Parse(File.ReadAllText(sidecarPath tempRoot researchId)).AsObject()
-    assertEqual "research persisted schema" 1 (researchRaw.["schemaVersion"].GetValue<int>())
+    assertEqual "research persisted schema" 2 (researchRaw.["schemaVersion"].GetValue<int>())
     assertEqual "research persisted kind" "research" (researchRaw.["kind"].GetValue<string>())
     assertEqual "research persisted profile" "general" (researchRaw.["profile"].GetValue<string>())
 
     // Evidence-backed AC verification works identically for research.
-    let researchEvidence = makeEvidence "E1" EvidenceKind.Research "research finding"
+    let researchEvidence = makeEvidence "E1" (evidenceKind "research") "research finding"
     let! researchWithEvidence = expectOkAsync "research add evidence" (applyTask tempRoot researchId 0 (AddEvidence researchEvidence))
     assertEqual "research add evidence revision" 1 researchWithEvidence.StateRevision
-    assertEqual "research evidence kind" EvidenceKind.Research researchWithEvidence.Evidence.Head.Evidence.Kind
+    assertEqual "research evidence kind" (evidenceKind "research") researchWithEvidence.Evidence.Head.Evidence.Kind
 
     let! researchVerified = expectOkAsync "research verify AC" (applyTask tempRoot researchId 1 (VerifyAcceptanceCriterion("AC1", [ "E1" ])))
 
@@ -591,13 +595,13 @@ try
 
     // Known kinds parse to their canonical domain values.
     let knownKinds =
-        [ "build", EvidenceKind.Build
-          "test", EvidenceKind.Test
-          "review", EvidenceKind.Review
-          "observation", EvidenceKind.Observation
-          "externalEffect", EvidenceKind.ExternalEffect
-          "research", EvidenceKind.Research
-          "decisionEvidence", EvidenceKind.DecisionEvidence ]
+        [ "build", (evidenceKind "build")
+          "test", (evidenceKind "test")
+          "review", (evidenceKind "review")
+          "observation", (evidenceKind "observation")
+          "external-effect", (evidenceKind "external-effect")
+          "research", (evidenceKind "research")
+          "decision-evidence", (evidenceKind "decision-evidence") ]
 
     for kindText, expectedKind in knownKinds do
         let parsed =
@@ -607,33 +611,21 @@ try
 
         assertEqual $"parsed evidence kind {kindText}" expectedKind parsed.Evidence.Head.Evidence.Kind
 
-    // Other kind carries an open semantic value; empty/unknown values fail closed.
-    let otherParsed =
+    for kindText in [ "source-verification"; "source9"; "external-effect"; "decision-evidence" ] do
         expectOk
-            "other evidence kind"
-            (deserialize (taskWithEvidence [ makeEvidenceNode "E1" "other:manual" "valid" "" "summary" ] "pending" []))
-
-    assertEqual "other evidence kind value" (EvidenceKind.Other "manual") otherParsed.Evidence.Head.Evidence.Kind
+            $"opaque evidence kind {kindText}"
+            (deserialize (taskWithEvidence [ makeEvidenceNode "E1" kindText "valid" "" "summary" ] "pending" []))
 
     expectRejectedDeserialize
-        "other evidence kind empty"
-        "evidence kind 'other' requires a non-empty value"
-        (taskWithEvidence [ makeEvidenceNode "E1" "other:" "valid" "" "summary" ] "pending" [])
+        "invalid evidence kind syntax"
+        "evidence kind must follow lowercase-segment identifier syntax"
+        (taskWithEvidence [ makeEvidenceNode "E1" "Magic" "valid" "" "summary" ] "pending" [])
 
-    expectRejectedDeserialize
-        "other evidence kind whitespace"
-        "evidence kind 'other' requires a non-empty value"
-        (taskWithEvidence [ makeEvidenceNode "E1" "other:   " "valid" "" "summary" ] "pending" [])
-
-    expectRejectedDeserialize
-        "other evidence kind missing value marker"
-        "evidence kind is not recognized"
-        (taskWithEvidence [ makeEvidenceNode "E1" "other" "valid" "" "summary" ] "pending" [])
-
-    expectRejectedDeserialize
-        "unknown evidence kind"
-        "evidence kind is not recognized"
-        (taskWithEvidence [ makeEvidenceNode "E1" "magic" "valid" "" "summary" ] "pending" [])
+    for kindText in [ ""; "9source"; "source--verification"; "source-"; "source_verification"; "source verification"; "évidence"; String('a', 65) ] do
+        expectRejectedDeserialize
+            $"invalid opaque evidence kind {kindText}"
+            "evidence kind"
+            (taskWithEvidence [ makeEvidenceNode "E1" kindText "valid" "" "summary" ] "pending" [])
 
     // Optional attributes round-trip: absent means None, present is trimmed.
     let optionalAbsent =
@@ -764,7 +756,7 @@ try
     let evidenceTask = "TST-7"
     let! _ = expectOkAsync "create evidence task" (createTask tempRoot (createRequest evidenceTask "Evidence task"))
 
-    let baseEvidence = makeEvidence "E1" EvidenceKind.Build "build passed"
+    let baseEvidence = makeEvidence "E1" (evidenceKind "build") "build passed"
     let! afterAdd = expectOkAsync "add E1" (applyTask tempRoot evidenceTask 0 (AddEvidence baseEvidence))
     assertEqual "add evidence revision" 1 afterAdd.StateRevision
     assertEqual "add evidence count" 1 afterAdd.Evidence.Length
@@ -793,7 +785,6 @@ try
 
     do! expectRejectedAsync "add evidence multiline summary" "evidence summary must be a non-empty single line" (applyTask tempRoot evidenceTask 2 (AddEvidence { baseEvidence with Id = "E3"; Summary = "a\nb" }))
 
-    do! expectRejectedAsync "add evidence other empty kind" "evidence kind 'other' requires a non-empty value" (applyTask tempRoot evidenceTask 2 (AddEvidence { baseEvidence with Id = "E3"; Kind = EvidenceKind.Other "  " }))
 
     do! expectRejectedAsync "add evidence multiline subject" "evidence subject must be a non-empty single line" (applyTask tempRoot evidenceTask 2 (AddEvidence { baseEvidence with Id = "E3"; Subject = Some "a\nb" }))
 
@@ -837,10 +828,10 @@ try
 
     do! expectRejectedAsync "verify before any evidence exists" "references unknown or superseded evidence" (applyTask tempRoot verifyTask 0 (VerifyAcceptanceCriterion("AC1", [ "E1" ])))
 
-    let! _ = expectOkAsync "verify add E1" (applyTask tempRoot verifyTask 0 (AddEvidence (makeEvidence "E1" EvidenceKind.Test "test passed")))
+    let! _ = expectOkAsync "verify add E1" (applyTask tempRoot verifyTask 0 (AddEvidence (makeEvidence "E1" (evidenceKind "test") "test passed")))
     do! expectRejectedAsync "verify unknown evidence" "references unknown or superseded evidence" (applyTask tempRoot verifyTask 1 (VerifyAcceptanceCriterion("AC1", [ "E2" ])))
 
-    let! _ = expectOkAsync "verify add E2" (applyTask tempRoot verifyTask 1 (AddEvidence (makeEvidence "E2" EvidenceKind.Review "review passed")))
+    let! _ = expectOkAsync "verify add E2" (applyTask tempRoot verifyTask 1 (AddEvidence (makeEvidence "E2" (evidenceKind "review") "review passed")))
 
     // A partially invalid reference list rejects the whole command.
     do! expectRejectedAsync "verify mixed valid and invalid refs" "references unknown or superseded evidence" (applyTask tempRoot verifyTask 2 (VerifyAcceptanceCriterion("AC1", [ "E1"; "E9" ])))
@@ -857,7 +848,7 @@ try
     // Evidence is task-scoped: another task's E1 is not visible here.
     let otherEvidenceTask = "TST-9"
     let! _ = expectOkAsync "create other evidence task" (createTask tempRoot (createRequest otherEvidenceTask "Other evidence task"))
-    let! _ = expectOkAsync "add E1 to other task" (applyTask tempRoot otherEvidenceTask 0 (AddEvidence (makeEvidence "E1" EvidenceKind.Observation "observed")))
+    let! _ = expectOkAsync "add E1 to other task" (applyTask tempRoot otherEvidenceTask 0 (AddEvidence (makeEvidence "E1" (evidenceKind "observation") "observed")))
 
     let scopeTask = "TST-10"
     let! _ = expectOkAsync "create scope task" (createTask tempRoot (createRequest scopeTask "Scope task"))
@@ -868,8 +859,8 @@ try
     let! _ = expectOkAsync "create supersede task" (createTask tempRoot (createRequest supersedeTask "Supersede task"))
     let! _ = expectOkAsync "supersede start W1" (applyTask tempRoot supersedeTask 0 (StartWorkItem "W1"))
     let! _ = expectOkAsync "supersede complete W1" (applyTask tempRoot supersedeTask 1 (CompleteWorkItem("W1", { Result = "done"; EvidenceRefs = [] })))
-    let! _ = expectOkAsync "supersede add E1" (applyTask tempRoot supersedeTask 2 (AddEvidence (makeEvidence "E1" EvidenceKind.Build "first")))
-    let! _ = expectOkAsync "supersede add E2" (applyTask tempRoot supersedeTask 3 (AddEvidence (makeEvidence "E2" EvidenceKind.Test "second")))
+    let! _ = expectOkAsync "supersede add E1" (applyTask tempRoot supersedeTask 2 (AddEvidence (makeEvidence "E1" (evidenceKind "build") "first")))
+    let! _ = expectOkAsync "supersede add E2" (applyTask tempRoot supersedeTask 3 (AddEvidence (makeEvidence "E2" (evidenceKind "test") "second")))
 
     let! beforeSupersede = expectOkAsync "supersede verify AC1" (applyTask tempRoot supersedeTask 4 (VerifyAcceptanceCriterion("AC1", [ "E1"; "E2" ])))
 
@@ -912,14 +903,14 @@ try
     let! _ = expectOkAsync "create terminal task" (createTask tempRoot (createRequest terminalTask "Terminal task"))
     let! _ = expectOkAsync "terminal start" (applyTask tempRoot terminalTask 0 (StartWorkItem "W1"))
     let! _ = expectOkAsync "terminal complete work" (applyTask tempRoot terminalTask 1 (CompleteWorkItem("W1", { Result = "done"; EvidenceRefs = [] })))
-    let! _ = expectOkAsync "terminal add E1" (applyTask tempRoot terminalTask 2 (AddEvidence (makeEvidence "E1" EvidenceKind.Build "done")))
+    let! _ = expectOkAsync "terminal add E1" (applyTask tempRoot terminalTask 2 (AddEvidence (makeEvidence "E1" (evidenceKind "build") "done")))
     let! _ = expectOkAsync "terminal verify" (applyTask tempRoot terminalTask 3 (VerifyAcceptanceCriterion("AC1", [ "E1" ])))
 
     let! terminal = expectOkAsync "terminal complete" (applyTask tempRoot terminalTask 4 (CompleteTask defaultHandoff))
     assertEqual "terminal lifecycle" "complete" terminal.Lifecycle
     assertEqual "terminal revision" 5 terminal.StateRevision
 
-    do! expectRejectedAsync "add evidence after terminal" "a complete task cannot add evidence" (applyTask tempRoot terminalTask 5 (AddEvidence (makeEvidence "E2" EvidenceKind.Test "late")))
+    do! expectRejectedAsync "add evidence after terminal" "a complete task cannot add evidence" (applyTask tempRoot terminalTask 5 (AddEvidence (makeEvidence "E2" (evidenceKind "test") "late")))
 
     do! expectRejectedAsync "verify after terminal" "a complete task cannot verify acceptance" (applyTask tempRoot terminalTask 5 (VerifyAcceptanceCriterion("AC1", [ "E1" ])))
 
@@ -1208,15 +1199,14 @@ try
     let! _ = expectOkAsync "create guard task" (createTask tempRoot (createRequest guardTask "Guard task"))
 
     let taskStartGuard =
-        guardSpec "G1" TaskTarget BeforeStart (requirement EvidenceKind.Test 1 None false)
+        guardSpec "G1" TaskTarget BeforeStart (requirement (evidenceKind "test") 1 None false)
 
     do! expectRejectedAsync "add guard invalid id" "guard id has an invalid format" (applyTask tempRoot guardTask 0 (AddGuard { taskStartGuard with Id = "X1" }))
 
     do! expectRejectedAsync "add guard unknown target" "guard 'G2' targets unknown WorkItem 'W9'" (applyTask tempRoot guardTask 0 (AddGuard { taskStartGuard with Id = "G2"; Target = WorkItemTarget "W9" }))
 
-    do! expectRejectedAsync "add guard minimum count" "guard minimumCount must be at least 1" (applyTask tempRoot guardTask 0 (AddGuard { taskStartGuard with Requirement = requirement EvidenceKind.Test 0 None false }))
+    do! expectRejectedAsync "add guard minimum count" "guard minimumCount must be at least 1" (applyTask tempRoot guardTask 0 (AddGuard { taskStartGuard with Requirement = requirement (evidenceKind "test") 0 None false }))
 
-    do! expectRejectedAsync "add guard other empty kind" "evidence kind 'other' requires a non-empty value" (applyTask tempRoot guardTask 0 (AddGuard { taskStartGuard with Requirement = requirement (EvidenceKind.Other "  ") 1 None false }))
 
     // Policy parsers fail closed on unrecognized wire values.
     assertEqual "parse guard target task" (Ok TaskTarget) (parseGuardTarget "task")
@@ -1247,7 +1237,7 @@ try
                 0
                 (AddGuard
                     { taskStartGuard with
-                        Requirement = requirement EvidenceKind.Test 1 (Some "  ") false }))
+                        Requirement = requirement (evidenceKind "test") 1 (Some "  ") false }))
 
     assertEqual "guard assigned origin" TaskDesign blankRoleGuard.Guards.Head.Origin
     assertEqual "guard assigned disposition" GuardDisposition.Applicable blankRoleGuard.Guards.Head.Disposition
@@ -1265,7 +1255,7 @@ try
           Target = TaskTarget
           Checkpoint = BeforeStart
           Origin = TaskDesign
-          Requirement = requirement EvidenceKind.Test 1 None false
+          Requirement = requirement (evidenceKind "test") 1 None false
           Applicability = Always
           Waiver = NotWaivable
           Disposition = GuardDisposition.Applicable }
@@ -1312,7 +1302,7 @@ try
     let guardInvalidCheckpoint = taskWithGuard (guardNode (fun node -> node.["checkpoint"] <- JsonValue.Create "after"))
     let guardInvalidOrigin = taskWithGuard (guardNode (fun node -> node.["origin"] <- JsonValue.Create "bogus"))
     let guardUnsupportedRequirement = taskWithGuard (guardNode (fun node -> node.["requirement"] <- JsonValue.Create "decisionRequired"))
-    let guardUnknownKind = taskWithGuard (guardNode (fun node -> node.["evidenceKind"] <- JsonValue.Create "magic"))
+    let guardUnknownKind = taskWithGuard (guardNode (fun node -> node.["evidenceKind"] <- JsonValue.Create "Magic"))
     let guardBadMinimum = taskWithGuard (guardNode (fun node -> node.["minimumCount"] <- JsonValue.Create 0))
     let guardWrongMinimumType = taskWithGuard (guardNode (fun node -> node.["minimumCount"] <- JsonValue.Create "one"))
     let guardWrongIndependentType = taskWithGuard (guardNode (fun node -> node.["requireIndependentProducer"] <- JsonValue.Create "yes"))
@@ -1336,7 +1326,7 @@ try
     expectRejectedDeserialize "guard invalid checkpoint" "guard checkpoint is not recognized" guardInvalidCheckpoint
     expectRejectedDeserialize "guard invalid origin" "guard origin is not recognized" guardInvalidOrigin
     expectRejectedDeserialize "guard unsupported requirement" "guard 'G1' has an unsupported requirement" guardUnsupportedRequirement
-    expectRejectedDeserialize "guard unknown evidence kind" "evidence kind is not recognized" guardUnknownKind
+    expectRejectedDeserialize "guard invalid evidence kind syntax" "evidence kind must follow lowercase-segment identifier syntax" guardUnknownKind
     expectRejectedDeserialize "guard minimum count zero" "guard 'G1' minimumCount must be at least 1" guardBadMinimum
     expectRejectedDeserialize "guard wrong minimum count type" "property 'minimumCount' must be an integer" guardWrongMinimumType
     expectRejectedDeserialize "guard wrong independent type" "property 'requireIndependentProducer' must be a boolean" guardWrongIndependentType
@@ -1349,14 +1339,14 @@ try
     // --- Scenario 17: BeforeStart guard enforcement -------------------------
     let beforeStartTask = "TST-81"
     let! _ = expectOkAsync "create before-start task" (createTask tempRoot (createRequest beforeStartTask "Before-start task"))
-    let! _ = expectOkAsync "add task before-start guard" (applyTask tempRoot beforeStartTask 0 (AddGuard (guardSpec "G1" TaskTarget BeforeStart (requirement EvidenceKind.Test 1 None false))) )
+    let! _ = expectOkAsync "add task before-start guard" (applyTask tempRoot beforeStartTask 0 (AddGuard (guardSpec "G1" TaskTarget BeforeStart (requirement (evidenceKind "test") 1 None false))) )
 
     do! expectRejectedAsync "start blocked by task before-start guard" "WorkItem 'W1' is not ready: guard 'G1' is not satisfied" (applyTask tempRoot beforeStartTask 1 (StartWorkItem "W1"))
 
     let! blockedStart = expectOkAsync "get blocked start" (getTask tempRoot beforeStartTask)
     assertEqual "blocked start is a no-op" 1 blockedStart.StateRevision
 
-    let! _ = expectOkAsync "add before-start evidence" (applyTask tempRoot beforeStartTask 1 (AddEvidence (makeEvidence "E1" EvidenceKind.Test "test evidence")))
+    let! _ = expectOkAsync "add before-start evidence" (applyTask tempRoot beforeStartTask 1 (AddEvidence (makeEvidence "E1" (evidenceKind "test") "test evidence")))
 
     let! beforeStartStarted = expectOkAsync "start after before-start guard satisfied" (applyTask tempRoot beforeStartTask 2 (StartWorkItem "W1"))
 
@@ -1367,8 +1357,8 @@ try
     // start, so they fail closed until the item references matching Evidence.
     let itemStartTask = "TST-82"
     let! _ = expectOkAsync "create item before-start task" (createTask tempRoot (createRequest itemStartTask "Item before-start task"))
-    let! _ = expectOkAsync "add item before-start guard" (applyTask tempRoot itemStartTask 0 (AddGuard (guardSpec "G1" (WorkItemTarget "W1") BeforeStart (requirement EvidenceKind.Test 1 None false))))
-    let! _ = expectOkAsync "add item before-start evidence" (applyTask tempRoot itemStartTask 1 (AddEvidence (makeEvidence "E1" EvidenceKind.Test "task-level test")))
+    let! _ = expectOkAsync "add item before-start guard" (applyTask tempRoot itemStartTask 0 (AddGuard (guardSpec "G1" (WorkItemTarget "W1") BeforeStart (requirement (evidenceKind "test") 1 None false))))
+    let! _ = expectOkAsync "add item before-start evidence" (applyTask tempRoot itemStartTask 1 (AddEvidence (makeEvidence "E1" (evidenceKind "test") "task-level test")))
 
     do! expectRejectedAsync "item before-start guard ignores task-level evidence" "WorkItem 'W1' is not ready: guard 'G1' is not satisfied" (applyTask tempRoot itemStartTask 2 (StartWorkItem "W1"))
 
@@ -1378,8 +1368,8 @@ try
     // --- Scenario 18: BeforeComplete WorkItem guard and evidence persistence -
     let completeGuardTask = "TST-83"
     let! _ = expectOkAsync "create complete-guard task" (createTask tempRoot (createRequest completeGuardTask "Complete guard task"))
-    let! _ = expectOkAsync "add work before-complete guard" (applyTask tempRoot completeGuardTask 0 (AddGuard (guardSpec "G1" (WorkItemTarget "W1") BeforeComplete (requirement EvidenceKind.Test 1 None false))))
-    let! _ = expectOkAsync "add complete-guard evidence" (applyTask tempRoot completeGuardTask 1 (AddEvidence (makeEvidence "E1" EvidenceKind.Test "completion test")))
+    let! _ = expectOkAsync "add work before-complete guard" (applyTask tempRoot completeGuardTask 0 (AddGuard (guardSpec "G1" (WorkItemTarget "W1") BeforeComplete (requirement (evidenceKind "test") 1 None false))))
+    let! _ = expectOkAsync "add complete-guard evidence" (applyTask tempRoot completeGuardTask 1 (AddEvidence (makeEvidence "E1" (evidenceKind "test") "completion test")))
     let! _ = expectOkAsync "start complete-guard work" (applyTask tempRoot completeGuardTask 2 (StartWorkItem "W1"))
 
     do! expectRejectedAsync "complete work without guard evidence" "WorkItem 'W1' cannot complete while guard 'G1' is not satisfied" (applyTask tempRoot completeGuardTask 3 (CompleteWorkItem("W1", { Result = "no evidence"; EvidenceRefs = [] })))
@@ -1412,7 +1402,7 @@ try
 
     do! expectRejectedAsync "complete with malformed evidence id" "evidence id has an invalid format" (applyTask tempRoot completionEvidenceTask 1 (CompleteWorkItem("W1", { Result = "x"; EvidenceRefs = [ "bad" ] })))
 
-    let! _ = expectOkAsync "add superseded completion evidence" (applyTask tempRoot completionEvidenceTask 1 (AddEvidence (makeEvidence "E1" EvidenceKind.Test "will be superseded")))
+    let! _ = expectOkAsync "add superseded completion evidence" (applyTask tempRoot completionEvidenceTask 1 (AddEvidence (makeEvidence "E1" (evidenceKind "test") "will be superseded")))
     let! _ = expectOkAsync "supersede completion evidence" (applyTask tempRoot completionEvidenceTask 2 (SupersedeEvidence("E1", "stale")))
 
     do! expectRejectedAsync "complete with superseded evidence" "completion references superseded Evidence 'E1'" (applyTask tempRoot completionEvidenceTask 3 (CompleteWorkItem("W1", { Result = "x"; EvidenceRefs = [ "E1" ] })))
@@ -1423,8 +1413,8 @@ try
     // --- Scenario 19: Task BeforeComplete guard and completion predicate -----
     let predicateTask = "TST-85"
     let! _ = expectOkAsync "create predicate task" (createTask tempRoot (createRequest predicateTask "Predicate task"))
-    let! _ = expectOkAsync "add task before-complete guard" (applyTask tempRoot predicateTask 0 (AddGuard (guardSpec "G1" TaskTarget BeforeComplete (requirement EvidenceKind.Review 1 None false))))
-    let! _ = expectOkAsync "add predicate AC evidence" (applyTask tempRoot predicateTask 1 (AddEvidence (makeEvidence "E1" EvidenceKind.Test "ac evidence")))
+    let! _ = expectOkAsync "add task before-complete guard" (applyTask tempRoot predicateTask 0 (AddGuard (guardSpec "G1" TaskTarget BeforeComplete (requirement (evidenceKind "review") 1 None false))))
+    let! _ = expectOkAsync "add predicate AC evidence" (applyTask tempRoot predicateTask 1 (AddEvidence (makeEvidence "E1" (evidenceKind "test") "ac evidence")))
     let! _ = expectOkAsync "start predicate work" (applyTask tempRoot predicateTask 2 (StartWorkItem "W1"))
     let! _ = expectOkAsync "complete predicate work" (applyTask tempRoot predicateTask 3 (CompleteWorkItem("W1", { Result = "done"; EvidenceRefs = [] })))
     let! _ = expectOkAsync "verify predicate AC" (applyTask tempRoot predicateTask 4 (VerifyAcceptanceCriterion("AC1", [ "E1" ])))
@@ -1437,7 +1427,7 @@ try
     let! afterGuardBlockedTask = expectOkAsync "get guard-blocked task" (getTask tempRoot predicateTask)
     assertEqual "guard-blocked task completion is a no-op" 5 afterGuardBlockedTask.StateRevision
 
-    let! _ = expectOkAsync "add predicate review evidence" (applyTask tempRoot predicateTask 5 (AddEvidence (makeEvidence "E2" EvidenceKind.Review "review evidence")))
+    let! _ = expectOkAsync "add predicate review evidence" (applyTask tempRoot predicateTask 5 (AddEvidence (makeEvidence "E2" (evidenceKind "review") "review evidence")))
 
     let! afterReview = expectOkAsync "get predicate task after review" (getTask tempRoot predicateTask)
     assertTrue "CanCompleteTask true once guard satisfied" (canCompleteTask afterReview)
@@ -1451,7 +1441,7 @@ try
     let! freshTask = expectOkAsync "get fresh predicate order" (getTask tempRoot predicateOrderTask)
     assertTrue "fresh task cannot complete" (not (canCompleteTask freshTask))
 
-    let! _ = expectOkAsync "add predicate order evidence" (applyTask tempRoot predicateOrderTask 0 (AddEvidence (makeEvidence "E1" EvidenceKind.Build "done")))
+    let! _ = expectOkAsync "add predicate order evidence" (applyTask tempRoot predicateOrderTask 0 (AddEvidence (makeEvidence "E1" (evidenceKind "build") "done")))
     let! _ = expectOkAsync "verify predicate order AC" (applyTask tempRoot predicateOrderTask 1 (VerifyAcceptanceCriterion("AC1", [ "E1" ])))
 
     let! acVerified = expectOkAsync "get ac-verified task" (getTask tempRoot predicateOrderTask)
@@ -1471,8 +1461,8 @@ try
     // exact target-bound Coordinator Decision the guard policy permits.
     let dispositionTask = "TST-87"
     let! _ = expectOkAsync "create disposition task" (createTask tempRoot (createRequest dispositionTask "Disposition task"))
-    let! _ = expectOkAsync "add disposition guard" (applyTask tempRoot dispositionTask 0 (AddGuard (guardSpec "G1" TaskTarget BeforeComplete (requirement EvidenceKind.Review 1 None false))))
-    let! _ = expectOkAsync "add disposition evidence" (applyTask tempRoot dispositionTask 1 (AddEvidence (makeEvidence "E1" EvidenceKind.Test "ac evidence")))
+    let! _ = expectOkAsync "add disposition guard" (applyTask tempRoot dispositionTask 0 (AddGuard (guardSpec "G1" TaskTarget BeforeComplete (requirement (evidenceKind "review") 1 None false))))
+    let! _ = expectOkAsync "add disposition evidence" (applyTask tempRoot dispositionTask 1 (AddEvidence (makeEvidence "E1" (evidenceKind "test") "ac evidence")))
     let! _ = expectOkAsync "start disposition work" (applyTask tempRoot dispositionTask 2 (StartWorkItem "W1"))
     let! _ = expectOkAsync "complete disposition work" (applyTask tempRoot dispositionTask 3 (CompleteWorkItem("W1", { Result = "done"; EvidenceRefs = [] })))
     let! _ = expectOkAsync "verify disposition AC" (applyTask tempRoot dispositionTask 4 (VerifyAcceptanceCriterion("AC1", [ "E1" ])))
@@ -1532,10 +1522,10 @@ try
     // --- Scenario 20: independent-producer requirement fails closed ----------
     let independentTask = "TST-88"
     let! _ = expectOkAsync "create independent task" (createTask tempRoot (createRequest independentTask "Independent task"))
-    let! _ = expectOkAsync "add independent work guard" (applyTask tempRoot independentTask 0 (AddGuard (guardSpec "G1" (WorkItemTarget "W1") BeforeComplete (requirement EvidenceKind.Review 1 (Some "reviewer") true))))
+    let! _ = expectOkAsync "add independent work guard" (applyTask tempRoot independentTask 0 (AddGuard (guardSpec "G1" (WorkItemTarget "W1") BeforeComplete (requirement (evidenceKind "review") 1 (Some "reviewer") true))))
 
     let reviewerEvidence =
-        { makeEvidence "E1" EvidenceKind.Review "independent review" with
+        { makeEvidence "E1" (evidenceKind "review") "independent review" with
             ProducerRole = Some "reviewer"
             ProducerId = Some "agent-1" }
 
@@ -1550,7 +1540,7 @@ try
     // The same requirement without independence is satisfied by matching Evidence.
     let nonIndependentTask = "TST-89"
     let! _ = expectOkAsync "create non-independent task" (createTask tempRoot (createRequest nonIndependentTask "Non-independent task"))
-    let! _ = expectOkAsync "add non-independent work guard" (applyTask tempRoot nonIndependentTask 0 (AddGuard (guardSpec "G1" (WorkItemTarget "W1") BeforeComplete (requirement EvidenceKind.Review 1 (Some "reviewer") false))))
+    let! _ = expectOkAsync "add non-independent work guard" (applyTask tempRoot nonIndependentTask 0 (AddGuard (guardSpec "G1" (WorkItemTarget "W1") BeforeComplete (requirement (evidenceKind "review") 1 (Some "reviewer") false))))
     let! _ = expectOkAsync "add non-independent reviewer evidence" (applyTask tempRoot nonIndependentTask 1 (AddEvidence reviewerEvidence))
     let! _ = expectOkAsync "start non-independent work" (applyTask tempRoot nonIndependentTask 2 (StartWorkItem "W1"))
 
@@ -1564,7 +1554,7 @@ try
     // Task-target independence also fails closed despite matching task Evidence.
     let independentStartTask = "TST-90"
     let! _ = expectOkAsync "create independent start task" (createTask tempRoot (createRequest independentStartTask "Independent start task"))
-    let! _ = expectOkAsync "add independent task before-start guard" (applyTask tempRoot independentStartTask 0 (AddGuard (guardSpec "G1" TaskTarget BeforeStart (requirement EvidenceKind.Review 1 (Some "reviewer") true))))
+    let! _ = expectOkAsync "add independent task before-start guard" (applyTask tempRoot independentStartTask 0 (AddGuard (guardSpec "G1" TaskTarget BeforeStart (requirement (evidenceKind "review") 1 (Some "reviewer") true))))
     let! _ = expectOkAsync "add independent task evidence" (applyTask tempRoot independentStartTask 1 (AddEvidence reviewerEvidence))
 
     do! expectRejectedAsync "independent task before-start fails closed" "WorkItem 'W1' is not ready: guard 'G1' is not satisfied" (applyTask tempRoot independentStartTask 2 (StartWorkItem "W1"))
@@ -1572,9 +1562,9 @@ try
     // --- Scenario 21: guard CAS and no-op revisions --------------------------
     let guardCasTask = "TST-93"
     let! _ = expectOkAsync "create guard CAS task" (createTask tempRoot (createRequest guardCasTask "Guard CAS task"))
-    let! _ = expectOkAsync "add guard CAS guard" (applyTask tempRoot guardCasTask 0 (AddGuard (guardSpec "G1" TaskTarget BeforeStart (requirement EvidenceKind.Test 1 None false))))
+    let! _ = expectOkAsync "add guard CAS guard" (applyTask tempRoot guardCasTask 0 (AddGuard (guardSpec "G1" TaskTarget BeforeStart (requirement (evidenceKind "test") 1 None false))))
 
-    match! applyTask tempRoot guardCasTask 0 (AddGuard (guardSpec "G2" TaskTarget BeforeStart (requirement EvidenceKind.Test 1 None false))) with
+    match! applyTask tempRoot guardCasTask 0 (AddGuard (guardSpec "G2" TaskTarget BeforeStart (requirement (evidenceKind "test") 1 None false))) with
     | Error (Conflict (expected, actual)) ->
         assertEqual "guard CAS expected" 0 expected
         assertEqual "guard CAS actual" 1 actual
@@ -1584,7 +1574,7 @@ try
     assertEqual "guard CAS did not bump revision" 1 guardCasAfter.StateRevision
     assertEqual "guard CAS did not add guard" 1 guardCasAfter.Guards.Length
 
-    do! expectRejectedAsync "rejected guard command is a no-op" "guard 'G2' targets unknown WorkItem 'W9'" (applyTask tempRoot guardCasTask 1 (AddGuard (guardSpec "G2" (WorkItemTarget "W9") BeforeStart (requirement EvidenceKind.Test 1 None false))))
+    do! expectRejectedAsync "rejected guard command is a no-op" "guard 'G2' targets unknown WorkItem 'W9'" (applyTask tempRoot guardCasTask 1 (AddGuard (guardSpec "G2" (WorkItemTarget "W9") BeforeStart (requirement (evidenceKind "test") 1 None false))))
 
     let! afterRejectedGuard = expectOkAsync "get after rejected guard" (getTask tempRoot guardCasTask)
     assertEqual "rejected guard command did not bump revision" 1 afterRejectedGuard.StateRevision
@@ -1599,10 +1589,10 @@ try
           WorkItems = [ specWith "W1" "root" [] [ spec "W1.1" "child" ] ] }
 
     let! _ = expectOkAsync "create cascade task" (createTask tempRoot cascadeRequest)
-    let! _ = expectOkAsync "add cascade child guard" (applyTask tempRoot cascadeTask 0 (AddGuard (guardSpec "G1" (WorkItemTarget "W1.1") BeforeComplete (requirement EvidenceKind.Test 1 None false))))
-    let! _ = expectOkAsync "add cascade task guard" (applyTask tempRoot cascadeTask 1 (AddGuard (guardSpec "G2" TaskTarget BeforeComplete (requirement EvidenceKind.Test 1 None false))) )
-    let! _ = expectOkAsync "add cascade guard evidence" (applyTask tempRoot cascadeTask 2 (AddEvidence (makeEvidence "E1" EvidenceKind.Test "guard test")))
-    let! _ = expectOkAsync "add cascade AC evidence" (applyTask tempRoot cascadeTask 3 (AddEvidence (makeEvidence "E2" EvidenceKind.Build "ac build")))
+    let! _ = expectOkAsync "add cascade child guard" (applyTask tempRoot cascadeTask 0 (AddGuard (guardSpec "G1" (WorkItemTarget "W1.1") BeforeComplete (requirement (evidenceKind "test") 1 None false))))
+    let! _ = expectOkAsync "add cascade task guard" (applyTask tempRoot cascadeTask 1 (AddGuard (guardSpec "G2" TaskTarget BeforeComplete (requirement (evidenceKind "test") 1 None false))) )
+    let! _ = expectOkAsync "add cascade guard evidence" (applyTask tempRoot cascadeTask 2 (AddEvidence (makeEvidence "E1" (evidenceKind "test") "guard test")))
+    let! _ = expectOkAsync "add cascade AC evidence" (applyTask tempRoot cascadeTask 3 (AddEvidence (makeEvidence "E2" (evidenceKind "build") "ac build")))
     let! _ = expectOkAsync "start cascade child" (applyTask tempRoot cascadeTask 4 (StartWorkItem "W1.1"))
     let! _ = expectOkAsync "complete cascade child" (applyTask tempRoot cascadeTask 5 (CompleteWorkItem("W1.1", { Result = "child done"; EvidenceRefs = [ "E1" ] })))
     let! _ = expectOkAsync "complete cascade root" (applyTask tempRoot cascadeTask 6 (CompleteWorkItem("W1", { Result = "root done"; EvidenceRefs = [] })))
@@ -1628,8 +1618,8 @@ try
     // Superseding Evidence that no AC or Guard relies on leaves a Complete task intact.
     let stableTask = "TST-95"
     let! _ = expectOkAsync "create stable task" (createTask tempRoot (createRequest stableTask "Stable task"))
-    let! _ = expectOkAsync "add stable AC evidence" (applyTask tempRoot stableTask 0 (AddEvidence (makeEvidence "E1" EvidenceKind.Build "ac evidence")))
-    let! _ = expectOkAsync "add stable unrelated evidence" (applyTask tempRoot stableTask 1 (AddEvidence (makeEvidence "E2" EvidenceKind.Observation "unrelated")))
+    let! _ = expectOkAsync "add stable AC evidence" (applyTask tempRoot stableTask 0 (AddEvidence (makeEvidence "E1" (evidenceKind "build") "ac evidence")))
+    let! _ = expectOkAsync "add stable unrelated evidence" (applyTask tempRoot stableTask 1 (AddEvidence (makeEvidence "E2" (evidenceKind "observation") "unrelated")))
     let! _ = expectOkAsync "start stable work" (applyTask tempRoot stableTask 2 (StartWorkItem "W1"))
     let! _ = expectOkAsync "complete stable work" (applyTask tempRoot stableTask 3 (CompleteWorkItem("W1", { Result = "done"; EvidenceRefs = [] })))
     let! _ = expectOkAsync "verify stable AC" (applyTask tempRoot stableTask 4 (VerifyAcceptanceCriterion("AC1", [ "E1" ])))
@@ -1983,7 +1973,7 @@ try
 
     let! _ = expectOkAsync "create task-wide question task" (createTask tempRoot { createRequest taskWideTask "Task-wide question task" with WorkItems = [ spec "W1" "first"; spec "W2" "second" ] })
 
-    let! _ = expectOkAsync "add task-wide evidence" (applyTask tempRoot taskWideTask 0 (AddEvidence (makeEvidence "E1" EvidenceKind.Build "ac build")))
+    let! _ = expectOkAsync "add task-wide evidence" (applyTask tempRoot taskWideTask 0 (AddEvidence (makeEvidence "E1" (evidenceKind "build") "ac build")))
     let! _ = expectOkAsync "start task-wide W1" (applyTask tempRoot taskWideTask 1 (StartWorkItem "W1"))
 
     let! _ = expectOkAsync "complete task-wide W1" (applyTask tempRoot taskWideTask 2 (CompleteWorkItem("W1", { Result = "first done"; EvidenceRefs = [] })))
@@ -2009,7 +1999,7 @@ try
     // TaskWide question blocks CanCompleteTask and CompleteTask even when all work is done.
     let taskWideCompleteTask = "TST-202"
     let! _ = expectOkAsync "create task-wide completion task" (createTask tempRoot (createRequest taskWideCompleteTask "Task-wide completion task"))
-    let! _ = expectOkAsync "add task-wide completion evidence" (applyTask tempRoot taskWideCompleteTask 0 (AddEvidence (makeEvidence "E1" EvidenceKind.Build "ac build")))
+    let! _ = expectOkAsync "add task-wide completion evidence" (applyTask tempRoot taskWideCompleteTask 0 (AddEvidence (makeEvidence "E1" (evidenceKind "build") "ac build")))
     let! _ = expectOkAsync "start task-wide completion W1" (applyTask tempRoot taskWideCompleteTask 1 (StartWorkItem "W1"))
 
     let! _ = expectOkAsync "complete task-wide completion W1" (applyTask tempRoot taskWideCompleteTask 2 (CompleteWorkItem("W1", { Result = "done"; EvidenceRefs = [] })))
@@ -2056,7 +2046,7 @@ try
     // A WorkItem-scoped question does not block task completion once work is terminal.
     let scopedCompleteTask = "TST-204"
     let! _ = expectOkAsync "create scoped completion task" (createTask tempRoot (createRequest scopedCompleteTask "Scoped completion task"))
-    let! _ = expectOkAsync "add scoped completion evidence" (applyTask tempRoot scopedCompleteTask 0 (AddEvidence (makeEvidence "E1" EvidenceKind.Build "ac build")))
+    let! _ = expectOkAsync "add scoped completion evidence" (applyTask tempRoot scopedCompleteTask 0 (AddEvidence (makeEvidence "E1" (evidenceKind "build") "ac build")))
     let! _ = expectOkAsync "start scoped completion W1" (applyTask tempRoot scopedCompleteTask 1 (StartWorkItem "W1"))
 
     let! _ = expectOkAsync "complete scoped completion W1" (applyTask tempRoot scopedCompleteTask 2 (CompleteWorkItem("W1", { Result = "done"; EvidenceRefs = [] })))
@@ -2157,7 +2147,7 @@ try
     // are rejected on load, and a persisted Guard disposition must be backed by
     // an exact target-bound Decision at the required authority.
     let authorityGuardSpec id target applicability waiver =
-        { guardSpec id target BeforeComplete (requirement EvidenceKind.Review 1 None false) with
+        { guardSpec id target BeforeComplete (requirement (evidenceKind "review") 1 None false) with
             Applicability = applicability
             Waiver = waiver }
 
@@ -2388,12 +2378,12 @@ try
     let! _ = expectOkAsync "create inheritance task" (createTask tempRoot inheritRequest)
     let! _ = expectOkAsync "rebind inheritance root" (applyTask tempRoot inheritTask 0 (RebindOwner("W1", parentOwner, "assign")))
 
-    let! _ = expectOkAsync "add inheritance guard" (applyTask tempRoot inheritTask 1 (AddGuard (guardSpec "G1" (WorkItemTarget "W1.1") BeforeComplete (requirement EvidenceKind.Review 1 (Some "reviewer") true))))
+    let! _ = expectOkAsync "add inheritance guard" (applyTask tempRoot inheritTask 1 (AddGuard (guardSpec "G1" (WorkItemTarget "W1.1") BeforeComplete (requirement (evidenceKind "review") 1 (Some "reviewer") true))))
 
     let! _ = expectOkAsync "start inheritance child" (applyTask tempRoot inheritTask 2 (StartWorkItem "W1.1"))
 
     let inheritedOwnerEvidence =
-        { makeEvidence "E1" EvidenceKind.Review "same producer" with
+        { makeEvidence "E1" (evidenceKind "review") "same producer" with
             ProducerRole = Some "reviewer"
             ProducerId = Some "agent-1" }
 
@@ -2405,7 +2395,7 @@ try
     assertEqual "inherited-owner rejection is a no-op" 4 afterInheritedRejection.StateRevision
 
     let distinctProducerEvidence =
-        { makeEvidence "E2" EvidenceKind.Review "distinct producer" with
+        { makeEvidence "E2" (evidenceKind "review") "distinct producer" with
             ProducerRole = Some "reviewer"
             ProducerId = Some "agent-2" }
 
@@ -2423,7 +2413,7 @@ try
     let noOwnerTask = "TST-402"
     let! _ = expectOkAsync "create no-owner task" (createTask tempRoot { inheritRequest with Id = noOwnerTask; Title = "No owner task" })
 
-    let! _ = expectOkAsync "add no-owner guard" (applyTask tempRoot noOwnerTask 0 (AddGuard (guardSpec "G1" (WorkItemTarget "W1.1") BeforeComplete (requirement EvidenceKind.Review 1 (Some "reviewer") true))))
+    let! _ = expectOkAsync "add no-owner guard" (applyTask tempRoot noOwnerTask 0 (AddGuard (guardSpec "G1" (WorkItemTarget "W1.1") BeforeComplete (requirement (evidenceKind "review") 1 (Some "reviewer") true))))
 
     let! _ = expectOkAsync "start no-owner child" (applyTask tempRoot noOwnerTask 1 (StartWorkItem "W1.1"))
     let! _ = expectOkAsync "add no-owner evidence" (applyTask tempRoot noOwnerTask 2 (AddEvidence distinctProducerEvidence))
@@ -2438,7 +2428,7 @@ try
     // current handoff is retained and superseded handoffs move to history.
     let handoffTask = "TST-410"
     let! _ = expectOkAsync "create handoff task" (createTask tempRoot (createRequest handoffTask "Handoff task"))
-    let! _ = expectOkAsync "handoff add evidence" (applyTask tempRoot handoffTask 0 (AddEvidence (makeEvidence "E1" EvidenceKind.Build "built")))
+    let! _ = expectOkAsync "handoff add evidence" (applyTask tempRoot handoffTask 0 (AddEvidence (makeEvidence "E1" (evidenceKind "build") "built")))
     let! _ = expectOkAsync "handoff start work" (applyTask tempRoot handoffTask 1 (StartWorkItem "W1"))
     let! _ = expectOkAsync "handoff complete work" (applyTask tempRoot handoffTask 2 (CompleteWorkItem("W1", { Result = "done"; EvidenceRefs = [] })))
     let! _ = expectOkAsync "handoff verify AC" (applyTask tempRoot handoffTask 3 (VerifyAcceptanceCriterion("AC1", [ "E1" ])))
@@ -2491,7 +2481,7 @@ try
     // Structurally invalid handoffs fail closed.
     let handoffValidationTask = "TST-411"
     let! _ = expectOkAsync "create handoff validation task" (createTask tempRoot (createRequest handoffValidationTask "Handoff validation task"))
-    let! _ = expectOkAsync "handoff validation add evidence" (applyTask tempRoot handoffValidationTask 0 (AddEvidence (makeEvidence "E1" EvidenceKind.Build "built")))
+    let! _ = expectOkAsync "handoff validation add evidence" (applyTask tempRoot handoffValidationTask 0 (AddEvidence (makeEvidence "E1" (evidenceKind "build") "built")))
     let! _ = expectOkAsync "handoff validation start work" (applyTask tempRoot handoffValidationTask 1 (StartWorkItem "W1"))
     let! _ = expectOkAsync "handoff validation complete work" (applyTask tempRoot handoffValidationTask 2 (CompleteWorkItem("W1", { Result = "done"; EvidenceRefs = [] })))
     let! _ = expectOkAsync "handoff validation verify AC" (applyTask tempRoot handoffValidationTask 3 (VerifyAcceptanceCriterion("AC1", [ "E1" ])))
@@ -2514,7 +2504,7 @@ try
     let completeForReopen id : Async<TaskModel> =
         async {
             let! _ = expectOkAsync $"create {id}" (createTask tempRoot (createRequest id "Reopen task"))
-            let! _ = expectOkAsync $"reopen {id} add evidence" (applyTask tempRoot id 0 (AddEvidence (makeEvidence "E1" EvidenceKind.Build "built")))
+            let! _ = expectOkAsync $"reopen {id} add evidence" (applyTask tempRoot id 0 (AddEvidence (makeEvidence "E1" (evidenceKind "build") "built")))
             let! _ = expectOkAsync $"reopen {id} start" (applyTask tempRoot id 1 (StartWorkItem "W1"))
             let! _ = expectOkAsync $"reopen {id} complete work" (applyTask tempRoot id 2 (CompleteWorkItem("W1", { Result = "done"; EvidenceRefs = [] })))
             let! _ = expectOkAsync $"reopen {id} verify" (applyTask tempRoot id 3 (VerifyAcceptanceCriterion("AC1", [ "E1" ])))
@@ -2570,10 +2560,10 @@ try
     let guardReopenTask = "TST-422"
     let! _ = expectOkAsync "create guard reopen task" (createTask tempRoot (createRequest guardReopenTask "Guard reopen task"))
 
-    let! _ = expectOkAsync "add guard reopen guard" (applyTask tempRoot guardReopenTask 0 (AddGuard { guardSpec "G1" TaskTarget BeforeComplete (requirement EvidenceKind.Review 1 None false) with Applicability = ExplicitDecision MinimumAuthority.CoordinatorAuthority }))
+    let! _ = expectOkAsync "add guard reopen guard" (applyTask tempRoot guardReopenTask 0 (AddGuard { guardSpec "G1" TaskTarget BeforeComplete (requirement (evidenceKind "review") 1 None false) with Applicability = ExplicitDecision MinimumAuthority.CoordinatorAuthority }))
 
     let! _ = expectOkAsync "dispose guard reopen guard" (applyTask tempRoot guardReopenTask 1 (MarkGuardNotApplicable("G1", None)))
-    let! _ = expectOkAsync "guard reopen add AC evidence" (applyTask tempRoot guardReopenTask 2 (AddEvidence (makeEvidence "E1" EvidenceKind.Build "built")))
+    let! _ = expectOkAsync "guard reopen add AC evidence" (applyTask tempRoot guardReopenTask 2 (AddEvidence (makeEvidence "E1" (evidenceKind "build") "built")))
     let! _ = expectOkAsync "guard reopen start work" (applyTask tempRoot guardReopenTask 3 (StartWorkItem "W1"))
     let! _ = expectOkAsync "guard reopen complete work" (applyTask tempRoot guardReopenTask 4 (CompleteWorkItem("W1", { Result = "done"; EvidenceRefs = [] })))
     let! _ = expectOkAsync "guard reopen verify AC" (applyTask tempRoot guardReopenTask 5 (VerifyAcceptanceCriterion("AC1", [ "E1" ])))
@@ -2624,10 +2614,10 @@ try
     let noOpReopenTask = "TST-425"
     let! _ = expectOkAsync "create no-op reopen task" (createTask tempRoot (createRequest noOpReopenTask "No-op reopen task"))
 
-    let! _ = expectOkAsync "add no-op reopen guard" (applyTask tempRoot noOpReopenTask 0 (AddGuard (guardSpec "G1" TaskTarget BeforeComplete (requirement EvidenceKind.Test 1 None false))))
+    let! _ = expectOkAsync "add no-op reopen guard" (applyTask tempRoot noOpReopenTask 0 (AddGuard (guardSpec "G1" TaskTarget BeforeComplete (requirement (evidenceKind "test") 1 None false))))
 
-    let! _ = expectOkAsync "no-op reopen add guard evidence" (applyTask tempRoot noOpReopenTask 1 (AddEvidence (makeEvidence "E1" EvidenceKind.Test "guard test")))
-    let! _ = expectOkAsync "no-op reopen add AC evidence" (applyTask tempRoot noOpReopenTask 2 (AddEvidence (makeEvidence "E2" EvidenceKind.Build "ac build")))
+    let! _ = expectOkAsync "no-op reopen add guard evidence" (applyTask tempRoot noOpReopenTask 1 (AddEvidence (makeEvidence "E1" (evidenceKind "test") "guard test")))
+    let! _ = expectOkAsync "no-op reopen add AC evidence" (applyTask tempRoot noOpReopenTask 2 (AddEvidence (makeEvidence "E2" (evidenceKind "build") "ac build")))
     let! _ = expectOkAsync "no-op reopen start work" (applyTask tempRoot noOpReopenTask 3 (StartWorkItem "W1"))
     let! _ = expectOkAsync "no-op reopen complete work" (applyTask tempRoot noOpReopenTask 4 (CompleteWorkItem("W1", { Result = "done"; EvidenceRefs = [] })))
     let! _ = expectOkAsync "no-op reopen verify AC" (applyTask tempRoot noOpReopenTask 5 (VerifyAcceptanceCriterion("AC1", [ "E2" ])))

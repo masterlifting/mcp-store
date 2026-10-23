@@ -1,11 +1,11 @@
 # Mcp.Workflow producer
 
-`workflow/` owns the executable schema-v1 Workflow producer and its native stdio MCP
+`workflow/` owns the executable schema-v2 Workflow producer and its native stdio MCP
 host. This directory owns only the deterministic state machine, transport
 implementation, and the workflow distribution. Downstream harnesses own their own
 workflow skill, coordinator decisions, and pinned profile catalog extensions;
 project profiles and overlays live under `<project-root>/.workflow/profiles`.
-Persisted task state is only `.tasks/<TASK-ID>/runtime.json` in strict schema v1;
+Persisted task state is only `.tasks/<TASK-ID>/runtime.json` in strict schema v2;
 legacy layouts and aliases are rejected. Coordination is process-ephemeral, so
 `runtime.lock` is never created or retained. A task directory may also carry
 narrowly allowlisted task-owned supporting material: an optional `SPEC.md`
@@ -106,7 +106,7 @@ The distribution scripts are component-local: they emit only Workflow artifacts.
 The .NET MCP has its own producer boundary under `dotnet/` and its release is
 not part of the Workflow bootstrap.
 
-The v1 release build produces the immutable `v1.0.6.zip`
+The v2 release build produces the immutable `v2.0.0.zip`
 framework-dependent `net11.0` distribution. The archive filename encodes the
 version only; the producer identity already comes from the producer directory,
 the manifest `id`, the project/assembly identity, the release context, and
@@ -122,14 +122,14 @@ dotnet build workflow/Mcp.Workflow.fsproj -c Release
 dotnet run --project workflow/Mcp.Workflow.fsproj -c Release --no-build
 ```
 
-For the immutable `v1.0.6.zip` asset, run
+For the immutable `v2.0.0.zip` asset, run
 `dotnet fsi workflow/release/Build.fsx`, then
 `dotnet fsi workflow/release/Pins.fsx`, and verify with
 `dotnet fsi workflow/tests/DistributionTests.fsx`. The build stages only
 `workflow/Mcp.Workflow.fsproj` under `workflow/dist/workflow/` and emits:
 
 ```text
-workflow/dist/v1.0.6.zip
+workflow/dist/v2.0.0.zip
 workflow/dist/workflow/distribution.json
 workflow/dist/consumer-pins.json
 ```
@@ -143,7 +143,7 @@ and apphost files are rejected. Regeneration removes only the workflow staging
 directory. Packaging refuses to run from a dirty source tree and stamps each
 manifest with the clean `HEAD` revision it built from.
 
-**Packaging provenance gate.** The definitive `v1.0.6.zip` asset and its
+**Packaging provenance gate.** The definitive `v2.0.0.zip` asset and its
 `consumer-pins.json` must be produced only after this version-bump PR merges,
 from a clean fresh working tree on the final `main` committed revision. No
 packaging run, archive, or pin generation occurs from the PR branch or any
@@ -161,6 +161,23 @@ membership is exactly `files ∪ { "distribution.json" }`; there is no separate
 `runtime` is derived from the packaged `Mcp.Workflow.runtimeconfig.json` and
 cross-checked against its hashed bytes, and `sourceRepository` is derived from the
 fixed release asset URI.
+
+## Evidence identifier and v2 cutover
+
+Evidence kinds are opaque validated identifiers: 1–64 ASCII characters,
+starting with a lowercase letter and containing lowercase letters or digits in
+hyphen-separated segments. Workflow validates and compares identifiers exactly;
+profiles own vocabulary such as `build`, `test`, and `review`. No trimming,
+case-folding, aliases, or `other:` escape hatch is supported.
+
+This is a forward-only breaking cutover. Workflow 2.0.0 accepts task schema v2
+and profile-document schema v2 only; existing schema-v1 task and profile bytes
+are rejected before evidence decoding and are never rewritten by read, validate,
+or apply. Keep old task directories and supporting files intact and use the
+explicitly selected prior producer if they must remain operable. New releases
+must be adopted explicitly by downstream consumers; existing 1.0.6 pins and
+published archives are immutable and are not regenerated or silently replaced.
+Do not hand-edit versions or migrate records as part of this cutover.
 
 ## Persisted-reference inventory
 

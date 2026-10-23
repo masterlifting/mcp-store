@@ -31,6 +31,11 @@ let assertNone name value =
     | None -> ()
     | Some _ -> failWith (sprintf "%s: expected None, got Some" name)
 
+let evidenceKind value =
+    match parseEvidenceKind value with
+    | Ok kind -> kind
+    | Error error -> failWith (sprintf "invalid evidence-kind test fixture '%s': %s" value (renderError error))
+
 let expectOk name (result: Async<Result<'a, RuntimeError>>) : Async<'a> =
     async {
         match! result with
@@ -73,7 +78,7 @@ async {
             { Id = "G1"
               Target = GuardTarget.TaskTarget
               Checkpoint = GuardCheckpoint.BeforeStart
-              Requirement = EvidenceRequired { Kind = EvidenceKind.Review; MinimumCount = 1; ProducerRole = None; RequireIndependentProducer = false }
+              Requirement = EvidenceRequired { Kind = evidenceKind "review"; MinimumCount = 1; ProducerRole = None; RequireIndependentProducer = false }
               Applicability = ApplicabilityPolicy.Always
               Waiver = WaiverPolicy.WaivableBy MinimumAuthority.UserAuthority }
 

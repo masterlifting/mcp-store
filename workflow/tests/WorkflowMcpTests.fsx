@@ -393,7 +393,41 @@ async {
         "task_apply schema enumerates command variants"
         (not (isJsonNull applyTool.["inputSchema"].["properties"].["command"].["oneOf"]))
 
+    let commandSchemas = applyTool.["inputSchema"].["properties"].["command"].["oneOf"].AsArray()
+    let commandVariant name =
+        commandSchemas
+        |> Seq.find (fun schema -> nodeString schema.["properties"].["type"].["const"] = name)
+
+    let patchSchemas =
+        (commandVariant "apply-contract-patch").["properties"].["patch"].["oneOf"].AsArray()
+
+    let patchVariant name =
+        patchSchemas
+        |> Seq.find (fun schema -> nodeString schema.["properties"].["type"].["const"] = name)
+
+    let evidenceKindSchemas =
+        [ "add-evidence", (commandVariant "add-evidence").["properties"].["kind"]
+          "add-guard", (commandVariant "add-guard").["properties"].["kind"]
+          "apply-contract-patch addGuard", (patchVariant "addGuard").["properties"].["kind"] ]
+
+    let evidenceKindPattern = "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?![\\s\\S])"
+    let grammarSamples =
+        [ ("build", true); ("a", true); ("a0", true); ("build-and-test-2", true); (String('a', 64), true)
+          ("", false); ("1build", false); ("Build", false); ("build_test", false); ("build--test", false)
+          ("build-", false); ("other:custom", false); ("café", false); (String('a', 65), false) ]
+
+    for label, schema in evidenceKindSchemas do
+        assertEqual $"{label} published evidence kind type" "string" (nodeString schema.["type"])
+        assertEqual $"{label} published evidence kind minimum" 1 (schema.["minLength"].GetValue<int>())
+        assertEqual $"{label} published evidence kind maximum" 64 (schema.["maxLength"].GetValue<int>())
+        assertEqual $"{label} published evidence kind pattern" evidenceKindPattern (nodeString schema.["pattern"])
+        let pattern = nodeString schema.["pattern"]
+        for kind, expected in grammarSamples do
+            let accepted = kind.Length >= 1 && kind.Length <= 64 && System.Text.RegularExpressions.Regex.IsMatch(kind, pattern)
+            assertEqual $"{label} published evidence schema grammar {kind}" expected accepted
+
     let createTool = tools |> Seq.find (fun tool -> nodeString tool.["name"] = "task_create")
+    assertContains "task_create schema-v2 description" "schema-v2" (nodeString createTool.["description"])
     assertEqual "task_create schema requires acceptance criteria" true (createTool.["inputSchema"].["properties"].["acceptanceCriteria"].["minItems"].GetValue<int>() > 0)
     assertEqual "task_create schema requires work items" true (createTool.["inputSchema"].["properties"].["workItems"].["minItems"].GetValue<int>() > 0)
 
@@ -406,7 +440,7 @@ async {
     let createdStructured = expectToolOk "task_create" created
     let createdTask = createdStructured.["task"]
     assertEqual "created id" "MCP-1" (nodeString createdTask.["id"])
-    assertEqual "created schemaVersion" 1 (createdTask.["schemaVersion"].GetValue<int>())
+    assertEqual "created schemaVersion" 2 (createdTask.["schemaVersion"].GetValue<int>())
     assertEqual "created stateRevision" 0 (createdTask.["stateRevision"].GetValue<int>())
 
     let! fetched = callToolWithMeta mcp "task_get" 5 "task_get" (getArgs tempRoot)
@@ -462,6 +496,16 @@ async {
 
     let appliedStructured = expectToolOk "task_apply success" applied
     assertEqual "apply increments revision" 1 (appliedStructured.["task"].["stateRevision"].GetValue<int>())
+
+    let! invalidEvidenceKind =
+        callTool
+            mcp
+            "task_apply invalid evidence kind"
+            26
+            "task_apply"
+            (applyArgs tempRoot 1 (jobj [ "type", jstr "add-evidence"; "id", jstr "E-invalid"; "kind", jstr "other:custom"; "source", jstr "test"; "summary", jstr "invalid kind" ]))
+    let invalidEvidenceError = expectToolError "task_apply invalid evidence kind" "INVALID_INPUT" invalidEvidenceKind
+    assertContains "invalid evidence kind rejected by parser" "evidence kind" (nodeString invalidEvidenceError.["message"])
 
     let! conflicted =
         callTool
