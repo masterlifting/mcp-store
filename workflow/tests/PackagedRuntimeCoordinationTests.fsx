@@ -500,7 +500,7 @@ let runRaceTest () : Async<unit> =
         // Byte-level atomicity / contention assertion: the surviving sidecar
         // is a single complete document from one writer. A torn or interleaved
         // write would fail JSON parsing or duplicate fields; the final bytes
-        // must parse as exactly one coherent schema-v1 task carrying the
+        // must parse as exactly one coherent schema-v2 task carrying the
         // racing id and the post-apply state revision.
         let sidecarFile = Path.Combine(taskDirectory, "runtime.json")
         let finalBytes = File.ReadAllBytes sidecarFile
@@ -510,7 +510,7 @@ let runRaceTest () : Async<unit> =
             with error -> failwithf "atomic sidecar is not valid JSON (%s): %s" error.Message finalText
 
         assertEqual "atomic sidecar id" taskId (finalDocument.["id"].GetValue<string>())
-        assertEqual "atomic sidecar schema version" 1 (finalDocument.["schemaVersion"].GetValue<int>())
+        assertEqual "atomic sidecar schema version" 2 (finalDocument.["schemaVersion"].GetValue<int>())
         assertEqual "atomic sidecar state revision" 1 (finalDocument.["stateRevision"].GetValue<int>())
         assertEqual "atomic sidecar kind" "execution" (finalDocument.["kind"].GetValue<string>())
         assertEqual "atomic sidecar lifecycle" "open" (finalDocument.["lifecycle"].GetValue<string>())

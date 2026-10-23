@@ -1,12 +1,12 @@
 {
   "componentId": "workflow",
-  "version": "1.0.6",
+  "version": "2.0.0",
   "entryDll": "Mcp.Workflow.dll",
   "sdkVersion": "11.0.100-rc.1.26425.128",
   "runtimeVersion": "11.0.0-rc.1.26425.128",
   "platform": "win-x64",
-  "archiveName": "v1.0.6.zip",
-  "assetUri": "https://github.com/masterlifting/mcp-store/releases/download/workflow/v1.0.6.zip",
+  "archiveName": "v2.0.0.zip",
+  "assetUri": "https://github.com/masterlifting/mcp-store/releases/download/workflow/v2.0.0.zip",
   "publishedFiles": [
     "FSharp.Core.dll",
     "Mcp.Workflow.deps.json",

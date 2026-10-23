@@ -14,6 +14,7 @@ The Workflow behavior suites are standalone F# scripts. From the repository root
 $env:MCP_WORKFLOW_PACKAGED_DLL = (Resolve-Path "workflow/bin/Release/net11.0/Mcp.Workflow.dll").Path
 $tests = @(
   "workflow/tests/WorkflowTests.fsx",
+  "workflow/tests/EvidenceIdentifierV2Tests.fsx",
   "workflow/tests/TaskContractTests.fsx",
   "workflow/tests/TaskPathSafetyTests.fsx",
   "workflow/tests/TaskSupportingArtifactTests.fsx",

@@ -48,6 +48,14 @@ let private expectMalformedBytes (name: string) (sourcePath: string) (bytes: byt
 
 let private canonicalComponentIds = [ "dotnet"; "workflow" ]
 
+// WHY: each canonical producer pins exactly its own released version. A shared allowlist lets one producer carry a
+//   sibling's version literal and still pass, so the expected version is keyed per component and an unlisted
+//   canonical component fails closed instead of silently skipping the assertion.
+let private canonicalComponentVersions =
+    [ "dotnet", "1.0.5"
+      "workflow", "2.0.0" ]
+    |> Map.ofList
+
 let private projectionTests =
     canonicalComponentIds
     |> List.map (fun componentId ->
@@ -81,7 +89,11 @@ let private projectionTests =
          Expect.equal actual.SourceSha256 snapshot.ConfigSha256 $"{componentId} hash of exact canonical bytes returns the helper observation"
          let mutable parsedVersion: Version = Unchecked.defaultof<Version>
          Expect.isTrue (Version.TryParse(actual.Version, &parsedVersion)) $"canonical {componentId} version parses as semver"
-         Expect.isTrue (actual.Version = "1.0.5" || actual.Version = "1.0.6") $"canonical {componentId} version is the current pinned release value"))
+         let expectedVersion =
+             match Map.tryFind componentId canonicalComponentVersions with
+             | Some version -> version
+             | None -> failtestf "no pinned release version is recorded for canonical component %s" componentId
+         Expect.equal actual.Version expectedVersion $"canonical {componentId} version is the exact pinned release value"))
 
 let private strictJsonGrammarTests =
     let canonical = readCanonicalConfig repositoryRoot "dotnet"

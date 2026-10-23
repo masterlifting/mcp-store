@@ -266,25 +266,55 @@ for authority in [ "coordinator"; "user" ] do
 
 expectOk "parseWaiver notWaivable" (parseWaiver "notWaivable")
 
-// Evidence kind: 7 fixed values plus the open `other:<non-empty>` form.
+// Evidence kinds use one exact ASCII grammar across parser and published schema.
 let addEvidence = findVariant commandVariants "add-evidence"
-let evidenceKindOneOf = addEvidence.["properties"].["kind"].["oneOf"].AsArray()
-let evidenceKindEnum = enumStrings evidenceKindOneOf.[0]
+let evidenceKindSchema = addEvidence.["properties"].["kind"]
+let evidenceKindPattern = "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?![\\s\\S])"
 
-assertEqual
-    "evidence kind enum"
-    [ "build"; "test"; "review"; "observation"; "externalEffect"; "research"; "decisionEvidence" ]
-    evidenceKindEnum
+let assertEvidenceKindSchema label (schema: JsonNode) =
+    assertEqual $"{label} evidence kind type" "string" (schema.["type"].GetValue<string>())
+    assertEqual $"{label} evidence kind minimum" 1 (schema.["minLength"].GetValue<int>())
+    assertEqual $"{label} evidence kind maximum" 64 (schema.["maxLength"].GetValue<int>())
+    assertEqual $"{label} evidence kind pattern" evidenceKindPattern (schema.["pattern"].GetValue<string>())
 
-for kind in evidenceKindEnum do
-    expectOk $"parseEvidenceKind {kind}" (parseEvidenceKind kind)
+assertEvidenceKindSchema "add-evidence" evidenceKindSchema
 
-expectOk "parseEvidenceKind other" (parseEvidenceKind "other:custom")
-assertEqual "EvidenceKind union case count" 8 (unionCount typeof<EvidenceKind>)
-assertEqual "EvidenceKind published count" (unionCount typeof<EvidenceKind>) (evidenceKindEnum.Length + 1)
-let evidenceOtherPattern = evidenceKindOneOf.[1].["pattern"].GetValue<string>()
-assertTrue "evidence other pattern accepts" (Regex.IsMatch("other:custom", evidenceOtherPattern))
-assertTrue "evidence other pattern rejects blank" (not (Regex.IsMatch("other:   ", evidenceOtherPattern)))
+let evidenceKindSamples =
+    [ ("build", true)
+      ("a", true)
+      ("a0", true)
+      ("build-and-test-2", true)
+      (String('a', 64), true)
+      ("", false)
+      ("1build", false)
+      ("Build", false)
+      ("build_test", false)
+      ("build--test", false)
+      ("build-", false)
+      ("other:custom", false)
+      ("café", false)
+      (String('a', 65), false) ]
+
+for kind, expected in evidenceKindSamples do
+    let schemaAccepts = kind.Length >= 1 && kind.Length <= 64 && Regex.IsMatch(kind, evidenceKindPattern)
+    assertEqual $"evidence schema grammar {kind}" expected schemaAccepts
+    match parseEvidenceKind kind with
+    | Ok _ -> assertEqual $"evidence parser grammar {kind}" true expected
+    | Error _ -> assertEqual $"evidence parser grammar {kind}" false expected
+
+let addGuardEvidenceKindSchema = addGuard.["properties"].["kind"]
+let addGuardPatchEvidenceKindSchema = addGuardPatch.["properties"].["kind"]
+assertEvidenceKindSchema "add-guard" addGuardEvidenceKindSchema
+assertEvidenceKindSchema "apply-contract-patch addGuard" addGuardPatchEvidenceKindSchema
+
+for label, schema in
+    [ "add-evidence", evidenceKindSchema
+      "add-guard", addGuardEvidenceKindSchema
+      "apply-contract-patch addGuard", addGuardPatchEvidenceKindSchema ] do
+    let pattern = schema.["pattern"].GetValue<string>()
+    for kind, expected in evidenceKindSamples do
+        let accepted = kind.Length >= 1 && kind.Length <= 64 && Regex.IsMatch(kind, pattern)
+        assertEqual $"{label} schema grammar {kind}" expected accepted
 
 // Decision kind: the closed 7-case vocabulary.
 let addDecision = findVariant commandVariants "add-decision"
@@ -374,4 +404,4 @@ assertEqual
     (enumStrings reclassifyTask.["properties"].["kind"])
 
 printfn
-    "OK recursive Workflow schema/parser parity: required/properties invariant, command/patch/plan variant coverage, and enum round-trip"
+    "OK Workflow schema/parser parity: required/properties invariant, command/patch/plan coverage, and evidence identifier grammar"

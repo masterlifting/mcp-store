@@ -35,10 +35,10 @@ let private awaitComplete (work: Task) : Async<unit> =
         | error -> return raise error
     }
 
-// Schema 1 is the sole canonical persisted Workflow representation: a task is
+// Schema 2 is the sole canonical persisted Workflow representation: a task is
 // either this exact document or it is rejected.
 [<Literal>]
-let SchemaVersion = 1
+let SchemaVersion = 2
 
 [<Literal>]
 let GeneralProfileId = "general"
@@ -57,18 +57,8 @@ type Kind =
     | Research
 
 [<RequireQualifiedAccess>]
-type EvidenceKind =
-    | Build
-    | Test
-    | Review
-    | Observation
-    | ExternalEffect
-    | Research
-    | DecisionEvidence
-    | Other of string
+type EvidenceKind = private EvidenceKind of string
 
-// EvidenceSource stays an open semantic primitive because EvidenceKind is
-// enumerated but no source vocabulary is fixed.
 type EvidenceSource = EvidenceSource of string
 
 type EvidenceValidity =
@@ -751,33 +741,36 @@ let private parseContractState (value: string) : Result<ContractState, RuntimeEr
     | _ -> Error (InvalidInput "contract state must be 'draft' or 'baselined'")
 
 let private evidenceKindToString (kind: EvidenceKind) =
-    match kind with
-    | EvidenceKind.Build -> "build"
-    | EvidenceKind.Test -> "test"
-    | EvidenceKind.Review -> "review"
-    | EvidenceKind.Observation -> "observation"
-    | EvidenceKind.ExternalEffect -> "externalEffect"
-    | EvidenceKind.Research -> "research"
-    | EvidenceKind.DecisionEvidence -> "decisionEvidence"
-    | EvidenceKind.Other value -> $"other:{value}"
+    let (EvidenceKind.EvidenceKind value) = kind
+    value
 
 let parseEvidenceKind (value: string) : Result<EvidenceKind, RuntimeError> =
-    match value with
-    | "build" -> Ok EvidenceKind.Build
-    | "test" -> Ok EvidenceKind.Test
-    | "review" -> Ok EvidenceKind.Review
-    | "observation" -> Ok EvidenceKind.Observation
-    | "externalEffect" -> Ok EvidenceKind.ExternalEffect
-    | "research" -> Ok EvidenceKind.Research
-    | "decisionEvidence" -> Ok EvidenceKind.DecisionEvidence
-    | _ when value.StartsWith("other:", StringComparison.Ordinal) ->
-        let custom = value.Substring("other:".Length)
+    let validLength = not (isNull value) && value.Length >= 1 && value.Length <= 64
 
-        if String.IsNullOrWhiteSpace custom then
-            Error (InvalidInput "evidence kind 'other' requires a non-empty value")
-        else
-            Ok(EvidenceKind.Other(custom.Trim()))
-    | _ -> Error (InvalidInput "evidence kind is not recognized")
+    if not validLength then
+        Error (InvalidInput "evidence kind must contain 1 to 64 lowercase ASCII identifier characters")
+    else
+        let isLetter character = character >= 'a' && character <= 'z'
+        let isDigit character = character >= '0' && character <= '9'
+        let mutable valid = isLetter value.[0]
+        let mutable previousHyphen = false
+
+        for index in 1 .. value.Length - 1 do
+            let character = value.[index]
+            let hyphen = character = '-'
+
+            if not (isLetter character || isDigit character || (hyphen && not previousHyphen)) then
+                valid <- false
+
+            previousHyphen <- hyphen
+
+        if valid && not previousHyphen then Ok(EvidenceKind.EvidenceKind value)
+        else Error (InvalidInput "evidence kind must follow lowercase-segment identifier syntax")
+
+let private knownEvidenceKind value =
+    match parseEvidenceKind value with
+    | Ok kind -> kind
+    | Error _ -> invalidOp "Built-in evidence identifiers must satisfy the validated identifier grammar."
 
 let private evidenceSourceToString (EvidenceSource value) = value
 
@@ -1250,7 +1243,7 @@ let private makeEffectiveProfile (definition: ProfileDefinition) (origin: Profil
       Origin = origin }
 
 let private builtinGeneralDefinition: ProfileDefinition =
-    { SchemaVersion = 1
+    { SchemaVersion = 2
       Id = GeneralProfileId
       Description = "Fallback profile with minimal specialization."
       IdPrefix = None
@@ -1280,7 +1273,7 @@ let private builtinSoftwareDefinition: ProfileDefinition =
           Waiver = waiver
           TaskKind = Some Execution }
 
-    { SchemaVersion = 1
+    { SchemaVersion = 2
       Id = SoftwareProfileId
       Description =
         "Shared software profile: repository context, engineering conventions, and risk-driven build/test/review obligations."
@@ -1311,19 +1304,19 @@ let private builtinSoftwareDefinition: ProfileDefinition =
         { Guards =
             [ executionGuard
                   "build"
-                  EvidenceKind.Build
+                  (knownEvidenceKind "build")
                   "engineer"
                   (ExplicitDecision MinimumAuthority.CoordinatorAuthority)
                   (WaivableBy MinimumAuthority.UserAuthority)
               executionGuard
                   "test"
-                  EvidenceKind.Test
+                  (knownEvidenceKind "test")
                   "tester"
                   (ExplicitDecision MinimumAuthority.CoordinatorAuthority)
                   (WaivableBy MinimumAuthority.UserAuthority)
               executionGuard
                   "review"
-                  EvidenceKind.Review
+                  (knownEvidenceKind "review")
                   "reviewer"
                   (ExplicitDecision MinimumAuthority.UserAuthority)
                   (WaivableBy MinimumAuthority.UserAuthority) ]
@@ -1374,7 +1367,7 @@ let private builtinHarnessDefinition: ProfileDefinition =
           Waiver = NotWaivable
           TaskKind = Some Research }
 
-    { SchemaVersion = 1
+    { SchemaVersion = 2
       Id = HarnessProfileId
       Description =
         "Shared harness profile: harness architecture/context, cross-file semantic consistency, and instruction-authority obligations."
@@ -1402,17 +1395,17 @@ let private builtinHarnessDefinition: ProfileDefinition =
         { Guards =
             [ executionGuard
                   "validation"
-                  EvidenceKind.Test
+                  (knownEvidenceKind "test")
                   "tester"
                   (ExplicitDecision MinimumAuthority.CoordinatorAuthority)
                   (WaivableBy MinimumAuthority.UserAuthority)
               executionGuard
                   "review"
-                  EvidenceKind.Review
+                  (knownEvidenceKind "review")
                   "reviewer"
                   (ExplicitDecision MinimumAuthority.UserAuthority)
                   (WaivableBy MinimumAuthority.UserAuthority)
-              researchGuard "investigation" EvidenceKind.Research ]
+              researchGuard "investigation" (knownEvidenceKind "research") ]
           RequiredSections = []
           RoleDefaults =
             [ { Purpose = "architecture"; Role = "architect" }
@@ -1459,12 +1452,6 @@ let private validateProfileGuardSpec (spec: ProfileGuardSpec) =
 
         let value = spec.Requirement
 
-        let! kind =
-            match value.Kind with
-            | EvidenceKind.Other custom when String.IsNullOrWhiteSpace custom ->
-                Error(InvalidInput "evidence kind 'other' requires a non-empty value")
-            | kind -> Ok kind
-
         if value.MinimumCount < 1 then
             return! Error (InvalidInput "profile guard minimumCount must be at least 1")
 
@@ -1472,7 +1459,6 @@ let private validateProfileGuardSpec (spec: ProfileGuardSpec) =
 
         let requirement =
             { value with
-                Kind = kind
                 ProducerRole = producerRole }
 
         return { spec with Key = key; Requirement = requirement }
@@ -1972,6 +1958,9 @@ module private ProfileSource =
                     props
 
             let! schemaVersion = requiredInt "schemaVersion" props
+            do!
+                if schemaVersion = 2 then Ok()
+                else Error(InvalidInput $"unsupported profile schemaVersion {schemaVersion}")
             let! id = requiredString "id" props
             let! description = optionalString "description" props
             let! idPrefix = optionalString "idPrefix" props
@@ -2033,8 +2022,8 @@ let private readProjectProfile (path: string) : Async<Result<string * ProfileOve
                 match ProfileSource.parseOverlay document.RootElement with
                 | Error error -> return Error error
                 | Ok overlay ->
-                    if overlay.SchemaVersion <> 1 then
-                        return Error(InvalidInput $"project profile '{path}' schemaVersion must be 1")
+                    if overlay.SchemaVersion <> 2 then
+                        return Error(InvalidInput $"project profile '{path}' schemaVersion must be 2")
                     else
                         return Ok(path, overlay)
             with
@@ -2960,6 +2949,9 @@ module private Dto =
                         [ "terminalHandoff" ]
                         props
                 let! schemaVersion = intProperty "schemaVersion" props
+                do!
+                    if schemaVersion = SchemaVersion then Ok()
+                    else Error(InvalidInput $"unsupported schemaVersion {schemaVersion}")
                 let! id = stringProperty "id" props
                 let! title = stringProperty "title" props
                 let! created = stringProperty "created" props
@@ -3266,11 +3258,6 @@ module private Domain =
     let private validateEvidence (evidence: Evidence) =
         result {
             let! id = evidenceId evidence.Id
-            let! kind =
-                match evidence.Kind with
-                | EvidenceKind.Other value when String.IsNullOrWhiteSpace value ->
-                    Error (InvalidInput "evidence kind 'other' requires a non-empty value")
-                | kind -> Ok kind
             let! source =
                 match evidence.Source with
                 | EvidenceSource value -> nonEmpty "evidence source" value |> Result.map EvidenceSource
@@ -3282,7 +3269,6 @@ module private Domain =
             return
                 { evidence with
                     Id = id
-                    Kind = kind
                     Source = source
                     Subject = subject
                     ProducerRole = producerRole
@@ -4463,17 +4449,11 @@ module private Domain =
                 match spec.Requirement with
                 | EvidenceRequired value ->
                     result {
-                        let! kind =
-                            match value.Kind with
-                            | EvidenceKind.Other custom when String.IsNullOrWhiteSpace custom ->
-                                Error (InvalidInput "evidence kind 'other' requires a non-empty value")
-                            | kind -> Ok kind
-
                         if value.MinimumCount < 1 then
                             return! Error (InvalidInput "guard minimumCount must be at least 1")
 
                         let! producerRole = optionalNonEmpty "guard producerRole" value.ProducerRole
-                        return EvidenceRequired { value with Kind = kind; ProducerRole = producerRole }
+                        return EvidenceRequired { value with ProducerRole = producerRole }
                     }
             return { spec with Id = id; Target = target; Requirement = requirement }
         }
@@ -6082,7 +6062,7 @@ let private sidecarPath root requestedTaskId =
 
 // The coordination object is an OS-named mutex rather than a sidecar file. It
 // therefore spans producer processes while remaining ephemeral and leaves the
-// schema-v1 task directory free of runtime.lock artifacts.
+// schema-v2 task directory free of runtime.lock artifacts.
 let private coordinationName (path: string) =
     let canonical =
         let fullPath = Path.GetFullPath path

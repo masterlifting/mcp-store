@@ -28,6 +28,11 @@ let assertEqual name expected actual =
 let assertTrue name condition =
     if not condition then failwithf "%s: expected true" name
 
+let evidenceKind value =
+    match parseEvidenceKind value with
+    | Ok kind -> kind
+    | Error error -> failwithf "invalid evidence-kind test fixture '%s': %s" value (renderError error)
+
 let expectOk name (result: Async<Result<'a, RuntimeError>>) : Async<'a> =
     async {
         match! result with
@@ -105,7 +110,7 @@ let guardJson (key: string) (evidenceKind: string) (minimumCount: int) =
 
 let profileJson (id: string) (description: string option) (requiredCaps: string list) (guards: string list) =
     let fields = ResizeArray<string>()
-    fields.Add("\"schemaVersion\":1")
+    fields.Add("\"schemaVersion\":2")
     fields.Add(sprintf "\"id\":\"%s\"" id)
 
     match description with
@@ -125,7 +130,7 @@ let profileJson (id: string) (description: string option) (requiredCaps: string 
 // overlay may extend role defaults but never rebind an already-resolved purpose.
 let roleDefaultOverlayJson (id: string) (purpose: string) (role: string) =
     sprintf
-        """{"schemaVersion":1,"id":"%s","policy":{"roleDefaults":[{"purpose":"%s","role":"%s"}]}}"""
+        """{"schemaVersion":2,"id":"%s","policy":{"roleDefaults":[{"purpose":"%s","role":"%s"}]}}"""
         id
         purpose
         role
@@ -201,9 +206,16 @@ async {
         // --- Strict project-profile JSON: malformed/unknown/schema/duplicate/weakening ---
         do! expectRejected "malformed profile JSON" "is not valid JSON" (resolveWith "b-malformed" [ "bad.json", "{ not json" ])
 
-        do! expectRejected "unknown profile property" "contains unknown property 'bogus'" (resolveWith "b-unknown-property" [ "p.json", """{"schemaVersion":1,"id":"x","description":"d","bogus":true}""" ])
+        do! expectRejected "unknown profile property" "contains unknown property 'bogus'" (resolveWith "b-unknown-property" [ "p.json", """{"schemaVersion":2,"id":"x","description":"d","bogus":true}""" ])
 
-        do! expectRejected "unsupported profile schema version" "schemaVersion must be 1" (resolveWith "b-schema" [ "p.json", """{"schemaVersion":2,"id":"x","description":"d"}""" ])
+        do! expectRejected "unsupported profile schema version" "unsupported profile schemaVersion 1" (resolveWith "b-schema" [ "p.json", """{"schemaVersion":1,"id":"x","description":"d"}""" ])
+
+        let customProfile = profileJson "source-verification" (Some "Custom evidence vocabulary") [] [ guardJson "source" "source-verification" 1 ]
+        let! customProfileA = expectOk "parse custom non-software profile" (resolveWith "custom-evidence-a" [ "profile.json", customProfile ])
+        let! customProfileB = expectOk "parse identical custom profile from another root" (resolveWith "custom-evidence-b" [ "profile.json", customProfile ])
+        let customA = customProfileA.["source-verification"]
+        assertEqual "custom profile guard evidence identifier" (evidenceKind "source-verification") customA.Definition.Policy.Guards.Head.Requirement.Kind
+        assertEqual "identical custom profile fingerprints" customA.Fingerprint customProfileB.["source-verification"].Fingerprint
 
         do! expectRejected "duplicate project profile id" "duplicate project profile id 'dup'" (resolveWith "b-duplicate" [ "a.json", profileJson "dup" (Some "first") [] []; "b.json", profileJson "dup" (Some "second") [] [] ])
 
@@ -263,7 +275,7 @@ async {
         assertEqual
             "materialized guard requirement"
             (EvidenceRequired
-                { Kind = EvidenceKind.Review
+                { Kind = evidenceKind "review"
                   MinimumCount = 3
                   ProducerRole = None
                   RequireIndependentProducer = false })
@@ -304,7 +316,7 @@ async {
         assertEqual "lenient read keeps profile" "widget" readWhileMissing.Profile
         assertEqual "lenient read keeps fingerprint" missingTask.ProfileFingerprint readWhileMissing.ProfileFingerprint
 
-        do! expectRejected "missing profile blocks mutation" "PROFILE_DRIFT: profile 'widget' is not available" (applyTask rootD "TST-904" readWhileMissing.StateRevision (AddEvidence(makeEvidence "E1" EvidenceKind.Test "late")))
+        do! expectRejected "missing profile blocks mutation" "PROFILE_DRIFT: profile 'widget' is not available" (applyTask rootD "TST-904" readWhileMissing.StateRevision (AddEvidence(makeEvidence "E1" (evidenceKind "test") "late")))
 
         // get remains lenient while validate reports the missing profile explicitly.
         do! expectRejected "validate reports missing profile" "PROFILE_DRIFT: profile 'widget' is not available" (validateTask rootD "TST-904")
@@ -329,7 +341,7 @@ async {
         let e1Fingerprint = e1Profiles.["widget"].Fingerprint
         assertTrue "profile change produces drift" (e1Fingerprint <> draftTask.ProfileFingerprint)
 
-        let! absorbed = expectOk "draft absorbs profile drift" (applyTask rootE1 "TST-905" 0 (AddEvidence(makeEvidence "E1" EvidenceKind.Test "absorbed")))
+        let! absorbed = expectOk "draft absorbs profile drift" (applyTask rootE1 "TST-905" 0 (AddEvidence(makeEvidence "E1" (evidenceKind "test") "absorbed")))
 
         assertEqual "draft drift absorbed fingerprint" e1Fingerprint absorbed.ProfileFingerprint
         assertEqual "draft drift stays draft" Draft absorbed.ContractState
@@ -339,7 +351,7 @@ async {
         assertEqual
             "draft drift materializes replacement guard"
             (EvidenceRequired
-                { Kind = EvidenceKind.Test
+                { Kind = evidenceKind "test"
                   MinimumCount = 2
                   ProducerRole = None
                   RequireIndependentProducer = false })
@@ -369,7 +381,7 @@ async {
         let! driftRead = expectOk "get remains lenient under drift" (getTask rootE2 "TST-906")
         assertEqual "drift read keeps recorded fingerprint" baselined.ProfileFingerprint driftRead.ProfileFingerprint
 
-        do! expectRejected "baselined drift blocks mutation" "PROFILE_DRIFT: profile 'widget' no longer matches the recorded fingerprint" (applyTask rootE2 "TST-906" driftRead.StateRevision (AddEvidence(makeEvidence "E1" EvidenceKind.Test "blocked")))
+        do! expectRejected "baselined drift blocks mutation" "PROFILE_DRIFT: profile 'widget' no longer matches the recorded fingerprint" (applyTask rootE2 "TST-906" driftRead.StateRevision (AddEvidence(makeEvidence "E1" (evidenceKind "test") "blocked")))
 
         // get remains lenient while validate reports the fingerprint drift explicitly.
         do! expectRejected "validate reports profile fingerprint drift" "PROFILE_DRIFT: profile 'widget' no longer matches the recorded fingerprint" (validateTask rootE2 "TST-906")
@@ -381,13 +393,13 @@ async {
 
         assertTrue
             "reconcile retains prior profile guard"
-            (hasRequirement EvidenceKind.Review 1 reconciled.Guards)
+            (hasRequirement (evidenceKind "review") 1 reconciled.Guards)
 
         assertTrue
             "reconcile adds current profile guard"
-            (hasRequirement EvidenceKind.Test 2 reconciled.Guards)
+            (hasRequirement (evidenceKind "test") 2 reconciled.Guards)
 
-        let! afterReconcile = expectOk "mutation proceeds after reconcile" (applyTask rootE2 "TST-906" reconciled.StateRevision (AddEvidence(makeEvidence "E1" EvidenceKind.Test "now allowed")))
+        let! afterReconcile = expectOk "mutation proceeds after reconcile" (applyTask rootE2 "TST-906" reconciled.StateRevision (AddEvidence(makeEvidence "E1" (evidenceKind "test") "now allowed")))
 
         assertEqual "post-reconcile evidence recorded" 1 afterReconcile.Evidence.Length
 
@@ -484,9 +496,9 @@ async {
                  && guard.Target = TaskTarget
                  && guard.Checkpoint = BeforeComplete))
 
-        let buildGuard = guardOfKind EvidenceKind.Build softwareExec.Guards
-        let testGuard = guardOfKind EvidenceKind.Test softwareExec.Guards
-        let reviewGuard = guardOfKind EvidenceKind.Review softwareExec.Guards
+        let buildGuard = guardOfKind (evidenceKind "build") softwareExec.Guards
+        let testGuard = guardOfKind (evidenceKind "test") softwareExec.Guards
+        let reviewGuard = guardOfKind (evidenceKind "review") softwareExec.Guards
 
         assertEqual "build gate producer role" (Some "engineer") (requirementOf buildGuard).ProducerRole
         assertEqual "test gate producer role" (Some "tester") (requirementOf testGuard).ProducerRole
@@ -547,12 +559,12 @@ async {
             { makeEvidence id kind summary with
                 ProducerRole = Some role }
 
-        let! softwareExecWithBuild = expectOk "add software build evidence" (applyTask rootG "TST-910" softwareExecWorkDone.StateRevision (AddEvidence(roleEvidence "E1" EvidenceKind.Build "engineer" "build passed")))
+        let! softwareExecWithBuild = expectOk "add software build evidence" (applyTask rootG "TST-910" softwareExecWorkDone.StateRevision (AddEvidence(roleEvidence "E1" (evidenceKind "build") "engineer" "build passed")))
 
-        let! softwareExecWithTest = expectOk "add software test evidence" (applyTask rootG "TST-910" softwareExecWithBuild.StateRevision (AddEvidence(roleEvidence "E2" EvidenceKind.Test "tester" "tests passed")))
+        let! softwareExecWithTest = expectOk "add software test evidence" (applyTask rootG "TST-910" softwareExecWithBuild.StateRevision (AddEvidence(roleEvidence "E2" (evidenceKind "test") "tester" "tests passed")))
 
         // A Review record produced by the wrong role cannot satisfy the review gate.
-        let! softwareExecWithWrongReview = expectOk "add wrong-role review evidence" (applyTask rootG "TST-910" softwareExecWithTest.StateRevision (AddEvidence(roleEvidence "E3" EvidenceKind.Review "engineer" "self review")))
+        let! softwareExecWithWrongReview = expectOk "add wrong-role review evidence" (applyTask rootG "TST-910" softwareExecWithTest.StateRevision (AddEvidence(roleEvidence "E3" (evidenceKind "review") "engineer" "self review")))
 
         let! softwareExecVerified = expectOk "verify software acceptance" (applyTask rootG "TST-910" softwareExecWithWrongReview.StateRevision (VerifyAcceptanceCriterion("AC1", [ "E1" ])))
 
@@ -560,7 +572,7 @@ async {
 
         do! expectRejected "software completion blocked by unsatisfied review gate" $"guard '{reviewGuard.Id}' is not satisfied" (applyTask rootG "TST-910" softwareExecVerified.StateRevision (CompleteTask defaultHandoff))
 
-        let! softwareExecReady = expectOk "add reviewer evidence" (applyTask rootG "TST-910" softwareExecVerified.StateRevision (AddEvidence(roleEvidence "E4" EvidenceKind.Review "reviewer" "independent review passed")))
+        let! softwareExecReady = expectOk "add reviewer evidence" (applyTask rootG "TST-910" softwareExecVerified.StateRevision (AddEvidence(roleEvidence "E4" (evidenceKind "review") "reviewer" "independent review passed")))
 
         assertTrue "software execution completes once all gates are satisfied" (canCompleteTask softwareExecReady)
 
@@ -609,7 +621,7 @@ async {
         let! legacyRead = expectOk "legacy identity remains inspectable" (getTask legacyRoot "TST-925")
         assertEqual "legacy profile identity remains stored" "opencode" legacyRead.Profile
         assertEqual "legacy profile fingerprint remains stored" legacyFingerprint legacyRead.ProfileFingerprint
-        do! expectRejected "legacy draft mutation fails closed" "PROFILE_DRIFT: profile 'opencode' is not available" (applyTask legacyRoot "TST-925" legacyRead.StateRevision (AddEvidence(makeEvidence "E1" EvidenceKind.Test "blocked")))
+        do! expectRejected "legacy draft mutation fails closed" "PROFILE_DRIFT: profile 'opencode' is not available" (applyTask legacyRoot "TST-925" legacyRead.StateRevision (AddEvidence(makeEvidence "E1" (evidenceKind "test") "blocked")))
         let! draftBytesAfterRejectedMutation = File.ReadAllBytesAsync(legacySidecar) |> Async.AwaitTask
         assertEqual "unsupported Draft mutation preserves persisted bytes" (Convert.ToBase64String draftBytesBeforeRejectedMutation) (Convert.ToBase64String draftBytesAfterRejectedMutation)
         let! reclassifiedLegacyDraft = expectOk "Draft reclassification is explicit and Coordinator-permitted" (applyTask legacyRoot "TST-925" legacyRead.StateRevision (ReclassifyTask { Kind = None; Profile = Some HarnessProfileId; Reason = "operator compared legacy obligations" }))
@@ -633,7 +645,7 @@ async {
         assertEqual "historical Baselined fixture keyed guards" ((System.Text.Json.Nodes.JsonNode.Parse legacyDraftGuards).ToJsonString()) (baselineFixture["guards"].ToJsonString())
         assertEqual "historical Baselined fixture guard-key provenance" ((System.Text.Json.Nodes.JsonNode.Parse legacyGuardKeys).ToJsonString()) (baselineFixture["profileGuardKeys"].ToJsonString())
         let! baselineBytesBeforeRejectedMutations = File.ReadAllBytesAsync(baselineSidecar) |> Async.AwaitTask
-        do! expectRejected "legacy baselined mutation fails closed" "PROFILE_DRIFT: profile 'opencode' is not available" (applyTask legacyRoot "TST-926" baselineSource.StateRevision (AddEvidence(makeEvidence "E1" EvidenceKind.Test "blocked")))
+        do! expectRejected "legacy baselined mutation fails closed" "PROFILE_DRIFT: profile 'opencode' is not available" (applyTask legacyRoot "TST-926" baselineSource.StateRevision (AddEvidence(makeEvidence "E1" (evidenceKind "test") "blocked")))
         let! baselineBytesAfterRejectedMutation = File.ReadAllBytesAsync(baselineSidecar) |> Async.AwaitTask
         assertEqual "unsupported Baselined AddEvidence preserves persisted bytes" (Convert.ToBase64String baselineBytesBeforeRejectedMutations) (Convert.ToBase64String baselineBytesAfterRejectedMutation)
         do! expectRejected "legacy baselined reclassification requires unavailable user authority" "operation requires user authority; ordinary Coordinator invocation cannot authorize it" (applyTask legacyRoot "TST-926" baselineSource.StateRevision (ReclassifyTask { Kind = None; Profile = Some HarnessProfileId; Reason = "source profile unavailable" }))
@@ -680,8 +692,8 @@ async {
                  && guard.Target = TaskTarget
                  && guard.Checkpoint = BeforeComplete))
 
-        let harnessValidation = guardOfKind EvidenceKind.Test harnessExec.Guards
-        let harnessReview = guardOfKind EvidenceKind.Review harnessExec.Guards
+        let harnessValidation = guardOfKind (evidenceKind "test") harnessExec.Guards
+        let harnessReview = guardOfKind (evidenceKind "review") harnessExec.Guards
 
         assertEqual "harness validation producer role" (Some "tester") ((requirementOf harnessValidation).ProducerRole)
         assertEqual "harness review producer role" (Some "reviewer") ((requirementOf harnessReview).ProducerRole)
@@ -703,7 +715,7 @@ async {
 
         assertTrue
             "harness execution does not materialize the research investigation gate"
-            (harnessExec.Guards |> List.forall (fun guard -> (requirementOf guard).Kind <> EvidenceKind.Research))
+            (harnessExec.Guards |> List.forall (fun guard -> (requirementOf guard).Kind <> evidenceKind "research"))
 
         // Review is fail-closed under ordinary Coordinator invocation: neither the
         // direct path nor a Coordinator-authored Decision can dispose it.
@@ -729,7 +741,7 @@ async {
 
         let investigation = harnessResearch.Guards.Head
         assertEqual "harness investigation origin" ProfileMaterialized investigation.Origin
-        assertEqual "harness investigation kind" EvidenceKind.Research ((requirementOf investigation).Kind)
+        assertEqual "harness investigation kind" (evidenceKind "research") ((requirementOf investigation).Kind)
         assertEqual "harness investigation minimum count" 1 ((requirementOf investigation).MinimumCount)
         assertEqual "harness investigation producer role" None ((requirementOf investigation).ProducerRole)
         assertEqual "harness investigation applicability" Always investigation.Applicability
@@ -740,7 +752,7 @@ async {
             (harnessResearch.Guards
              |> List.forall (fun guard ->
                  let kind = (requirementOf guard).Kind
-                 kind <> EvidenceKind.Test && kind <> EvidenceKind.Review))
+                 kind <> evidenceKind "test" && kind <> evidenceKind "review"))
 
         do! expectRejected "harness investigation cannot be waived" "is not waivable" (applyTask rootH "TST-921" harnessResearch.StateRevision (WaiveGuard(investigation.Id, None)))
 
@@ -752,13 +764,13 @@ async {
 
         let! researchWorkDone = expectOk "complete opencode research work" (applyTask rootH "TST-921" researchStarted.StateRevision (CompleteWorkItem("W1", { Result = "harness investigated"; EvidenceRefs = [] })))
 
-        let! researchSeedEvidence = expectOk "add non-research evidence for acceptance" (applyTask rootH "TST-921" researchWorkDone.StateRevision (AddEvidence(makeEvidence "E1" EvidenceKind.Test "non-research evidence")))
+        let! researchSeedEvidence = expectOk "add non-research evidence for acceptance" (applyTask rootH "TST-921" researchWorkDone.StateRevision (AddEvidence(makeEvidence "E1" (evidenceKind "test") "non-research evidence")))
 
         let! researchVerified = expectOk "verify harness research acceptance" (applyTask rootH "TST-921" researchSeedEvidence.StateRevision (VerifyAcceptanceCriterion("AC1", [ "E1" ])))
 
         do! expectRejected "harness research completion blocked until investigation evidence exists" "is not satisfied" (applyTask rootH "TST-921" researchVerified.StateRevision (CompleteTask defaultHandoff))
 
-        let! researchEvidenceAdded = expectOk "add harness research investigation evidence" (applyTask rootH "TST-921" researchVerified.StateRevision (AddEvidence(makeEvidence "E2" EvidenceKind.Research "harness investigation recorded")))
+        let! researchEvidenceAdded = expectOk "add harness research investigation evidence" (applyTask rootH "TST-921" researchVerified.StateRevision (AddEvidence(makeEvidence "E2" (evidenceKind "research") "harness investigation recorded")))
 
         let! researchCompleted = expectOk "complete harness research task" (applyTask rootH "TST-921" researchEvidenceAdded.StateRevision (CompleteTask defaultHandoff))
 
@@ -793,7 +805,7 @@ async {
         assertEqual
             "harness overlay materializes strengthened validation"
             2
-            ((requirementOf (guardOfKind EvidenceKind.Test overlaidExec.Guards)).MinimumCount)
+            ((requirementOf (guardOfKind (evidenceKind "test") overlaidExec.Guards)).MinimumCount)
 
         do! expectRejected "harness overlay cannot weaken investigation applicability" "overlay weakens its applicability" (resolveWith "b-harness-weaken-applicability" [ "overlay.json", profileJson HarnessProfileId None [] [ guardJsonWith "investigation" "research" 1 "explicitDecision:coordinator" "notWaivable" ] ])
 

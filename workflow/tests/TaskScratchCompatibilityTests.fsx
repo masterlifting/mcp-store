@@ -20,6 +20,11 @@ let assertContains name (fragment: string) (text: string) =
     if not (text.Contains(fragment, StringComparison.Ordinal)) then
         failwithf "%s: expected '%s' in '%s'" name fragment text
 
+let evidenceKind value =
+    match parseEvidenceKind value with
+    | Ok kind -> kind
+    | Error error -> failwithf "invalid evidence-kind test fixture '%s': %s" value (renderError error)
+
 let expectOk name (result: Async<Result<'a, RuntimeError>>) : Async<'a> =
     async {
         match! result with
@@ -148,7 +153,7 @@ let run () : Async<unit> =
                           Checkpoint = BeforeComplete
                           Requirement =
                             EvidenceRequired
-                                { Kind = EvidenceKind.Test
+                                { Kind = evidenceKind "test"
                                   MinimumCount = 1
                                   ProducerRole = None
                                   RequireIndependentProducer = false }
