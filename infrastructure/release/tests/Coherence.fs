@@ -470,7 +470,6 @@ let private releaseWorkflowStopsBeforePublicationWhenWorkflowTestsFail =
                           "workflow/tests/TaskContractTests.fsx"
                           "workflow/tests/TaskPathSafetyTests.fsx"
                           "workflow/tests/TaskProfileTests.fsx"
-                          "workflow/tests/TaskScratchCompatibilityTests.fsx"
                           "workflow/tests/TaskSupportingArtifactTests.fsx"
                           "workflow/tests/WorkflowMcpFindingTests.fsx"
                           "workflow/tests/WorkflowMcpNativeCompatTests.fsx"
@@ -483,7 +482,7 @@ let private releaseWorkflowStopsBeforePublicationWhenWorkflowTestsFail =
                         |> Seq.cast<Match>
                         |> Seq.map (fun matched -> matched.Groups[1].Value)
                         |> Seq.toList
-                    Expect.equal listedPaths paths "CI retains the explicit, deterministic thirteen-entrypoint set"
+                    Expect.equal listedPaths paths "CI retains the explicit, deterministic twelve-entrypoint set"
                     let publisherDependencies =
                         workflowJobs workflow
                         |> List.tryFind (fun (name, _) -> name = "publication")

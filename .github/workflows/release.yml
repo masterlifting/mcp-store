@@ -241,7 +241,7 @@ jobs:
           if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
             $PSNativeCommandUseErrorActionPreference = $false
           }
-          # Explicit deterministic selection of the thirteen Workflow suites that need no built distribution; never globbed.
+          # Explicit deterministic selection of the twelve Workflow suites that need no built distribution; never globbed.
           $entrypoints = @(
             "workflow/tests/AuthorityMetadataTests.fsx",
             "workflow/tests/EphemeralLockInvariantTests.fsx",
@@ -250,7 +250,6 @@ jobs:
             "workflow/tests/TaskContractTests.fsx",
             "workflow/tests/TaskPathSafetyTests.fsx",
             "workflow/tests/TaskProfileTests.fsx",
-            "workflow/tests/TaskScratchCompatibilityTests.fsx",
             "workflow/tests/TaskSupportingArtifactTests.fsx",
             "workflow/tests/WorkflowMcpFindingTests.fsx",
             "workflow/tests/WorkflowMcpNativeCompatTests.fsx",

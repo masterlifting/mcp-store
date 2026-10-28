@@ -18,7 +18,6 @@ $tests = @(
   "workflow/tests/TaskContractTests.fsx",
   "workflow/tests/TaskPathSafetyTests.fsx",
   "workflow/tests/TaskSupportingArtifactTests.fsx",
-  "workflow/tests/TaskScratchCompatibilityTests.fsx",
   "workflow/tests/TaskProfileTests.fsx",
   "workflow/tests/EphemeralLockInvariantTests.fsx",
   "workflow/tests/AuthorityMetadataTests.fsx",
@@ -34,6 +33,6 @@ foreach ($test in $tests) {
 }
 ```
 
-The three `WorkflowMcp*` process-boundary scripts require an existing Release entry DLL. `PackagedRuntimeCoordinationTests.fsx` otherwise publishes the producer, so set `MCP_WORKFLOW_PACKAGED_DLL` to an already-authorized Release DLL when builds are out of scope. `TaskScratchCompatibilityTests.fsx` invokes the current Windows consumer script read-only; set `OPENCODE_TASKSCRATCH_FSX` to its path when it is not at the current user's standard OpenCode location. The TaskScratch promotion smoke is Windows-only and explicitly skips on Unix hosts; Unix FIFO/socket cases in `TaskSupportingArtifactTests.fsx` are explicitly skipped on Windows hosts.
+The three `WorkflowMcp*` process-boundary scripts require an existing Release entry DLL. `PackagedRuntimeCoordinationTests.fsx` otherwise publishes the producer, so set `MCP_WORKFLOW_PACKAGED_DLL` to an already-authorized Release DLL when builds are out of scope. Unix FIFO/socket cases in `TaskSupportingArtifactTests.fsx` are explicitly skipped on Windows hosts.
 
 `DistributionTests.fsx` invokes the release build and pin-generation scripts, which mutate distribution artifacts; run it only when release-artifact generation is authorized. `MutexAbandonmentHelper.fsx` is a child-process helper for `PackagedRuntimeCoordinationTests.fsx`, and `TaskCreate.fsx`, `TaskGet.fsx`, `TaskApply.fsx`, and `TaskValidate.fsx` are command entrypoints rather than standalone suites.
