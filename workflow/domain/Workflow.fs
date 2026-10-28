@@ -4822,7 +4822,7 @@ module private Domain =
                 let! validId = workItemId id
                 match findWorkItem validId task.WorkItems with
                 | None -> return! Error (InvalidInput $"WorkItem '{validId}' was not found")
-                | Some item when item.State = PendingWork && item.Children.IsEmpty && item.Result.IsNone && item.EvidenceRefs.IsEmpty && item.Owner.IsNone && (flattenItems task.WorkItems).Length > 1 ->
+                | Some ({ Result = None } as item) when item.State = PendingWork && item.Children.IsEmpty && item.EvidenceRefs.IsEmpty && item.Owner.IsNone && (flattenItems task.WorkItems).Length > 1 ->
                     let referencedByHistory =
                         task.Decisions
                         |> List.exists (fun decision ->
@@ -4976,15 +4976,15 @@ module private Domain =
             let after = applyContractPatch task patch
             let snapshot items =
                 findWorkItem id items
-                |> Option.map (fun item ->
+                |> Option.map (fun ({ Id = itemId; Title = title; State = state; Result = result; DependsOn = dependsOn; EvidenceRefs = evidenceRefs; Children = children }: WorkItem) ->
                     JsonSerializer.Serialize
-                        {| id = item.Id
-                           title = item.Title
-                           state = stateName item.State
-                           result = item.Result
-                           dependsOn = item.DependsOn
-                           evidenceRefs = item.EvidenceRefs
-                           children = item.Children |> List.map _.Id |})
+                        {| id = itemId
+                           title = title
+                           state = stateName state
+                           result = result
+                           dependsOn = dependsOn
+                           evidenceRefs = evidenceRefs
+                           children = children |> List.map _.Id |})
                 |> Option.defaultValue "null"
 
             let patchText =

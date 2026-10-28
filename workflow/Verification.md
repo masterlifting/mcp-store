@@ -1,12 +1,55 @@
 # GHI-50 verification evidence
 
 Evidence captured 2026-10-28 on Windows, .NET SDK `11.0.100-rc.1.26425.128`,
-Expecto `10.2.3`. Compared base `33a2fccca29c57f71239acd84926ef8e55f40e4d`
-(tree `f8fd6ced92d95bd4a55476502bcb33dd66604d5a`) with head
-`a54b4711f8be7cc2fad254af3697a3c6dcced61d` plus the documented, uncommitted
-working-tree refinements. This is evidence, not approval or a gate waiver.
+Expecto `10.2.3`. This page distinguishes the historical pre-repair comparison
+from the current repaired working-tree evidence. Neither is merge or release
+approval.
 
-## Results
+## Current post-repair evidence
+
+The full Expecto suite passed: 157/157, 0 ignored, 0 failed, 0 errored, exit 0.
+The native test-DLL command and matching apphost rerun both produced that result.
+The test DLL SHA-256 was
+`525A378B2B433DA3F9D8B91EE9280DC8B00833AD4C4EE196F7C2B1117FF502E0`. At capture
+time, the Workflow Release build (run
+`rJgbwcYXp9yaY8d7_r7OD5imNL-HxOtPSLTwpmvMj24`) and .NET test-project Release
+build (run `NcobS-2umQWXPX5RcSXUFr9Ia3azg6UyLCcQLTtgnfE`) each reported 0
+errors/warnings. MCP run-ID retention is bounded: IDs may expire and are not
+durable public evidence. The test project's build references the .NET producer
+`Mcp.Dotnet.fsproj`, not Workflow; Workflow has its own separate build run above.
+
+The authorized repair restored direct Workflow domain record-pattern bindings,
+moved F# test async work behind one outer caller bridge, and registered the
+exact checker path/shape. Source probing found 0 violations; the bridge occurs
+once at `EvidenceIdentifierV2Tests.fsx:110`. Wrong-path, missing-document,
+historical nine-bridge, and repeated-bridge negative controls remained rejected.
+No checker exemption logic was changed, no broad exemptions were added, and no
+new test cases were added. Eight existing Workflow suites passed: Evidence
+Identifier v2, Workflow, Task Contract, Task Path Safety, Task Supporting
+Artifact, Schema Parity Guard, Task Profile, and Authority Metadata (all exit
+0). These results establish the local repair gate only.
+
+Privacy evidence was filenames-only: the actual `rg -l` procedure on a
+synthetic 12-file fixture emitted three matching paths and no sentinel content;
+the `-n` negative control emitted content. These and the test-DLL hash were
+child-owned console observations, not retained head-gate log transcripts. No
+real user documents were read. The privacy procedure is documented in
+[Cutover.md](Cutover.md); no privacy script was committed and no new automated
+privacy test was added. `.tasks/GHI-50/scripts/CheckerProbe.fsx` was a local,
+non-committed supporting artifact used only for checker scanning; it is not a
+privacy probe or a public, reproducible dependency. Coherence reported 174
+assertions passing. The 157/157 gate, checker-probe, eight FSI suite, and
+Coherence logs are retained under `.tasks/GHI-50/docs/logs/head-gate-*.log`;
+the DLL hash, manual negative controls, and 12-file privacy observations are
+not asserted to have retained transcripts. No process/MCP suites were
+rerun for this follow-up, so prior 13/13 evidence is historical, not a fresh
+claim. No fresh Unix/process coverage is asserted.
+
+## Historical pre-repair comparison
+
+The original comparison was base `33a2fcc` versus pre-repair HEAD
+`bb1aa4c`; both recorded the same 156/157 result and identical 11 checker
+findings. The detailed historical evidence follows.
 
 | Check | Base | Head |
 | --- | --- | --- |
@@ -15,7 +58,7 @@ working-tree refinements. This is evidence, not approval or a gate waiver.
 | Focused Workflow scripts | 4/4 exit 0 | 4/4 exit 0 |
 | Supporting-document edit smoke | Not run at base | 2 runs, exit 0 each; see reproducible manual procedure below |
 
-The full .NET gate remains red at both revisions. On 2026-10-28, the owner
+The full .NET gate was red at both revisions. On 2026-10-28, the owner
 accepted the identical BASE/HEAD 156/157 result as a separately owned baseline
 failure, with a hard gate requiring separate repair before merge or release;
 no suppression or waiver is authorized. Finding-list normalized
@@ -26,13 +69,17 @@ gate and does not imply merge or release approval.
 ## Reproduction and provenance
 
 Build each exact source revision with the dedicated Dotnet MCP `build`
-capability, targeting the test project in Release; its project reference also
-builds the producer project. No raw
+capability, targeting the test project in Release; its project reference builds
+the .NET producer project, not Workflow. No raw
 `dotnet build`/`dotnet test` fallback is part of this procedure. Retained
-baseline test-project build evidence (including the producer project reference): run
-`jjXEFBJAq5kcPfTnOzfyAFYlPWeyCNctXM3BLj40kiU`, 0 errors, 0 warnings. Retained
-head test-project build evidence: run
-`kvp6I6wM-TgUhBoo8odQKWfk63nHC3AS3ujf5iztgao`.
+historical baseline test-project build evidence (including the producer project
+reference): run `jjXEFBJAq5kcPfTnOzfyAFYlPWeyCNctXM3BLj40kiU`, recorded at capture
+as 0 errors, 0 warnings. Historical head test-project build evidence: run
+`kvp6I6wM-TgUhBoo8odQKWfk63nHC3AS3ujf5iztgao`. Those historical run results
+were recorded at capture; run-ID retention is bounded, so details may expire.
+At the later evidence check, the Workflow run ID above returned
+`UNKNOWN_RUN_ID`, while the test-project run ID still resolved. This availability
+is time-dependent; neither ID is durable public evidence.
 The suite is an Expecto console executable; VSTest returned no case counts
 (`trxAvailable=false`), so invoke the built executable with `--summary`.
 
@@ -77,7 +124,7 @@ BLOCK workflow/tests/EvidenceIdentifierV2Tests.fsx:87:135 [Async.RunSynchronousl
 BLOCK workflow/tests/EvidenceIdentifierV2Tests.fsx:94:48 [Async.RunSynchronously]
 ```
 
-## Focused Workflow checks
+### Historical focused Workflow checks
 
 These four existing scripts passed at both revisions:
 
@@ -126,12 +173,12 @@ dotnet fsi --exec --quiet workflow/tests/TaskValidate.fsx <project-root> <TASK-I
 This is an operator procedure, not a claim that these commands were run in
 this comparison. The prior smoke evidence reported two successful repetitions.
 
-## Pending gates and retained evidence
+## Remaining gates and retained evidence
 
-- **Full .NET gate:** owner disposition received 2026-10-28: accept the
-  identical BASE/HEAD findings as a separately owned baseline failure, keep the
-  full gate red, and require separate repair before merge/release. No
-  suppression or waiver. Repair remains outstanding.
+- **Full .NET gate:** the local repair evidence above now satisfies the
+  previously required full 157/157 gate. There was no waiver or suppression;
+  the original owner disposition remains historical policy, not merge/release
+  approval.
 - **Unix verification:** not performed. Docker's Linux engine was unavailable
   (`npipe:////./pipe/dockerDesktopLinuxEngine`); WSL listed only stopped
   `docker-desktop`. No runtime was started or downloaded. Root-leaf read-only

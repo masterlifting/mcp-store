@@ -54,8 +54,9 @@ the following per-OS contract:
 See [cutover inventory and operator checklist](Cutover.md) before adopting a
 producer release or changing any task-root data.
 
-See [GHI-50 verification evidence](Verification.md) for the exact base/head
-gate results and the still-pending verification gates.
+See [GHI-50 verification evidence](Verification.md) for the current post-repair
+157/157 local gate and remaining verification limits. Its historical 156/157 result is
+clearly labeled historical pre-repair evidence, not the current result.
 
 ### Internal runtime dependency qualification
 
@@ -81,11 +82,12 @@ Do not infer additional supported platforms or runtimes.
   same runtime. Prior Windows verification reported 13/13 Workflow scripts
   passed; it is not evidence for the relocated `docs/` FIFO/socket cases or
   `temp/` Unix behavior. Root-leaf read-only and hidden classification is not
-  currently exercised after fixture retirement. The prior .NET Expecto report
-  was 156/157, with
+  currently exercised after fixture retirement. The .NET Expecto report was
+  historically 156/157 before the authorized checker/async repair, with
   checker findings at `Workflow.fs` (4825/4984) and nine bridges in
-  `EvidenceIdentifierV2Tests`. That earlier PR changed behavior as well as
-  documentation; its report is historical, not validation of this revision.
+  `EvidenceIdentifierV2Tests`. The current full 157/157 local result and repair
+  provenance are in [Verification.md](Verification.md); neither establishes
+  Unix coverage or merge/release approval.
 - **Not yet verified Unix configurations:** Linux ARM64, musl-on-Linux,
   macOS x64 / ARM64, BSD variants, Solaris / illumos, and any other
   Unix runtime / architecture that exports `SystemNative_LStat` from a
