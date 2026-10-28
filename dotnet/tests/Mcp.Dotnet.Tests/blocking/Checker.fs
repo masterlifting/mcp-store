@@ -69,7 +69,6 @@ let private topLevelBridgeSites =
           "workflow/tests/WorkflowMcpNativeCompatTests.fsx", [ "|> Async.RunSynchronously" ]
           "workflow/tests/WorkflowMcpFindingTests.fsx", [ "|> Async.RunSynchronously" ]
           "workflow/tests/TaskSupportingArtifactTests.fsx", [ "|> Async.RunSynchronously" ]
-          "workflow/tests/TaskScratchCompatibilityTests.fsx", [ "run () |> Async.RunSynchronously" ]
           "workflow/tests/PackagedRuntimeCoordinationTests.fsx", [ "|> Async.RunSynchronously" ] ]
 
 let isExcludedPath (path: string) =

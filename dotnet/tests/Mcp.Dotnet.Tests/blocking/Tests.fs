@@ -225,19 +225,13 @@ let literalCalls = @"pendingTask.Result pendingTask.Wait()"
                 (violations (checkText "workflow/tests/TaskSupportingArtifactTests.fsx" supportingArtifact))
                 "the documented entry bridge is allowed at the supporting-artifact test entry"
 
-            let taskScratch =
-                "// Standalone entry bridge: FSI owns the process entry for this asynchronous script.\nrun () |> Async.RunSynchronously\n"
-            Expect.isEmpty
-                (violations (checkText "workflow/tests/TaskScratchCompatibilityTests.fsx" taskScratch))
-                "the documented guarded entry bridge is allowed at the TaskScratch test entry"
-
             Expect.equal
                 (violations (checkText "workflow/tests/TaskSupportingArtifactTests.fsx" "|> Async.RunSynchronously\n") |> List.length)
                 1
                 "an undocumented bridge remains blocked"
 
             Expect.equal
-                (violations (checkText "other.fsx" taskScratch) |> List.length)
+                (violations (checkText "other.fsx" supportingArtifact) |> List.length)
                 1
                 "the exact bridge is not allowlisted at another path"
 

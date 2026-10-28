@@ -6,13 +6,27 @@ implementation, and the workflow distribution. Downstream harnesses own their ow
 workflow skill, coordinator decisions, and pinned profile catalog extensions;
 project profiles and overlays live under `<project-root>/.workflow/profiles`.
 Persisted task state is only `.tasks/<TASK-ID>/runtime.json` in strict schema v2;
-legacy layouts and aliases are rejected. Coordination is process-ephemeral, so
-`runtime.lock` is never created or retained. A task directory may also carry
-narrowly allowlisted task-owned supporting material: an optional `SPEC.md`
-regular file and optional `docs/` and `scripts/` directories; nested contents
-under those directories are opaque to Workflow and never followed or scanned.
+legacy layouts and aliases are rejected; `runtime.json` is the sole authority
+for task state. Coordination is process-ephemeral, so `runtime.lock` is never
+created or retained. Task roots allow only `runtime.json` and optional `docs/`,
+`scripts/`, and `temp/` directories. `SPEC.md` is retired. Contents under
+`docs/`, `scripts/`, and `temp/` are opaque to Workflow; retain script sources
+under `scripts/`. Workflow does not follow or scan nested entries.
 Task creation rejects any occupied task directory (allowlisted-only
 prepopulation included), and an already-empty task directory remains reusable.
+
+Before deploying a Workflow producer update, inventory existing task roots,
+including deployment archives or backups, against the new allowlist. If any
+root contains unsupported entries, fail closed and resolve the inventory before
+installing the producer; this producer does not migrate or delete user data.
+Before creating a task-root `temp/` directory, consumers must verify that their
+installed, pinned producer supports it; changing producer source does not
+upgrade a live MCP installation. Cleanup and archive behavior are owned by the
+Workflow producer under mcp-store #14; consumers only invoke the cleaner included
+in a released producer and must not implement recursive deletion. Planned
+cleanup retains `runtime.json` and all of `scripts/` and `docs/`; planned archives
+retain the durable task aggregate and exclude `temp/`. The cleaner is future work
+under #14; this #50 documentation change does not implement it.
 
 ## Task-root file-kind classification
 
@@ -49,16 +63,21 @@ Do not infer additional supported platforms or runtimes.
 
 ### Known verification limits of this producer
 
-- **Verified Unix configuration:** Linux x64 glibc on the official
+- **Historical Unix evidence:** Linux x64 glibc on the official
   `mcr.microsoft.com/dotnet/sdk:11.0.100-rc.1` image pinned to
   `sha256:207b30ec860b1c4edef3bfe33dd7af8d38726533cf5a77cb782006451281872e`
-  (Ubuntu 26.04.1, glibc 2.43, runtime `11.0.0-rc.1.26425.128`).
-  Read-only file / hidden-flag / symlink / FIFO / Unix-domain-socket /
-  read-only `SPEC.md` cases at both `SPEC.md` and `runtime.json`
-  reached their assertions on this configuration; the cancellation
-  response bound (see below) and the no-persistent-`runtime.lock`
-  invariant were exercised against the same runtime. The Windows 13/13
-  Workflow suites and the .NET Expecto 151/151 suite are also green.
+  (Ubuntu 26.04.1, glibc 2.43, runtime `11.0.0-rc.1.26425.128`) is historical
+  evidence from the previous test layout, not verification of the current
+  layout. In that layout, the read-only-file assertion was for root `SPEC.md`,
+  not `runtime.json`; prior Unix assertions also covered hidden-flag, symlink,
+  FIFO, and Unix-domain-socket cases. The cancellation response bound (see
+  below) and no-persistent-`runtime.lock` invariant were exercised against the
+  same runtime. Current verification is Windows: 13/13 Workflow scripts passed.
+  The relocated `docs/` FIFO/socket cases and `temp/` Unix behavior have not
+  been rerun on Unix. The .NET Expecto suite reports 156/157; its unchanged
+  baseline checker failure remains at `Workflow.fs` (4825/4984) and
+  `EvidenceIdentifierV2Tests` (nine bridges), outside this documentation
+  change.
 - **Not yet verified Unix configurations:** Linux ARM64, musl-on-Linux,
   macOS x64 / ARM64, BSD variants, Solaris / illumos, and any other
   Unix runtime / architecture that exports `SystemNative_LStat` from a

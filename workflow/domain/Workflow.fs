@@ -6126,25 +6126,7 @@ module private DirectoryBoundary =
             Error(PersistenceFailure $"could not open directory boundary: {error.Message}")
         | :? ArgumentException as error -> Error(PersistenceFailure $"could not open directory boundary: {error.Message}")
 
-// Classify the type of a task-root leaf. Windows uses FileAttributes (the
-// existing non-directory / non-reparse rule). On Unix, .NET's FileAttributes
-// does not encode the underlying file kind: FIFOs, sockets, character
-// devices, and block devices all map to Normal in release/11.0
-// FileStatus.Unix.cs.GetAttributes, so a Normal-based gate would let an
-// attacker plant a FIFO at the supporting SPEC.md path and stall the
-// workflow inside the mutex critical section on the next open/read. The
-// classification instead uses the .NET 11 runtime's native stat shim
-// `libSystem.Native!SystemNative_LStat`, which is documented as the
-// shim over lstat(2) in
-// release/11.0/src/native/libs/System.Native/pal_io.c:277-288 and
-// declared in
-// release/11.0/src/libraries/Common/src/Interop/Unix/System.Native/Interop.Stat.cs:65-66
-// with StringMarshalling.Utf8. The output is the normalized sequential
-// FileStatus from pal_io.h:17-38; only Mode is consumed, and only the
-// POSIX S_IFREG bit is checked, so the runtime—not Workflow—owns every
-// libc / architecture / kernel-layout translation. `SystemNative_LStat`
-// is an internal runtime export; this is documented in the producer
-// README and re-validated whenever the .NET runtime baseline changes.
+// Unix FileAttributes maps FIFOs to Normal, so lstat prevents a planted FIFO from stalling the mutex-held read.
 module private FileKind =
     [<Literal>]
     let private S_IFMT = 0xF000
@@ -6589,18 +6571,7 @@ let private loadTaskLenient path = readTaskLenient path
 
 let private loadTaskWith (profiles: Map<string, EffectiveProfile>) path = readTaskWith profiles path
 
-// Task-owned supporting material is narrowly allowlisted at the task root:
-// the runtime sidecar, an optional SPEC.md regular file, and optional `docs/`
-// and `scripts/` directories. Nested contents under those directories are
-// opaque to Workflow and never followed; legacy `runtime.lock`, `TASK.md`,
-// and root `references/` layouts stay unsupported. The file-kind classifier
-// is `FileKind.isRegularFile`, which uses the .NET 11
-// `SystemNative_LStat` shim on Unix and the existing FileAttributes rule on
-// Windows, so FIFOs, sockets, and devices fail closed at the immediate root
-// without opening or blocking on them. A missing or layout-mismatched native
-// shim is reported as `PersistenceFailure`; per-entry native failures
-// (missing path, permission denied) are mapped to "unsupported entry" so
-// the outer operation can continue.
+// Nested task-root contents stay opaque so validation never follows user-controlled files or directories.
 let private validateTaskDirectory (taskDirectory: string) : Result<unit, RuntimeError> =
     let comparison =
         if OperatingSystem.IsWindows() then StringComparison.OrdinalIgnoreCase else StringComparison.Ordinal
@@ -6612,6 +6583,7 @@ let private validateTaskDirectory (taskDirectory: string) : Result<unit, Runtime
             Ok(
                 String.Equals(entryName, "docs", comparison)
                 || String.Equals(entryName, "scripts", comparison)
+                || String.Equals(entryName, "temp", comparison)
             )
         else
             match FileKind.isRegularFile entryPath with
@@ -6619,8 +6591,7 @@ let private validateTaskDirectory (taskDirectory: string) : Result<unit, Runtime
             | Ok isRegular ->
                 Ok(
                     isRegular
-                    && (String.Equals(entryName, SidecarFileName, comparison)
-                        || String.Equals(entryName, "SPEC.md", comparison))
+                    && String.Equals(entryName, SidecarFileName, comparison)
                 )
 
     try
