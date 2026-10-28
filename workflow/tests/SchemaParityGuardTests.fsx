@@ -10,7 +10,8 @@
 //   2. the discriminated command, contract-patch, and reconciliation-plan
 //      variant sets are complete and recurse to every nested schema;
 //   3. every published finite vocabulary round-trips through the public parser
-//      and every parser union case is represented in the published vocabulary.
+//      and every parser union case is represented in the published vocabulary,
+//      except the internal-only decision audit form the producer does not publish.
 //
 // It uses only System.Text.Json and FSharp.Reflection; there is no external
 // package or package-system dependency.
@@ -369,8 +370,10 @@ expectOk "parseReopenTarget task" (parseReopenTarget "task")
 
 assertEqual "ReopenTarget union case count" 4 (unionCount typeof<ReopenTarget>)
 
-// Decision targets: the ten structured prefix forms. The parser joins nested
-// reopenTask targets with ';' (Workflow.decisionTargetToString/parseReopenTargets).
+// Decision targets: the nine published structured prefix forms. The parser joins
+// nested reopenTask targets with ';' (Workflow.decisionTargetToString/parseReopenTargets).
+// The workItemPatch form is an internal-only audit target: the producer never
+// publishes it, so the public vocabulary is exactly the published oneOf array.
 let decisionTargetOneOf = addDecision.["properties"].["targets"].["items"].["oneOf"].AsArray()
 
 let decisionTargetSamples =
@@ -379,13 +382,12 @@ let decisionTargetSamples =
       "skipWorkItem:W1.2"
       "requirementChange:W3"
       "contractPatch:objective text"
-      "workItemPatch:W3.4"
       "reopenTask:T-1|acceptance:AC1;workItem:W2.3;guard:G4"
       "questionResolution:Q2"
       "reclassify:reclassified"
       "other:manual-note" ]
 
-assertEqual "DecisionTarget variant count" 10 decisionTargetOneOf.Count
+assertEqual "DecisionTarget variant count" 9 decisionTargetOneOf.Count
 
 for index in 0 .. decisionTargetOneOf.Count - 1 do
     let pattern = decisionTargetOneOf.[index].["pattern"].GetValue<string>()
@@ -394,7 +396,7 @@ for index in 0 .. decisionTargetOneOf.Count - 1 do
     expectOk $"parseDecisionTarget {sample}" (parseDecisionTarget sample)
 
 assertEqual "DecisionTarget union case count" 10 (unionCount typeof<DecisionTarget>)
-let reopenTaskPattern = decisionTargetOneOf.[6].["pattern"].GetValue<string>()
+let reopenTaskPattern = decisionTargetOneOf.[5].["pattern"].GetValue<string>()
 assertTrue
     "reopenTask encodes targets with semicolon"
     (Regex.IsMatch("reopenTask:T-1|acceptance:AC1;workItem:W2", reopenTaskPattern))

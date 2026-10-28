@@ -57,6 +57,29 @@ be created with:
 Omit `profile` only if the producer's default is intended and available; to
 test a selected profile, supply its exact ID from the pinned catalog.
 
+## Decision target boundary
+
+On a fresh Draft fixture with only `W1`, capture the task bytes and
+`stateRevision`, then submit this public command:
+
+```json
+{"type":"add-decision","kind":"userDecision","targets":["workItemPatch:W2"],"rationale":"Check runtime-only target rejection"}
+```
+
+Expect rejection because `workItemPatch` is runtime-generated audit provenance,
+not an `add-decision` input. Verify no Decision was added, the revision is
+unchanged, and the persisted task bytes exactly match the captured bytes. Then
+add `W2` using the Draft `addWorkItem` command from the next section and retry a
+public decision using an ordinary public target such as `other:operator-review`;
+that input remains accepted. Do not use `workItemPatch` as caller input even
+after `W2` exists.
+
+On a separate disposable Baselined fixture, use a normal authorized WorkItem
+patch flow to generate its audit Decision. Read, restart/reload, and read again
+to confirm the runtime-generated `workItemPatch` target and audit Decision are
+preserved by history decoding and replay. These are operator steps, not executed
+verification evidence.
+
 ## Contract patch checks
 
 For every call below, obtain the latest state revision with `task_get` first.

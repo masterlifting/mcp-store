@@ -3734,6 +3734,13 @@ module private Domain =
             if draft.Targets.IsEmpty then
                 return! Error (InvalidInput "a decision requires at least one target")
 
+            if draft.Targets |> List.exists (function | WorkItemPatchTarget _ -> true | _ -> false) then
+                return!
+                    Error(
+                        InvalidInput
+                            "workItemPatch targets are runtime-generated audit provenance and cannot be supplied to add-decision"
+                    )
+
             let! targets = draft.Targets |> List.map (validateDecisionTarget task) |> collectResults
 
             return

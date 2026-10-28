@@ -274,6 +274,10 @@ accepted writes are sorted. Baselined WorkItem patches retain the exact
 in a Decision rationale containing the normalized patch and before/after item
 snapshots. Reusing an authorization Decision leaves it unchanged and creates a
 fresh Coordinator application audit Decision; it does not create User authority.
+`workItemPatch:<id>` is runtime-generated audit provenance, not a public
+`add-decision` input. Historical Decisions containing this target remain
+decodable and are preserved during load and replay; other public Decision target
+forms are unchanged.
 Physical removal is prevented when retained decisions reference the item, and
 an ID named by patch history cannot be reused. Draft patches do not create
 contract revisions or patch audit decisions. Every successful command advances
