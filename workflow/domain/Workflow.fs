@@ -268,6 +268,12 @@ type AcceptanceDraft =
     { Id: string
       Text: string }
 
+type WorkItemDraft =
+    { Id: string
+      Title: string
+      ParentId: string option
+      DependsOn: string list }
+
 [<RequireQualifiedAccess>]
 type ContractPatch =
     | AddAcceptanceCriterion of AcceptanceDraft
@@ -278,6 +284,10 @@ type ContractPatch =
     | SetObjective of string
     | SetScope of string
     | SetNonGoals of string
+    | AddWorkItem of WorkItemDraft
+    | UpdateWorkItem of string * string
+    | RemoveWorkItem of string
+    | SetDependencies of string * string list
 
 // reconciliation is not a special authority path. Restoring the
 // recorded canonical contract is Coordinator-authorized and fingerprint-verified;
@@ -302,6 +312,7 @@ type ReopenTarget =
     | AcceptanceCriterionTarget of string
     | WorkItemTarget of string
     | GuardTarget of string
+    | TaskTarget
 
 // Terminal completion handoff prose, structurally validated only.
 type TerminalHandoff =
@@ -943,6 +954,7 @@ let private reopenTargetToString target =
     | ReopenTarget.AcceptanceCriterionTarget id -> $"acceptance:{id}"
     | ReopenTarget.WorkItemTarget id -> $"workItem:{id}"
     | ReopenTarget.GuardTarget id -> $"guard:{id}"
+    | ReopenTarget.TaskTarget -> "task"
 
 let decisionTargetToString target =
     match target with
@@ -988,14 +1000,16 @@ let renderAuthorityMetadata (metadata: AuthorityMetadata) : JsonNode =
 // Reopen targets are encoded as 'acceptance:<AC-id>', 'workItem:<W-id>', or
 // 'guard:<G-id>'; the domain validates id format/existence.
 let parseReopenTarget (value: string) : Result<ReopenTarget, RuntimeError> =
-    if value.StartsWith("acceptance:", StringComparison.Ordinal) then
+    if value = "task" then
+        Ok ReopenTarget.TaskTarget
+    elif value.StartsWith("acceptance:", StringComparison.Ordinal) then
         Ok(ReopenTarget.AcceptanceCriterionTarget(value.Substring("acceptance:".Length).Trim()))
     elif value.StartsWith("workItem:", StringComparison.Ordinal) then
         Ok(ReopenTarget.WorkItemTarget(value.Substring("workItem:".Length).Trim()))
     elif value.StartsWith("guard:", StringComparison.Ordinal) then
         Ok(ReopenTarget.GuardTarget(value.Substring("guard:".Length).Trim()))
     else
-        Error (InvalidInput "reopen target must be 'acceptance:<AC-id>', 'workItem:<W-id>', or 'guard:<G-id>'")
+        Error (InvalidInput "reopen target must be 'task', 'acceptance:<AC-id>', 'workItem:<W-id>', or 'guard:<G-id>'")
 
 let private parseReopenTargets (value: string) =
     let parts =
@@ -1160,6 +1174,10 @@ let contractPatchIdOf (patch: ContractPatch) =
         | ContractPatch.SetObjective text -> [ "setObjective"; text ]
         | ContractPatch.SetScope text -> [ "setScope"; text ]
         | ContractPatch.SetNonGoals text -> [ "setNonGoals"; text ]
+        | ContractPatch.AddWorkItem item -> [ "addWorkItem"; item.Id; item.Title; item.ParentId |> Option.defaultValue ""; item.DependsOn.Length |> string ] @ item.DependsOn
+        | ContractPatch.UpdateWorkItem (id, title) -> [ "updateWorkItem"; id; title ]
+        | ContractPatch.RemoveWorkItem id -> [ "removeWorkItem"; id ]
+        | ContractPatch.SetDependencies (id, dependencies) -> [ "setDependencies"; id; dependencies.Length |> string ] @ dependencies
 
     parts |> List.map segment |> String.concat "|" |> sha256Hex
 
@@ -3389,6 +3407,7 @@ module private Domain =
 
                 return ReopenTarget.GuardTarget valid
             }
+        | ReopenTarget.TaskTarget -> Ok ReopenTarget.TaskTarget
 
     let private validateReopenRequest (task: TaskModel) (request: ReopenRequest) =
         result {
@@ -3401,6 +3420,9 @@ module private Domain =
 
             if (Set.ofList targets).Count <> targets.Length then
                 return! Error (InvalidInput "reopen targets must be unique")
+
+            if List.contains ReopenTarget.TaskTarget targets && targets <> [ ReopenTarget.TaskTarget ] then
+                return! Error (InvalidInput "task reopen target must be the only target")
 
             return { request with Reason = reason; Targets = targets }
         }
@@ -4748,6 +4770,76 @@ module private Domain =
             nonEmpty "contract scope" text |> Result.map ContractPatch.SetScope
         | ContractPatch.SetNonGoals text ->
             nonEmpty "contract nonGoals" text |> Result.map ContractPatch.SetNonGoals
+        | ContractPatch.AddWorkItem draft ->
+            result {
+                let! id = workItemId draft.Id
+                let! title = nonEmpty "work item title" draft.Title
+                let! dependencies = draft.DependsOn |> List.map workItemId |> collectResults
+                let! parent =
+                    match draft.ParentId with
+                    | None -> Ok None
+                    | Some parentId -> workItemId parentId |> Result.map Some
+                if findWorkItem id task.WorkItems |> Option.isSome then return! Error (InvalidInput $"WorkItem '{id}' already exists")
+                if dependencies.Length <> (Set.ofList dependencies).Count then return! Error (InvalidInput "dependencies must be unique")
+                match parent with
+                | None when id.Contains '.' -> return! Error (InvalidInput "root WorkItem id must not contain a hierarchical suffix")
+                | Some parentId when not (id.StartsWith(parentId + ".", StringComparison.Ordinal)) || id.Substring(parentId.Length + 1).Contains '.' -> return! Error (InvalidInput "child WorkItem id must identify its immediate parent")
+                | Some parentId ->
+                    match findWorkItem parentId task.WorkItems with
+                    | None -> return! Error (InvalidInput $"parent WorkItem '{parentId}' was not found")
+                    | Some item when item.State <> PendingWork && item.State <> ActiveWork -> return! Error (InvalidTransition "parent must be pending or active")
+                    | _ -> ()
+                | _ -> ()
+                return ContractPatch.AddWorkItem { Id = id; Title = title; ParentId = parent; DependsOn = dependencies |> List.sort }
+            }
+        | ContractPatch.UpdateWorkItem (id, title) ->
+            result {
+                let! validId = workItemId id
+                let! validTitle = nonEmpty "work item title" title
+                match findWorkItem validId task.WorkItems with
+                | None -> return! Error (InvalidInput $"WorkItem '{validId}' was not found")
+                | Some item when item.State <> PendingWork -> return! Error (InvalidTransition "only pending WorkItems may be updated")
+                | Some item when item.Title = validTitle -> return! Error (InvalidInput "work item update must change the title")
+                | _ -> return ContractPatch.UpdateWorkItem(validId, validTitle)
+            }
+        | ContractPatch.RemoveWorkItem id ->
+            result {
+                let! validId = workItemId id
+                match findWorkItem validId task.WorkItems with
+                | None -> return! Error (InvalidInput $"WorkItem '{validId}' was not found")
+                | Some item when item.State = PendingWork && item.Children.IsEmpty && item.Result.IsNone && item.EvidenceRefs.IsEmpty && item.Owner.IsNone && (flattenItems task.WorkItems).Length > 1 ->
+                    let referencedByHistory =
+                        task.Decisions
+                        |> List.exists (fun decision ->
+                            decision.Targets
+                            |> List.exists (function
+                                | SkipWorkItemTarget target
+                                | RequirementChangeTarget target -> target = validId
+                                | ReopenTaskTarget (_, targets) -> targets |> List.exists (function ReopenTarget.WorkItemTarget target -> target = validId | _ -> false)
+                                | _ -> false))
+                    let referencedByPolicy =
+                        (task.Guards |> List.exists (fun guard -> guard.Target = WorkItemTarget validId))
+                        || (task.Questions |> List.exists (fun question -> match question.Impact with WorkItems ids -> List.contains validId ids | TaskWide -> false))
+                    let hasIncomingDependency =
+                        flattenItems task.WorkItems
+                        |> List.exists (fun candidate -> candidate.Id <> validId && List.contains validId candidate.DependsOn)
+                    if referencedByHistory then return! Error (InvalidTransition "a WorkItem referenced by historical decision targets cannot be removed")
+                    elif referencedByPolicy then return! Error (InvalidTransition "a WorkItem referenced by a guard or question cannot be removed")
+                    elif hasIncomingDependency then return! Error (InvalidTransition "a WorkItem with dependent WorkItems cannot be removed")
+                    else return ContractPatch.RemoveWorkItem validId
+                | _ -> return! Error (InvalidTransition "only a non-last, unowned, evidence-free pending leaf may be removed")
+            }
+        | ContractPatch.SetDependencies (id, dependencies) ->
+            result {
+                let! validId = workItemId id
+                let! validDependencies = dependencies |> List.map workItemId |> collectResults
+                match findWorkItem validId task.WorkItems with
+                | None -> return! Error (InvalidInput $"WorkItem '{validId}' was not found")
+                | Some item when item.State <> PendingWork -> return! Error (InvalidTransition "dependencies may change only on pending WorkItems")
+                | Some item when item.DependsOn = (validDependencies |> List.sort) -> return! Error (InvalidInput "dependency update must change the dependency set")
+                | Some _ when (Set.ofList validDependencies).Count <> validDependencies.Length -> return! Error (InvalidInput "dependencies must be unique")
+                | Some _ -> return ContractPatch.SetDependencies(validId, validDependencies |> List.sort)
+            }
 
     // a Draft guard removal is limited to task-design guards;
     // profile-materialized obligations are never manually deleted.
@@ -4776,6 +4868,10 @@ module private Domain =
         | ContractPatch.SetObjective _
         | ContractPatch.SetScope _
         | ContractPatch.SetNonGoals _ -> Ok MinimumAuthority.UserAuthority
+        | ContractPatch.AddWorkItem _
+        | ContractPatch.UpdateWorkItem _
+        | ContractPatch.RemoveWorkItem _
+        | ContractPatch.SetDependencies _ -> Ok MinimumAuthority.CoordinatorAuthority
 
     let private applyContractPatch (task: TaskModel) (patch: ContractPatch) =
         match patch with
@@ -4829,6 +4925,16 @@ module private Domain =
         | ContractPatch.SetObjective text -> { task with Objective = text }
         | ContractPatch.SetScope text -> { task with Scope = text }
         | ContractPatch.SetNonGoals text -> { task with NonGoals = text }
+        | ContractPatch.AddWorkItem draft ->
+            let item = { Id = draft.Id; Title = draft.Title; State = PendingWork; Result = None; AcceptanceRefs = task.AcceptanceCriteria |> List.map _.Id; DependsOn = draft.DependsOn; Owner = None; EvidenceRefs = []; Children = [] }
+            match draft.ParentId with
+            | None -> { task with WorkItems = task.WorkItems @ [ item ] }
+            | Some parent -> { task with WorkItems = mapWorkItem parent (fun (current: WorkItem) -> { current with Children = current.Children @ [ item ] }) task.WorkItems }
+        | ContractPatch.UpdateWorkItem (id, title) -> { task with WorkItems = mapWorkItem id (fun item -> { item with Title = title }) task.WorkItems }
+        | ContractPatch.RemoveWorkItem id ->
+            let rec remove (items: WorkItem list) = items |> List.choose (fun (item: WorkItem) -> if item.Id = id then None else Some { item with Children = remove item.Children })
+            { task with WorkItems = remove task.WorkItems }
+        | ContractPatch.SetDependencies (id, dependencies) -> { task with WorkItems = mapWorkItem id (fun item -> { item with DependsOn = dependencies }) task.WorkItems }
 
     let private decideCommand (now: DateTimeOffset) (task: TaskModel) command =
         match command with
@@ -4979,9 +5085,10 @@ module private Domain =
                         else
                             MinimumAuthority.CoordinatorAuthority
 
-                    // reopening must leave the completion predicate
-                    // false; a no-op reopen would silently rewrite terminal state.
-                    if not (canCompleteTask (applyReopen task validRequest)) then
+                    let taskLifecycleReopen = validRequest.Targets = [ ReopenTarget.TaskTarget ]
+
+                    // Task lifecycle reopen archives the handoff without changing contract obligations.
+                    if taskLifecycleReopen || not (canCompleteTask (applyReopen task validRequest)) then
                         match
                             authorize
                                 now
@@ -5010,35 +5117,38 @@ module private Domain =
                 match validateContractPatch task patch with
                 | Error error -> Error [ error ]
                 | Ok validPatch ->
-                    match task.ContractState with
-                    | Draft ->
-                        // ordinary Coordinator invocation is sufficient
-                        // before baseline; draft edits create no contractRevision history.
-                        match validateDraftGuardRemoval task validPatch with
-                        | Error error -> Error [ error ]
-                        | Ok() -> Ok [ ContractPatchApplied(validPatch, false) ]
-                    | Baselined ->
-                        match baselinedPatchAuthority validPatch with
-                        | Error error -> Error [ error ]
-                        | Ok minimumAuthority ->
-                            // the exact patch payload is the authorization
-                            // target, not the revision the patch will create.
-                            let target = ContractPatchTarget(contractPatchIdOf validPatch)
-
-                            match
-                                authorize
-                                    now
-                                    task
-                                    "task_apply.apply-contract-patch"
-                                    ContractRevision
-                                    target
-                                    minimumAuthority
-                                    decisionRef
-                            with
+                    match validateWorkTreeDependencies (applyContractPatch task validPatch).WorkItems with
+                    | Error error -> Error [ error ]
+                    | Ok() ->
+                        match task.ContractState with
+                        | Draft ->
+                            // ordinary Coordinator invocation is sufficient
+                            // before baseline; draft edits create no contractRevision history.
+                            match validateDraftGuardRemoval task validPatch with
                             | Error error -> Error [ error ]
-                            | Ok (ReuseDecision _) -> Ok [ ContractPatchApplied(validPatch, true) ]
-                            | Ok (NewDecision decision) ->
-                                Ok [ DecisionAdded decision; ContractPatchApplied(validPatch, true) ]
+                            | Ok() -> Ok [ ContractPatchApplied(validPatch, false) ]
+                        | Baselined ->
+                            match baselinedPatchAuthority validPatch with
+                            | Error error -> Error [ error ]
+                            | Ok minimumAuthority ->
+                                // the exact patch payload is the authorization
+                                // target, not the revision the patch will create.
+                                let target = ContractPatchTarget(contractPatchIdOf validPatch)
+
+                                match
+                                    authorize
+                                        now
+                                        task
+                                        "task_apply.apply-contract-patch"
+                                        ContractRevision
+                                        target
+                                        minimumAuthority
+                                        decisionRef
+                                with
+                                | Error error -> Error [ error ]
+                                | Ok (ReuseDecision _) -> Ok [ ContractPatchApplied(validPatch, true) ]
+                                | Ok (NewDecision decision) ->
+                                    Ok [ DecisionAdded decision; ContractPatchApplied(validPatch, true) ]
         | ContractPatchApplied _ ->
             Error
                 [ InvalidInput "contract patch events are produced by decide and cannot be applied as commands" ]

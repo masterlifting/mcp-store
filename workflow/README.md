@@ -246,3 +246,38 @@ leave the record untouched.
 Producer-side contract, monotonic overlay semantics, guard keys, capability
 envelope, and authority algorithms remain mechanically enforced and are not
 relaxed by this release.
+
+## Work-item contract patches and task reopen
+
+`task_apply` supports four additional `apply-contract-patch` operations:
+`addWorkItem` (`id`, `title`, optional `parentId`, optional `dependsOn`),
+`updateWorkItem` (`id`, `title`), `removeWorkItem` (`id`), and
+`setDependencies` (`id`, `dependsOn`). These are closed operations, not a
+generic JSON patch. Work-item IDs are canonical and unique; a child ID must
+identify its immediate parent. Added work is pending, inherits current
+acceptance references, and can only be placed below pending/active ancestry.
+Only pending work can be renamed or have dependencies replaced; no-op updates,
+duplicate dependencies, unknown references, self/ancestor/descendant links, and
+dependency cycles are rejected. Removal is limited to a non-last pending leaf
+with no result, evidence, explicit owner, incoming dependency, guard/question
+reference, or historical decision target.
+
+These operations preserve existing work-item state and history. On Baselined
+tasks they are Coordinator-authorized `ContractRevision` patches (+1
+`contractRevision`); Draft patches do not create contract revisions. Every
+successful command advances `stateRevision` once; rejected/stale-CAS commands
+persist nothing. Existing scope and obligation amendments retain their User
+authority requirement; this producer does not infer bounded remediation from
+titles and has no trusted User-authority ingress.
+
+Reopen accepts the exact singleton target `task` and only for completed tasks.
+It is a Coordinator-authorized lifecycle operation, preserves all records and
+archives the terminal handoff using the existing reopen behavior, and does not
+change `contractRevision`. Aborted tasks, mixed/duplicate targets, nonterminal
+tasks, and repeated/no-op reopen attempts are rejected. Historical decision
+targets remain decodable after reopening. Other reopen targets and aborted-task
+authority rules are unchanged.
+
+See [manual verification](docs/ManualVerification.md) for reproducible positive,
+negative, stale-CAS, lifecycle, history, and authority checks. Those instructions
+are not evidence that the steps were executed.
