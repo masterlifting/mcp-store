@@ -246,3 +246,58 @@ leave the record untouched.
 Producer-side contract, monotonic overlay semantics, guard keys, capability
 envelope, and authority algorithms remain mechanically enforced and are not
 relaxed by this release.
+
+## Work-item contract patches and task reopen
+
+`task_apply` supports four additional `apply-contract-patch` operations:
+`addWorkItem` (`id`, `title`, optional `parentId`, optional `dependsOn`),
+`updateWorkItem` (`id`, `title`), `removeWorkItem` (`id`), and
+`setDependencies` (`id`, `dependsOn`). These are closed operations, not a
+generic JSON patch. Work-item IDs are canonical and unique; a child ID must
+identify its immediate parent. Added work is pending, inherits current
+acceptance references, and can only be placed below pending/active ancestry.
+Only pending work can be renamed or have dependencies replaced; no-op updates,
+duplicate dependencies, unknown references, self/ancestor/descendant links, and
+dependency cycles are rejected. Removal is limited to a non-last pending leaf
+with no result, evidence, explicit owner, incoming dependency, guard/question
+reference, or historical decision target.
+
+These operations preserve existing work-item state and history. On Baselined
+tasks, adding work and strict dependency-set strengthening (old dependencies
+are a subset of the new set) are Coordinator-authorized. Renaming/removing work
+and any dependency edit that drops an old prerequisite, including mixed add/drop,
+require an existing trusted User decision and fail closed because this producer
+has no User-authority ingress. Duplicate dependency requests are rejected before
+set comparison; equal sets are rejected even when input order differs, and
+accepted writes are sorted. Baselined WorkItem patches retain the exact
+`contractPatch:<hash>` authorization target plus `workItemPatch:<id>` provenance
+in a Decision rationale containing the normalized patch and before/after item
+snapshots. Reusing an authorization Decision leaves it unchanged and creates a
+fresh Coordinator application audit Decision; it does not create User authority.
+`workItemPatch:<id>` is runtime-generated audit provenance, not a public
+`add-decision` input. Historical Decisions containing this target remain
+decodable and are preserved during load and replay; other public Decision target
+forms are unchanged.
+Physical removal is prevented when retained decisions reference the item, and
+an ID named by patch history cannot be reused. Draft patches do not create
+contract revisions or patch audit decisions. Every successful command advances
+`stateRevision` once; rejected/stale-CAS commands persist nothing.
+
+Older hash-only candidate decisions remain verbatim and are not reconstructed;
+their missing item history cannot be inferred. Removal remains fail-closed when
+User authority is unavailable. The additive target vocabulary may be rejected
+by older producers, so adopt/rollback only within the isolated candidate and
+backup procedure; do not cut over active consumers or alter published state.
+
+Reopen accepts the exact singleton target `task` only for completed tasks.
+It is a Coordinator-authorized lifecycle operation, preserves all records and
+archives the terminal handoff using the existing reopen behavior, and does not
+change `contractRevision`. Aborted tasks reject `task` structural reopen before
+authorization; use targeted remediation and re-verification instead.
+Mixed/duplicate targets, nonterminal tasks, and repeated/no-op reopen attempts
+are rejected. Historical decision targets remain decodable after reopening;
+targeted reopen authorization is unchanged.
+
+See [manual verification](docs/ManualVerification.md) for reproducible positive,
+negative, stale-CAS, lifecycle, history, and authority checks. Those instructions
+are not evidence that the steps were executed.
