@@ -26,7 +26,7 @@ Workflow producer under mcp-store #14; consumers only invoke the cleaner include
 in a released producer and must not implement recursive deletion. Planned
 cleanup retains `runtime.json` and all of `scripts/` and `docs/`; planned archives
 retain the durable task aggregate and exclude `temp/`. The cleaner is future work
-under #14; this #50 documentation change does not implement it.
+under #14; this #50 change does not implement it.
 
 ## Task-root file-kind classification
 
@@ -51,6 +51,12 @@ the following per-OS contract:
   path, permission denied) are mapped to "unsupported entry" so the
   outer operation can continue.
 
+See [cutover inventory and operator checklist](Cutover.md) before adopting a
+producer release or changing any task-root data.
+
+See [GHI-50 verification evidence](Verification.md) for the exact base/head
+gate results and the still-pending verification gates.
+
 ### Internal runtime dependency qualification
 
 `SystemNative_LStat` is an **internal runtime export**, not a
@@ -72,12 +78,14 @@ Do not infer additional supported platforms or runtimes.
   not `runtime.json`; prior Unix assertions also covered hidden-flag, symlink,
   FIFO, and Unix-domain-socket cases. The cancellation response bound (see
   below) and no-persistent-`runtime.lock` invariant were exercised against the
-  same runtime. Current verification is Windows: 13/13 Workflow scripts passed.
-  The relocated `docs/` FIFO/socket cases and `temp/` Unix behavior have not
-  been rerun on Unix. The .NET Expecto suite reports 156/157; its unchanged
-  baseline checker failure remains at `Workflow.fs` (4825/4984) and
-  `EvidenceIdentifierV2Tests` (nine bridges), outside this documentation
-  change.
+  same runtime. Prior Windows verification reported 13/13 Workflow scripts
+  passed; it is not evidence for the relocated `docs/` FIFO/socket cases or
+  `temp/` Unix behavior. Root-leaf read-only and hidden classification is not
+  currently exercised after fixture retirement. The prior .NET Expecto report
+  was 156/157, with
+  checker findings at `Workflow.fs` (4825/4984) and nine bridges in
+  `EvidenceIdentifierV2Tests`. That earlier PR changed behavior as well as
+  documentation; its report is historical, not validation of this revision.
 - **Not yet verified Unix configurations:** Linux ARM64, musl-on-Linux,
   macOS x64 / ARM64, BSD variants, Solaris / illumos, and any other
   Unix runtime / architecture that exports `SystemNative_LStat` from a

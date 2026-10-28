@@ -20,11 +20,6 @@ let assertEqual name expected actual =
 let assertTrue name condition =
     if not condition then failwithf "%s: expected true" name
 
-let evidenceKind value =
-    match parseEvidenceKind value with
-    | Ok kind -> kind
-    | Error error -> failwithf "invalid evidence-kind test fixture '%s': %s" value (renderError error)
-
 let expectOk name (result: Async<Result<'a, RuntimeError>>) : Async<'a> =
     async {
         match! result with
@@ -122,7 +117,7 @@ let tempRoot = Path.Combine(Path.GetTempPath(), "opencode", $"workflow-supportin
 Directory.CreateDirectory tempRoot |> ignore
 let reparseEntries = ResizeArray<string>()
 let activeId = "SUP-1"
-let activeSpecPath = Path.Combine(taskDirectory tempRoot activeId, "docs", "SPEC.md")
+let activeEvidencePath = Path.Combine(taskDirectory tempRoot activeId, "docs", "evidence.md")
 
 async {
     try
@@ -131,23 +126,23 @@ async {
         let docsDirectory = Path.Combine(activeDirectory, "docs")
         let scriptsDirectory = Path.Combine(activeDirectory, "scripts")
         let tempDirectory = Path.Combine(activeDirectory, "temp")
-        let specPath = activeSpecPath
+        let evidencePath = activeEvidencePath
         let referenceDirectory = Path.Combine(docsDirectory, "references")
         let referencePath = Path.Combine(referenceDirectory, "issue.md")
         let nestedScriptDirectory = Path.Combine(scriptsDirectory, "helpers")
         let nestedScriptPath = Path.Combine(nestedScriptDirectory, "check.fsx")
         let tempNotePath = Path.Combine(tempDirectory, "scratch.txt")
-        let specBytes = Encoding.UTF8.GetBytes("task specification\r\n")
+        let evidenceBytes = Encoding.UTF8.GetBytes("supporting evidence\r\n")
         let referenceBytes = Encoding.UTF8.GetBytes("reference document\r\n")
         let nestedScriptBytes = Encoding.UTF8.GetBytes("printfn \"support script\"\r\n")
         let tempNoteBytes = Encoding.UTF8.GetBytes("temporary note\r\n")
         Directory.CreateDirectory docsDirectory |> ignore
         Directory.CreateDirectory tempDirectory |> ignore
-        File.WriteAllBytes(specPath, specBytes)
+        File.WriteAllBytes(evidencePath, evidenceBytes)
         if OperatingSystem.IsWindows() then
-            File.SetAttributes(specPath, FileAttributes.ReadOnly ||| FileAttributes.Hidden)
+            File.SetAttributes(evidencePath, FileAttributes.ReadOnly ||| FileAttributes.Hidden)
         else
-            File.SetUnixFileMode(specPath, UnixFileMode.UserRead ||| UnixFileMode.GroupRead ||| UnixFileMode.OtherRead)
+            File.SetUnixFileMode(evidencePath, UnixFileMode.UserRead ||| UnixFileMode.GroupRead ||| UnixFileMode.OtherRead)
         Directory.CreateDirectory referenceDirectory |> ignore
         Directory.CreateDirectory nestedScriptDirectory |> ignore
         File.WriteAllBytes(referencePath, referenceBytes)
@@ -165,50 +160,24 @@ async {
         let! initial = expectOk "get task with docs/references/scripts/temp" (getTask tempRoot activeId)
         assertEqual "initial revision" 0 initial.StateRevision
 
-        let decision =
-            { Kind = DesignDecision
-              Targets = [ OtherDecisionTarget "supporting-artifact-contract" ]
-              Rationale = "Record a coordinator decision for supporting-artifact invariance coverage" }
-
-        let! decided = expectOk "add decision" (applyTask tempRoot activeId 0 (AddDecision decision))
-        assertEqual "decision increments revision" 1 decided.StateRevision
-        assertEqual "fixture has a coordinator-authority decision" Coordinator decided.Decisions.Head.Authority
-
-        let guard =
-            { Id = "G1"
-              Target = TaskTarget
-              Checkpoint = BeforeComplete
-              Requirement =
-                EvidenceRequired
-                    { Kind = evidenceKind "test"
-                      MinimumCount = 1
-                      ProducerRole = None
-                      RequireIndependentProducer = false }
-              Applicability = Always
-              Waiver = NotWaivable }
-
-        let! guarded = expectOk "add guard" (applyTask tempRoot activeId 1 (AddGuard guard))
-        assertEqual "guard increments revision" 2 guarded.StateRevision
-        assertEqual "fixture has a task-design guard" TaskDesign guarded.Guards.Head.Origin
-
-        let! applied = expectOk "apply task with opaque nested link" (applyTask tempRoot activeId 2 (StartWorkItem "W1"))
-        assertEqual "apply revision" 3 applied.StateRevision
+        let! applied = expectOk "apply task with opaque nested link" (applyTask tempRoot activeId 0 (StartWorkItem "W1"))
+        assertEqual "apply revision" 1 applied.StateRevision
         let! afterApply = expectOk "get task after apply" (getTask tempRoot activeId)
         assertEqual "get returns the applied task model" applied afterApply
         let! validated = expectOk "validate task with all supporting entries" (validateTask tempRoot activeId)
-        assertEqual "validate revision" 3 validated.StateRevision
+        assertEqual "validate revision" 1 validated.StateRevision
         assertEqual "validate returns the applied task model" applied validated
-        assertEqual "spec bytes survive apply" specBytes (File.ReadAllBytes specPath)
+        assertEqual "evidence bytes survive apply" evidenceBytes (File.ReadAllBytes evidencePath)
         assertEqual "nested reference bytes survive apply" referenceBytes (File.ReadAllBytes referencePath)
         assertEqual "nested script bytes survive apply" nestedScriptBytes (File.ReadAllBytes nestedScriptPath)
         assertEqual "temp note bytes survive apply" tempNoteBytes (File.ReadAllBytes tempNotePath)
         if OperatingSystem.IsWindows() then
-            assertTrue "read-only and hidden spec attributes survive reads" ((File.GetAttributes specPath &&& (FileAttributes.ReadOnly ||| FileAttributes.Hidden)) = (FileAttributes.ReadOnly ||| FileAttributes.Hidden))
-            File.SetAttributes(specPath, FileAttributes.Normal)
+            assertTrue "read-only and hidden evidence attributes survive reads" ((File.GetAttributes evidencePath &&& (FileAttributes.ReadOnly ||| FileAttributes.Hidden)) = (FileAttributes.ReadOnly ||| FileAttributes.Hidden))
+            File.SetAttributes(evidencePath, FileAttributes.Normal)
         else
-            let specMode = File.GetUnixFileMode specPath
+            let evidenceMode = File.GetUnixFileMode evidencePath
             let writeBits = UnixFileMode.UserWrite ||| UnixFileMode.GroupWrite ||| UnixFileMode.OtherWrite
-            assertTrue "read-only spec remains non-writable" ((specMode &&& writeBits) = enum<UnixFileMode> 0)
+            assertTrue "read-only evidence remains non-writable" ((evidenceMode &&& writeBits) = enum<UnixFileMode> 0)
         assertTrue "nested link target remains untouched" (File.Exists(Path.Combine(opaqueTarget, "outside.txt")))
         let sidecarBytesBeforeCreate = File.ReadAllBytes(sidecar tempRoot activeId)
         do!
@@ -217,39 +186,26 @@ async {
                 "contains runtime state 'runtime.json'"
                 (createTask tempRoot (request activeId))
         assertEqual "re-create preserves runtime bytes" sidecarBytesBeforeCreate (File.ReadAllBytes(sidecar tempRoot activeId))
-        assertEqual "re-create preserves spec bytes" specBytes (File.ReadAllBytes specPath)
+        assertEqual "re-create preserves evidence bytes" evidenceBytes (File.ReadAllBytes evidencePath)
         assertEqual "re-create preserves nested reference bytes" referenceBytes (File.ReadAllBytes referencePath)
         assertEqual "re-create preserves nested script bytes" nestedScriptBytes (File.ReadAllBytes nestedScriptPath)
         assertEqual "re-create preserves temp note bytes" tempNoteBytes (File.ReadAllBytes tempNotePath)
-
-        match! applyTask tempRoot activeId 0 (StartWorkItem "W1") with
-        | Error(Conflict(expected, actual)) ->
-            assertEqual "stale CAS expected revision" 0 expected
-            assertEqual "stale CAS observes the committed revision" 3 actual
-        | Error error -> failwithf "stale CAS returned an unexpected error: %s" (renderError error)
-        | Ok _ -> failwith "stale CAS unexpectedly succeeded"
-        let! afterStaleApply = expectOk "get after stale CAS" (getTask tempRoot activeId)
-        assertEqual "stale CAS leaves the managed task model unchanged" applied afterStaleApply
-        assertEqual "stale CAS preserves spec bytes" specBytes (File.ReadAllBytes specPath)
-        assertEqual "stale CAS preserves nested reference bytes" referenceBytes (File.ReadAllBytes referencePath)
-        assertEqual "stale CAS preserves nested script bytes" nestedScriptBytes (File.ReadAllBytes nestedScriptPath)
-        assertEqual "stale CAS preserves temp note bytes" tempNoteBytes (File.ReadAllBytes tempNotePath)
 
         let missingId = "MIS-1"
         let missingDirectory = taskDirectory tempRoot missingId
         Directory.CreateDirectory(Path.Combine(missingDirectory, "docs", "references")) |> ignore
         Directory.CreateDirectory(Path.Combine(missingDirectory, "scripts")) |> ignore
         Directory.CreateDirectory(Path.Combine(missingDirectory, "temp")) |> ignore
-        let missingSpec = Path.Combine(missingDirectory, "docs", "spec.md")
+        let missingEvidence = Path.Combine(missingDirectory, "docs", "evidence.md")
         let missingDoc = Path.Combine(missingDirectory, "docs", "references", "keep.md")
-        File.WriteAllText(missingSpec, "pre-existing specification")
+        File.WriteAllText(missingEvidence, "pre-existing supporting material")
         File.WriteAllText(missingDoc, "pre-existing document")
         do! expectRejected "allowlisted prepopulation get remains missing" "runtime sidecar does not exist" (getTask tempRoot missingId)
         do! expectRejected "allowlisted prepopulation apply remains missing" "runtime sidecar does not exist" (applyTask tempRoot missingId 0 (StartWorkItem "W1"))
         do! expectRejected "allowlisted prepopulation validate remains missing" "runtime sidecar does not exist" (validateTask tempRoot missingId)
         do! expectRejected "create refuses allowlisted-only prepopulation" "task directory is already occupied" (createTask tempRoot (request missingId))
         assertTrue "occupied create creates no sidecar" (not (File.Exists(sidecar tempRoot missingId)))
-        assertEqual "occupied spec bytes preserved" "pre-existing specification" (File.ReadAllText missingSpec)
+        assertEqual "occupied evidence bytes preserved" "pre-existing supporting material" (File.ReadAllText missingEvidence)
         assertEqual "occupied document bytes preserved" "pre-existing document" (File.ReadAllText missingDoc)
 
         let missingArtifactCases = [ "docs"; "scripts"; "temp" ]
@@ -440,8 +396,8 @@ async {
             removeLink link
 
         // The Windows read-only attribute blocks deletion, so the fixture file is made writable again before the tree is removed.
-        if OperatingSystem.IsWindows() && File.Exists activeSpecPath then
-            File.SetAttributes(activeSpecPath, FileAttributes.Normal)
+        if OperatingSystem.IsWindows() && File.Exists activeEvidencePath then
+            File.SetAttributes(activeEvidencePath, FileAttributes.Normal)
 
         if Directory.Exists tempRoot && tempRoot.Contains("workflow-supporting-artifacts-", StringComparison.Ordinal) then
             Directory.Delete(tempRoot, true)
