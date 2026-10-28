@@ -72,12 +72,19 @@ In `task_apply` arguments, wrap the command shown as
   its pending work item; the first material start establishes the contract
   baseline. Read with `task_get` to confirm Baselined state and current
   revisions before patching.
-  Apply `updateWorkItem`, `setDependencies`, eligible `removeWorkItem`, and
-  `addWorkItem` with no `decisionRef`. The Coordinator patch path auto-mints
-  its matching decision. Verify each success advances `stateRevision` and
-  `contractRevision` by one and leaves the fingerprint unchanged.
+  Apply `addWorkItem` without `decisionRef`; it should succeed as a
+  Coordinator-authorized patch. A dependency-only strengthening should also
+  succeed without a reference. `updateWorkItem`, eligible `removeWorkItem`, and
+  any dependency edit that drops an old prerequisite (including mixed add/drop)
+  must fail closed for missing trusted User authority. `add-decision` cannot
+  manufacture User authority. Where an authorized User ingress exists, verify
+  the successful patch advances both revisions once and retains the exact patch
+  hash and WorkItem target in readable rationale with before/after snapshots;
+  reusing a decision should preserve it and append an audit Decision linked by
+  `authorizedBy`.
 - Reject duplicate/malformed/non-immediate IDs, terminal parent, non-pending
-  rename, no-op title/dependency set, duplicate/unknown/self/ancestor/descendant
+  rename, no-op title, duplicate dependencies, equal dependency sets supplied in
+  different orders, unknown/self/ancestor/descendant
   dependency and a cycle. Reject removal of the last, active/done/owned/
   evidenced/result-bearing, non-leaf, incoming-dependency, or
   history-referenced item. Verify no rejected request persists a revision or
@@ -116,7 +123,10 @@ is still subject to its invalidation requirement and authorization. Read and
 validate the reopened record, including historical reopen decision target
 decoding.
 
-Attempt an obligation/scope amendment without trusted User authority; expect a
-fail-closed structured authority error with required authority/remediation
-details. `add-decision` cannot manufacture User authority. Do not perform a live
-cutover or treat any of these instructions as executed verification evidence.
+Attempt an obligation/scope amendment and a Baselined WorkItem weakening without
+trusted User authority; expect a fail-closed structured authority error with
+required authority/remediation details. Test a mixed dependency add/drop to
+confirm it is weakening. On an aborted fixture, verify singleton `task` reopen
+is rejected structurally before authorization; targeted remediation followed
+by re-verification is the supported composition. Do not perform a live cutover
+or treat these instructions as executed verification evidence.

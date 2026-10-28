@@ -263,20 +263,36 @@ with no result, evidence, explicit owner, incoming dependency, guard/question
 reference, or historical decision target.
 
 These operations preserve existing work-item state and history. On Baselined
-tasks they are Coordinator-authorized `ContractRevision` patches (+1
-`contractRevision`); Draft patches do not create contract revisions. Every
-successful command advances `stateRevision` once; rejected/stale-CAS commands
-persist nothing. Existing scope and obligation amendments retain their User
-authority requirement; this producer does not infer bounded remediation from
-titles and has no trusted User-authority ingress.
+tasks, adding work and strict dependency-set strengthening (old dependencies
+are a subset of the new set) are Coordinator-authorized. Renaming/removing work
+and any dependency edit that drops an old prerequisite, including mixed add/drop,
+require an existing trusted User decision and fail closed because this producer
+has no User-authority ingress. Duplicate dependency requests are rejected before
+set comparison; equal sets are rejected even when input order differs, and
+accepted writes are sorted. Baselined WorkItem patches retain the exact
+`contractPatch:<hash>` authorization target plus `workItemPatch:<id>` provenance
+in a Decision rationale containing the normalized patch and before/after item
+snapshots. Reusing an authorization Decision leaves it unchanged and creates a
+fresh Coordinator application audit Decision; it does not create User authority.
+Physical removal is prevented when retained decisions reference the item, and
+an ID named by patch history cannot be reused. Draft patches do not create
+contract revisions or patch audit decisions. Every successful command advances
+`stateRevision` once; rejected/stale-CAS commands persist nothing.
 
-Reopen accepts the exact singleton target `task` and only for completed tasks.
+Older hash-only candidate decisions remain verbatim and are not reconstructed;
+their missing item history cannot be inferred. Removal remains fail-closed when
+User authority is unavailable. The additive target vocabulary may be rejected
+by older producers, so adopt/rollback only within the isolated candidate and
+backup procedure; do not cut over active consumers or alter published state.
+
+Reopen accepts the exact singleton target `task` only for completed tasks.
 It is a Coordinator-authorized lifecycle operation, preserves all records and
 archives the terminal handoff using the existing reopen behavior, and does not
-change `contractRevision`. Aborted tasks, mixed/duplicate targets, nonterminal
-tasks, and repeated/no-op reopen attempts are rejected. Historical decision
-targets remain decodable after reopening. Other reopen targets and aborted-task
-authority rules are unchanged.
+change `contractRevision`. Aborted tasks reject `task` structural reopen before
+authorization; use targeted remediation and re-verification instead.
+Mixed/duplicate targets, nonterminal tasks, and repeated/no-op reopen attempts
+are rejected. Historical decision targets remain decodable after reopening;
+targeted reopen authorization is unchanged.
 
 See [manual verification](docs/ManualVerification.md) for reproducible positive,
 negative, stale-CAS, lifecycle, history, and authority checks. Those instructions

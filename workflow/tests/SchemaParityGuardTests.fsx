@@ -369,7 +369,7 @@ expectOk "parseReopenTarget task" (parseReopenTarget "task")
 
 assertEqual "ReopenTarget union case count" 4 (unionCount typeof<ReopenTarget>)
 
-// Decision targets: the nine structured prefix forms. The parser joins nested
+// Decision targets: the ten structured prefix forms. The parser joins nested
 // reopenTask targets with ';' (Workflow.decisionTargetToString/parseReopenTargets).
 let decisionTargetOneOf = addDecision.["properties"].["targets"].["items"].["oneOf"].AsArray()
 
@@ -379,12 +379,13 @@ let decisionTargetSamples =
       "skipWorkItem:W1.2"
       "requirementChange:W3"
       "contractPatch:objective text"
+      "workItemPatch:W3.4"
       "reopenTask:T-1|acceptance:AC1;workItem:W2.3;guard:G4"
       "questionResolution:Q2"
       "reclassify:reclassified"
       "other:manual-note" ]
 
-assertEqual "DecisionTarget variant count" 9 decisionTargetOneOf.Count
+assertEqual "DecisionTarget variant count" 10 decisionTargetOneOf.Count
 
 for index in 0 .. decisionTargetOneOf.Count - 1 do
     let pattern = decisionTargetOneOf.[index].["pattern"].GetValue<string>()
@@ -392,8 +393,8 @@ for index in 0 .. decisionTargetOneOf.Count - 1 do
     assertTrue $"decision target pattern {index}" (Regex.IsMatch(sample, pattern))
     expectOk $"parseDecisionTarget {sample}" (parseDecisionTarget sample)
 
-assertEqual "DecisionTarget union case count" 9 (unionCount typeof<DecisionTarget>)
-let reopenTaskPattern = decisionTargetOneOf.[5].["pattern"].GetValue<string>()
+assertEqual "DecisionTarget union case count" 10 (unionCount typeof<DecisionTarget>)
+let reopenTaskPattern = decisionTargetOneOf.[6].["pattern"].GetValue<string>()
 assertTrue
     "reopenTask encodes targets with semicolon"
     (Regex.IsMatch("reopenTask:T-1|acceptance:AC1;workItem:W2", reopenTaskPattern))
