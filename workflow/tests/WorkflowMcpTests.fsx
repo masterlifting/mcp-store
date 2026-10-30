@@ -371,7 +371,7 @@ async {
     assertEqual "tools/list id" 2 (listed.["id"].GetValue<int>())
     let tools = (resultOf "tools/list" listed).["tools"].AsArray()
     let toolNames = tools |> Seq.map (fun tool -> nodeString tool.["name"]) |> List.ofSeq
-    assertEqual "tools/list names" [ "task_create"; "task_get"; "task_apply"; "task_validate" ] toolNames
+    assertEqual "tools/list names" [ "task_create"; "task_get"; "task_apply"; "task_clean"; "task_validate" ] toolNames
     let applyTool = tools |> Seq.find (fun tool -> nodeString tool.["name"] = "task_apply")
     let toolsJson = (resultOf "tools/list" listed).["tools"].ToJsonString()
     let! secondListed = send secondMcp "independent client tools/list" 25 "tools/list" (jobj [])

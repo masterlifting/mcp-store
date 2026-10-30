@@ -6872,4 +6872,146 @@ let validateTask root id : Async<Result<TaskModel, RuntimeError>> =
                     | findings -> return Error(InvalidTransition(findings |> String.concat "; "))
     }
 
+[<RequireQualifiedAccess>]
+type CleanOperation =
+    | Cleanup
+    | Archive
+
+type CleanResult =
+    { TaskId: string
+      Operation: CleanOperation
+      StateRevision: int
+      ArchivePath: string option }
+
+let private cleanPathComparison = if OperatingSystem.IsWindows() then StringComparison.OrdinalIgnoreCase else StringComparison.Ordinal
+
+let private cleanEntryOptions = EnumerationOptions(RecurseSubdirectories = false, AttributesToSkip = enum<FileAttributes> 0, IgnoreInaccessible = false)
+
+let private cleanAttributes (path: string) =
+    let attributes = File.GetAttributes path
+    let target = if attributes.HasFlag FileAttributes.Directory then DirectoryInfo(path) :> FileSystemInfo else FileInfo(path) :> FileSystemInfo
+    if attributes.HasFlag FileAttributes.ReparsePoint || not (isNull target.LinkTarget) then
+        raise (IOException $"link or reparse point is not allowed: {path}")
+    attributes
+
+let private cleanContained (root: string) (path: string) =
+    let fullRoot = Path.GetFullPath root
+    let fullPath = Path.GetFullPath path
+    let prefix = fullRoot.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + string Path.DirectorySeparatorChar
+    if not (fullPath.StartsWith(prefix, cleanPathComparison)) then raise (IOException $"path escapes task directory: {fullPath}")
+    fullPath
+
+let rec private cleanTree (root: string) (path: string) =
+    let path = cleanContained root path
+    let attributes = cleanAttributes path
+    if attributes.HasFlag FileAttributes.Directory then
+        for entry in Directory.EnumerateFileSystemEntries(path, "*", cleanEntryOptions) do cleanTree root entry
+        Directory.Delete(path, false)
+    else
+        File.Delete path
+
+let rec private inspectCleanTree root path =
+    let path = cleanContained root path
+    let attributes = cleanAttributes path
+    if attributes.HasFlag FileAttributes.Directory then
+        for entry in Directory.EnumerateFileSystemEntries(path, "*", cleanEntryOptions) do inspectCleanTree root entry
+
+let private validateTaskRoot requireTemporaryAbsent (taskDirectory: string) =
+    let allowed = [ "runtime.json"; "docs"; "scripts"; "temp" ]
+    let entries = Directory.EnumerateFileSystemEntries(taskDirectory, "*", cleanEntryOptions) |> Seq.toList
+    for entry in entries do
+        let name = Path.GetFileName entry
+        if not (allowed |> List.exists (fun expected -> String.Equals(expected, name, cleanPathComparison))) then
+            raise (IOException $"unsupported task root entry: {name}")
+        let attrs = cleanAttributes entry
+        let runtime = String.Equals(name, SidecarFileName, cleanPathComparison)
+        if runtime = attrs.HasFlag FileAttributes.Directory then raise (IOException $"task root entry has an unsupported type: {name}")
+    if not (entries |> List.exists (fun path -> String.Equals(Path.GetFileName path, SidecarFileName, cleanPathComparison))) then
+        raise (FileNotFoundException("task root is missing runtime.json"))
+    if requireTemporaryAbsent && entries |> List.exists (fun path -> String.Equals(Path.GetFileName path, "temp", cleanPathComparison)) then
+        raise (IOException "temporary directory remained after cleanup")
+    for entry in entries do
+        if not (String.Equals(Path.GetFileName entry, "temp", cleanPathComparison)) then inspectCleanTree taskDirectory entry
+
+let private deleteTemporary taskDirectory =
+    let temp = Path.Combine(taskDirectory, "temp")
+    if Directory.Exists temp then
+        cleanAttributes temp |> ignore
+        for entry in Directory.EnumerateFileSystemEntries(temp, "*", cleanEntryOptions) do cleanTree temp entry
+    elif File.Exists temp then
+        cleanAttributes temp |> ignore
+        raise (IOException "temporary entry is not a directory")
+
+let private pathEntryExists (path: string) =
+    try
+        File.GetAttributes path |> ignore
+        true
+    with
+    | :? FileNotFoundException -> false
+    | :? DirectoryNotFoundException -> false
+
+let cleanTask root requestedTaskId operation : Async<Result<CleanResult, RuntimeError>> =
+    async {
+        match sidecarPath root requestedTaskId with
+        | Error error -> return Error error
+        | Ok(sidecar, taskDirectory) ->
+            return! withLock sidecar (fun () -> async {
+                try
+                    let taskResult =
+                        try
+                            let json = File.ReadAllText sidecar
+                            Dto.fromJson json |> Result.bind (Domain.fromDto Map.empty false)
+                        with
+                        | :? FileNotFoundException as error -> Error(NotFound error.Message)
+                        | :? DirectoryNotFoundException as error -> Error(NotFound error.Message)
+                        | :? IOException as error -> Error(PersistenceFailure error.Message)
+                        | :? UnauthorizedAccessException as error -> Error(PersistenceFailure error.Message)
+                    match taskResult with
+                    | Error error -> return Error error
+                    | Ok task when task.Id <> requestedTaskId -> return Error(InvalidInput "runtime task identity does not match requested task")
+                    | Ok task ->
+                        let eligible = task.Lifecycle = "complete" || task.Lifecycle = "aborted"
+                        if not eligible then return Error(InvalidTransition "cleanup requires a complete or aborted task")
+                        elif operation = CleanOperation.Archive && task.Lifecycle <> "complete" then
+                            return Error(InvalidTransition "archive requires a complete task")
+                        else
+                            try
+                                validateTaskRoot false taskDirectory
+                                let archive = operation = CleanOperation.Archive
+                                let tasksDirectory = Path.GetDirectoryName taskDirectory
+                                let archives = Path.Combine(tasksDirectory, "archives")
+                                let destination = Path.Combine(archives, requestedTaskId)
+                                if archive then
+                                    if pathEntryExists archives then
+                                        let attrs = cleanAttributes archives
+                                        if not (attrs.HasFlag FileAttributes.Directory) then raise (IOException "archives path is not a directory")
+                                    if pathEntryExists destination then raise (IOException "archive destination already exists")
+                                if archive then
+                                    Directory.CreateDirectory archives |> ignore
+                                    cleanAttributes archives |> ignore
+                                deleteTemporary taskDirectory
+                                if not archive then
+                                    return Ok { TaskId = task.Id; Operation = operation; StateRevision = task.StateRevision; ArchivePath = None }
+                                else
+                                    let temp = Path.Combine(taskDirectory, "temp")
+                                    if Directory.Exists temp then
+                                        cleanAttributes temp |> ignore
+                                        if Directory.EnumerateFileSystemEntries(temp, "*", cleanEntryOptions) |> Seq.isEmpty |> not then
+                                            raise (IOException "temporary directory is not empty after cleanup")
+                                        Directory.Delete(temp, false)
+                                    validateTaskRoot true taskDirectory
+                                    if pathEntryExists destination then raise (IOException "archive destination already exists")
+                                    Directory.Move(taskDirectory, destination)
+                                    return Ok { TaskId = task.Id; Operation = operation; StateRevision = task.StateRevision; ArchivePath = Some destination }
+                            with
+                            | :? FileNotFoundException as error -> return Error(NotFound error.Message)
+                            | :? DirectoryNotFoundException as error -> return Error(NotFound error.Message)
+                            | :? IOException as error -> return Error(PersistenceFailure error.Message)
+                            | :? UnauthorizedAccessException as error -> return Error(PersistenceFailure error.Message)
+                with
+                | :? IOException as error -> return Error(PersistenceFailure error.Message)
+                | :? UnauthorizedAccessException as error -> return Error(PersistenceFailure error.Message)
+            })
+    }
+
 let renderError error = errorMessage error

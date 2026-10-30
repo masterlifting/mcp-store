@@ -1,17 +1,7 @@
 // role: test entrypoint
-// Recursive schema/parser parity guard.
-//
-// This script parses the inline `tools` JSON literal published by
-// workflow/protocol/Mcp.fs and proves the published schemas stay
-// parser-equivalent for every machine-expressible call structure:
-//
-//   1. every object that declares `additionalProperties:false` together with a
-//      `required` list names every required property in its `properties`;
-//   2. the discriminated command, contract-patch, and reconciliation-plan
-//      variant sets are complete and recurse to every nested schema;
-//   3. every published finite vocabulary round-trips through the public parser
-//      and every parser union case is represented in the published vocabulary,
-//      except the internal-only decision audit form the producer does not publish.
+// Checks required-property subsets in the published tools schema; it does not
+// establish schema/parser behavioral parity. Broader parity automation is deferred
+// pending operator approval.
 //
 // It uses only System.Text.Json and FSharp.Reflection; there is no external
 // package or package-system dependency.
