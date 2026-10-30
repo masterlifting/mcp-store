@@ -2,9 +2,7 @@ module WorkflowAdapter
 
 open Workflow
 
-// This is a typed library boundary over the existing runtime operations. It does
-// not add semantics, persistence, authority, or effect execution; callers still
-// receive the same TaskModel/RuntimeError results as the underlying runtime.
+// Task operations remain a typed library boundary over the existing runtime.
 type CreateOperation =
     { Root: string
       ProfileId: string option
@@ -24,6 +22,11 @@ type ValidateOperation =
     { Root: string
       TaskId: string }
 
+type CleanRequest =
+    { Root: string
+      TaskId: string
+      Operation: CleanOperation }
+
 type Operation =
     | CreateTask of CreateOperation
     | GetTask of GetOperation
@@ -39,3 +42,7 @@ let execute operation : Async<Result<TaskModel, RuntimeError>> =
     | ApplyTask request ->
         applyTask request.Root request.TaskId request.ExpectedStateRevision request.Command
     | ValidateTask request -> validateTask request.Root request.TaskId
+
+let executeClean (request: CleanRequest) : Async<Result<CleanResult, RuntimeError>> =
+    // Cleanup has an operation-specific result rather than a task snapshot.
+    cleanTask request.Root request.TaskId request.Operation

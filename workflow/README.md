@@ -14,11 +14,14 @@ changes nor generated artifacts update a consumer's installed producer or pin.
 `.tasks/<TASK-ID>/runtime.json` in strict schema v2 is the sole task-state
 authority. The task root permits only four entry names/kinds: a regular
 `runtime.json` file and optional `docs/`, `scripts/`, and `temp/` directories. Their nested
-contents are opaque to Workflow; it neither scans nor follows nested entries.
+contents are opaque to ordinary task operations. Cleanup/archive inspect nested
+entries according to their safety rules.
 `scripts/` holds all task-authored script sources, including one-off sources;
 `docs/` holds durable supporting materials and evidence, not authoritative
 contract; and `temp/` is a disposable execution workspace for results. Workflow
-does not run or classify scripts and provides no cleanup or archive operation.
+does not run or classify scripts. `task_clean` removes temporary content or
+moves a completed task directory to the archive; see
+[Cleaner.md](docs/Cleaner.md) for its contract and manual qualification.
 Creation rejects an occupied task root, including one containing only permitted
 entries. No persistent lock file is used.
 
