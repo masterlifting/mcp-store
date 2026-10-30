@@ -58,6 +58,28 @@ producer.
 
 ## Current operations
 
+`task_get` remains the full task read. `task_status` returns a compact,
+lenient projection (`validation: notChecked`) with task ID, state and contract
+revisions, kind, profile, lifecycle, contract state, and counts by WorkItem
+state. It does not return task prose, history, evidence, decisions, or the tree.
+`task_ready` requires strict registry-backed profile/contract validation; a
+valid Draft task is accepted, while a missing, unknown, or drifted profile is
+rejected regardless of contract state. Contract fingerprint drift is meaningful
+only after the task is baselined. It
+returns `validation: valid`, task ID and revisions, plus tree-order pending
+WorkItems with `startable` and typed blockers. Blocker fields are exact by type:
+`dependency`, `guard`, and `question` have `type` and `id`; `lifecycle` has
+`type` and `state`; `ancestorState` has `type`, `id` (the ancestor WorkItem ID),
+and `state`; `ancestorQuestion` has `type`, `id` (the question ID), and
+`ancestorId`; `denial` has only `type` and is used when a start denial has no
+typed readiness blocker. Ancestor eligibility does not introduce dependency or
+guard checks on ancestors.
+Ready pagination defaults to offset 0/limit 25, accepts limits 1–100, evaluates
+eligibility only for the selected page, and limits each item's visible blockers to 20
+while reporting totals/truncation and the next offset. A projection reads one
+synchronized snapshot and does not persist, evolve, emit events, or reserve
+eligibility; `task_apply` remains authoritative.
+
 Evidence-kind identifiers are opaque, 1–64-character ASCII identifiers that
 start with a lowercase letter and contain nonempty hyphen-separated segments of
 lowercase letters and digits. They are compared exactly: Workflow does not trim,

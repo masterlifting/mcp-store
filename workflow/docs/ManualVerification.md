@@ -57,6 +57,29 @@ be created with:
 Omit `profile` only if the producer's default is intended and available; to
 test a selected profile, supply its exact ID from the pinned catalog.
 
+## Compact projections
+
+On the disposable task, call `task_status` and verify it returns only
+`validation: notChecked`, `taskId`, `stateRevision`, `contractRevision`, `kind`,
+`profile`, `lifecycle`, `contractState`, and fixed WorkItem progress counts.
+Confirm no title/prose, history, evidence, decisions, or WorkItem tree is
+included. This status read is lenient and must not mutate the task.
+
+Call `task_ready` with no pagination arguments and verify strict registry-backed
+validation plus a tree-order `pending` list. Each item contains `workItemId`,
+`startable`, and typed blockers; confirm dependencies, guards, open questions,
+lifecycle, and ancestor state/question cases as available in disposable
+fixtures. Missing, unknown, or drifted profiles must reject the read even when
+the task contract is Draft. A valid Draft task with a valid profile remains
+startable; contract fingerprint drift is meaningful only after baselining.
+There is no Draft profile state. Add enough pending items to verify offset/limit pagination
+(default 0/25, maximum limit 100), `total`, `nextOffset`, revisions, and the
+20-blocker per-item cap with total/truncation indicators. A later valid
+`task_apply` start is authoritative; the projection does not reserve eligibility.
+Compare task bytes and revisions before/after both reads to verify no persistence
+or event/revision side effects. These steps are candidate smoke instructions, not
+execution evidence.
+
 ## Decision target boundary
 
 On a fresh Draft fixture with only `W1`, capture the task bytes and

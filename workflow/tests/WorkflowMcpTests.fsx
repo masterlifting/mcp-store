@@ -2,7 +2,8 @@
 // Deterministic coverage for the platform-internal Workflow MCP boundary:
 // the native stdio handshake and tool surface, transport parity with the retained library and
 // CLI paths, structured results, bounded failures, workspace validation,
-// expected-revision CAS, and the absence of authority/receipt/effect ingress.
+// expected-revision CAS, bounded ready pagination, canonical start-decision
+// parity, and the absence of authority/receipt/effect ingress.
 // Every child process is a fixed repository script or producer artifact; there is no LLM, network, or model dependency.
 // Plain FSI harness because the frozen solution forbids
 // adding a project/package system.
@@ -311,6 +312,32 @@ let applyArgs root revision command =
           "expectedStateRevision", jint revision
           "command", command ]
 
+let applyArgsFor root taskId revision command =
+    jobj
+        [ "projectRoot", jstr root
+          "taskId", jstr taskId
+          "expectedStateRevision", jint revision
+          "command", command ]
+
+let workItemArgs id title dependsOn =
+    jobj
+        [ "id", jstr id
+          "title", jstr title
+          "dependsOn", jarr (dependsOn |> List.map jstr)
+          "children", jarr [] ]
+
+let createArgsFor root taskId workItems =
+    jobj
+        [ "projectRoot", jstr root
+          "taskId", jstr taskId
+          "title", jstr "MCP boundary task"
+          "kind", jstr "execution"
+          "acceptanceCriteria", jarr [ jobj [ "id", jstr "AC1"; "text", jstr "MCP boundary verified" ] ]
+          "workItems", jarr workItems ]
+
+let pendingOf (projection: JsonNode) =
+    projection.["pending"].AsArray() |> Seq.map (fun item -> item.AsObject()) |> Seq.toList
+
 let tempRoot =
     Path.Combine(Path.GetTempPath(), "opencode", $"taskruntime-mcp-tests-{Guid.NewGuid():N}")
 
@@ -371,7 +398,10 @@ async {
     assertEqual "tools/list id" 2 (listed.["id"].GetValue<int>())
     let tools = (resultOf "tools/list" listed).["tools"].AsArray()
     let toolNames = tools |> Seq.map (fun tool -> nodeString tool.["name"]) |> List.ofSeq
-    assertEqual "tools/list names" [ "task_create"; "task_get"; "task_apply"; "task_clean"; "task_validate" ] toolNames
+    assertEqual
+        "tools/list names"
+        [ "task_create"; "task_status"; "task_ready"; "task_get"; "task_apply"; "task_clean"; "task_validate" ]
+        toolNames
     let applyTool = tools |> Seq.find (fun tool -> nodeString tool.["name"] = "task_apply")
     let toolsJson = (resultOf "tools/list" listed).["tools"].ToJsonString()
     let! secondListed = send secondMcp "independent client tools/list" 25 "tools/list" (jobj [])
@@ -475,6 +505,213 @@ async {
 
     let! validated = callTool mcp "task_validate" 6 "task_validate" (getArgs tempRoot)
     expectToolOk "task_validate" validated |> ignore
+
+    // Read-only projections over the wire: task_status is lenient, task_ready is
+    // registry-validated, and task_ready owns the pagination surface.
+    let! projectedStatus = callTool mcp "task_status" 27 "task_status" (getArgs tempRoot)
+    let statusProjection = (expectToolOk "task_status" projectedStatus).["projection"]
+    assertEqual "task_status validation" "notChecked" (nodeString statusProjection.["validation"])
+    assertEqual "task_status taskId" "MCP-1" (nodeString statusProjection.["taskId"])
+    assertEqual "task_status stateRevision" 0 (statusProjection.["stateRevision"].GetValue<int>())
+
+    let! projectedReady = callTool mcp "task_ready" 28 "task_ready" (getArgs tempRoot)
+    let readyProjection = (expectToolOk "task_ready" projectedReady).["projection"]
+    assertEqual "task_ready validation" "valid" (nodeString readyProjection.["validation"])
+    assertEqual "task_ready total" 1 (readyProjection.["total"].GetValue<int>())
+    assertEqual "task_ready default offset" 0 (readyProjection.["offset"].GetValue<int>())
+    assertEqual "task_ready default limit" 25 (readyProjection.["limit"].GetValue<int>())
+    assertEqual "task_ready pending" 1 (readyProjection.["pending"].AsArray().Count)
+
+    let! statusLimit =
+        callTool
+            mcp
+            "task_status limit rejected"
+            29
+            "task_status"
+            (jobj [ "projectRoot", jstr tempRoot; "taskId", jstr "MCP-1"; "limit", jint 10 ])
+
+    let statusLimitError = expectToolError "task_status limit rejected" "INVALID_INPUT" statusLimit
+    assertContains "task_status limit rejected" "unknown property 'limit'" (nodeString statusLimitError.["message"])
+
+    let! readyLimitOutOfRange =
+        callTool
+            mcp
+            "task_ready limit out of range"
+            30
+            "task_ready"
+            (jobj [ "projectRoot", jstr tempRoot; "taskId", jstr "MCP-1"; "limit", jint 101 ])
+
+    let readyLimitError = expectToolError "task_ready limit out of range" "INVALID_INPUT" readyLimitOutOfRange
+    assertContains "task_ready limit rejected" "property 'limit' must be between 1 and 100" (nodeString readyLimitError.["message"])
+
+    let! projectedAuthority =
+        callTool
+            mcp
+            "task_ready args authority"
+            31
+            "task_ready"
+            (jobj [ "projectRoot", jstr tempRoot; "taskId", jstr "MCP-1"; "authority", jstr "user" ])
+
+    let projectedAuthorityError = expectToolError "task_ready args authority" "INVALID_INPUT" projectedAuthority
+    assertContains "task_ready authority rejected" "unknown property 'authority'" (nodeString projectedAuthorityError.["message"])
+
+    // A drifted recorded profile fingerprint is a strict registry failure for
+    // task_ready while task_status stays lenient. The recorded bytes are
+    // restored so the later CAS steps keep exercising the same persisted task.
+    let sidecar = Path.Combine(tempRoot, ".tasks", "MCP-1", "runtime.json")
+    let recordedBytes = File.ReadAllBytes sidecar
+    let drifted =
+        match JsonNode.Parse(File.ReadAllText sidecar) with
+        | :? JsonObject as node ->
+            node.["profileFingerprint"] <- jstr "drifted-fingerprint"
+            node.ToJsonString()
+        | _ -> failwith "the persisted MCP task sidecar is not a JSON object"
+    File.WriteAllText(sidecar, drifted)
+
+    let! driftedReady = callTool mcp "task_ready drifted profile" 32 "task_ready" (getArgs tempRoot)
+    let driftedReadyError = expectToolError "task_ready drifted profile" "INVALID_TRANSITION" driftedReady
+    assertContains "task_ready rejects profile drift" "PROFILE_DRIFT" (nodeString driftedReadyError.["message"])
+
+    let! driftedStatus = callTool mcp "task_status drifted profile" 33 "task_status" (getArgs tempRoot)
+    let driftedStatusProjection = (expectToolOk "task_status drifted profile" driftedStatus).["projection"]
+    assertEqual "task_status stays lenient under profile drift" "notChecked" (nodeString driftedStatusProjection.["validation"])
+
+    File.WriteAllBytes(sidecar, recordedBytes)
+
+    // Pagination is bounded before readiness is evaluated: an offset at or
+    // beyond the pending total is an empty page rather than an internal
+    // failure, and the reported total still describes the whole pending set.
+    let! readyAtTotal =
+        callTool
+            mcp
+            "task_ready offset at pending total"
+            34
+            "task_ready"
+            (jobj [ "projectRoot", jstr tempRoot; "taskId", jstr "MCP-1"; "offset", jint 1; "limit", jint 25 ])
+
+    let atTotalProjection = (expectToolOk "task_ready offset at pending total" readyAtTotal).["projection"]
+    assertEqual "task_ready offset at pending total total" 1 (atTotalProjection.["total"].GetValue<int>())
+    assertEqual "task_ready offset at pending total items" 0 (atTotalProjection.["pending"].AsArray().Count)
+    assertTrue "task_ready offset at pending total has no nextOffset" (isJsonNull atTotalProjection.["nextOffset"])
+
+    let! readyBeyond =
+        callTool
+            mcp
+            "task_ready offset beyond pending total"
+            35
+            "task_ready"
+            (jobj [ "projectRoot", jstr tempRoot; "taskId", jstr "MCP-1"; "offset", jint 25; "limit", jint 25 ])
+
+    let beyondProjection = (expectToolOk "task_ready offset beyond pending total" readyBeyond).["projection"]
+    assertEqual "task_ready offset beyond pending total total" 1 (beyondProjection.["total"].GetValue<int>())
+    assertEqual "task_ready offset beyond pending total items" 0 (beyondProjection.["pending"].AsArray().Count)
+    assertEqual "task_ready offset beyond pending total offset" 25 (beyondProjection.["offset"].GetValue<int>())
+    assertTrue "task_ready offset beyond pending total has no nextOffset" (isJsonNull beyondProjection.["nextOffset"])
+
+    // Independent pending items expose the page window over the wire.
+    let! createdWindow =
+        callTool
+            mcp
+            "task_create window"
+            36
+            "task_create"
+            (createArgsFor
+                tempRoot
+                "MCP-2"
+                [ workItemArgs "W1" "First" []
+                  workItemArgs "W2" "Second" []
+                  workItemArgs "W3" "Third" [] ])
+
+    expectToolOk "task_create window" createdWindow |> ignore
+
+    let! readyWindow =
+        callTool
+            mcp
+            "task_ready window"
+            37
+            "task_ready"
+            (jobj [ "projectRoot", jstr tempRoot; "taskId", jstr "MCP-2"; "limit", jint 2 ])
+
+    let windowProjection = (expectToolOk "task_ready window" readyWindow).["projection"]
+    assertEqual "task_ready window total" 3 (windowProjection.["total"].GetValue<int>())
+    assertEqual "task_ready window items" 2 (windowProjection.["pending"].AsArray().Count)
+    let windowItems = pendingOf windowProjection
+    assertEqual "task_ready window first id" "W1" (nodeString windowItems.Head.["workItemId"])
+    assertEqual "task_ready window second id" "W2" (nodeString windowItems.[1].["workItemId"])
+    assertTrue "task_ready window reports a nextOffset" (not (isJsonNull windowProjection.["nextOffset"]))
+    assertEqual "task_ready window nextOffset" 2 (windowProjection.["nextOffset"].GetValue<int>())
+
+    let! readyWindowLast =
+        callTool
+            mcp
+            "task_ready window last page"
+            38
+            "task_ready"
+            (jobj [ "projectRoot", jstr tempRoot; "taskId", jstr "MCP-2"; "offset", jint 2; "limit", jint 2 ])
+
+    let windowLastProjection = (expectToolOk "task_ready window last page" readyWindowLast).["projection"]
+    assertEqual "task_ready window last page total" 3 (windowLastProjection.["total"].GetValue<int>())
+    assertEqual "task_ready window last page items" 1 (windowLastProjection.["pending"].AsArray().Count)
+    assertEqual "task_ready window last page id" "W3" (nodeString (pendingOf windowLastProjection).Head.["workItemId"])
+    assertTrue "task_ready window last page has no nextOffset" (isJsonNull windowLastProjection.["nextOffset"])
+
+    // A denied item is never advertised as startable, and an advertised
+    // startable item starts through the authoritative apply path.
+    let! createdDependency =
+        callTool
+            mcp
+            "task_create dependency"
+            39
+            "task_create"
+            (createArgsFor
+                tempRoot
+                "MCP-3"
+                [ workItemArgs "W1" "First" []
+                  workItemArgs "W2" "Second" [ "W1" ] ])
+
+    expectToolOk "task_create dependency" createdDependency |> ignore
+
+    let! readyDependency =
+        callTool
+            mcp
+            "task_ready dependency"
+            40
+            "task_ready"
+            (jobj [ "projectRoot", jstr tempRoot; "taskId", jstr "MCP-3" ])
+
+    let dependencyProjection = (expectToolOk "task_ready dependency" readyDependency).["projection"]
+    let dependencyItems = pendingOf dependencyProjection
+    let freeItem = dependencyItems |> List.find (fun item -> nodeString item.["workItemId"] = "W1")
+    let deniedItem = dependencyItems |> List.find (fun item -> nodeString item.["workItemId"] = "W2")
+    assertEqual "task_ready dependency free startable" true (freeItem.["startable"].GetValue<bool>())
+    assertEqual "task_ready dependency free blockers" 0 (freeItem.["blockersTotal"].GetValue<int>())
+    assertEqual "task_ready dependency denied startable" false (deniedItem.["startable"].GetValue<bool>())
+    assertEqual "task_ready dependency denied blockers" 1 (deniedItem.["blockersTotal"].GetValue<int>())
+    let dependencyBlocker = deniedItem.["blockers"].AsArray().[0].AsObject()
+    assertEqual "task_ready dependency blocker type" "dependency" (nodeString dependencyBlocker.["type"])
+    assertEqual "task_ready dependency blocker id" "W1" (nodeString dependencyBlocker.["id"])
+
+    let! deniedStart =
+        callTool
+            mcp
+            "task_apply start denied"
+            41
+            "task_apply"
+            (applyArgsFor tempRoot "MCP-3" 0 (jobj [ "type", jstr "start"; "workItemId", jstr "W2" ]))
+
+    let deniedStartError = expectToolError "task_apply start denied" "INVALID_INPUT" deniedStart
+    assertContains "denied start message" "not ready" (nodeString deniedStartError.["message"])
+
+    let! allowedStart =
+        callTool
+            mcp
+            "task_apply start allowed"
+            42
+            "task_apply"
+            (applyArgsFor tempRoot "MCP-3" 0 (jobj [ "type", jstr "start"; "workItemId", jstr "W1" ]))
+
+    let allowedStartStructured = expectToolOk "task_apply start allowed" allowedStart
+    assertEqual "allowed start increments revision" 1 (allowedStartStructured.["task"].["stateRevision"].GetValue<int>())
 
     // Expected-revision CAS: a successful apply increments; a stale apply is a
     // bounded CONFLICT that leaves persisted state untouched.
@@ -678,7 +915,7 @@ async {
     assertTrue "independent MCP stderr carries no protocol responses" (not (independentStderr.Contains("\"jsonrpc\"", StringComparison.Ordinal)))
 
     printfn
-        "OK platform-internal task runtime MCP boundary: stdio handshake, tools/list, structured results, library/CLI parity, TaskApply CLI unknown-flag/authority fail-closed exit, workspace rejection, CAS preservation, authority/receipt/effect rejection, bounded failures, and stdout cleanliness"
+        "OK platform-internal task runtime MCP boundary: stdio handshake, tools/list, structured results, library/CLI parity, TaskApply CLI unknown-flag/authority fail-closed exit, workspace rejection, CAS preservation, authority/receipt/effect rejection, bounded failures, stdout cleanliness, bounded ready pagination, and canonical start-decision parity"
     mcp.Dispose()
     secondMcp.Dispose()
     if Directory.Exists tempRoot && tempRoot.Contains("taskruntime-mcp-tests-", StringComparison.Ordinal) then

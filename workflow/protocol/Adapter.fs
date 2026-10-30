@@ -22,6 +22,13 @@ type ValidateOperation =
     { Root: string
       TaskId: string }
 
+type ProjectionOperation =
+    { Root: string
+      TaskId: string
+      Ready: bool
+      Offset: int
+      Limit: int }
+
 type CleanRequest =
     { Root: string
       TaskId: string
@@ -42,6 +49,9 @@ let execute operation : Async<Result<TaskModel, RuntimeError>> =
     | ApplyTask request ->
         applyTask request.Root request.TaskId request.ExpectedStateRevision request.Command
     | ValidateTask request -> validateTask request.Root request.TaskId
+
+let executeProjection (request: ProjectionOperation) =
+    projectTask request.Root request.TaskId request.Ready request.Offset request.Limit
 
 let executeClean (request: CleanRequest) : Async<Result<CleanResult, RuntimeError>> =
     // Cleanup has an operation-specific result rather than a task snapshot.
