@@ -6930,7 +6930,9 @@ let private validateTaskRoot requireTemporaryAbsent (taskDirectory: string) =
         raise (FileNotFoundException("task root is missing runtime.json"))
     if requireTemporaryAbsent && entries |> List.exists (fun path -> String.Equals(Path.GetFileName path, "temp", cleanPathComparison)) then
         raise (IOException "temporary directory remained after cleanup")
-    for entry in entries do
+
+let private inspectDurableTask taskDirectory =
+    for entry in Directory.EnumerateFileSystemEntries(taskDirectory, "*", cleanEntryOptions) do
         if not (String.Equals(Path.GetFileName entry, "temp", cleanPathComparison)) then inspectCleanTree taskDirectory entry
 
 let private deleteTemporary taskDirectory =
@@ -6978,6 +6980,7 @@ let cleanTask root requestedTaskId operation : Async<Result<CleanResult, Runtime
                             try
                                 validateTaskRoot false taskDirectory
                                 let archive = operation = CleanOperation.Archive
+                                if archive then inspectDurableTask taskDirectory
                                 let tasksDirectory = Path.GetDirectoryName taskDirectory
                                 let archives = Path.Combine(tasksDirectory, "archives")
                                 let destination = Path.Combine(archives, requestedTaskId)
