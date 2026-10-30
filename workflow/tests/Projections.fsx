@@ -3,7 +3,8 @@
 // task_ready): lenient status reads, strict readiness reads, dependency
 // blockers, ancestor state and question blockers, unmet guard blockers,
 // terminal lifecycle, blocker truncation,
-// pagination bounds, applied-state tracking, the
+// pagination bounds, empty pages at or beyond the pending total, bounded page
+// selection, applied-state tracking, the
 // lenient/strict split on drifted state, read-only guarantees, and start
 // eligibility parity. Uses the repository's plain FSI test harness rather than
 // Expecto because the solution contract forbids adding a project/package
@@ -242,6 +243,38 @@ async {
             })
 
         do!
+            scenario "ready projection serves an empty page at or beyond the pending total" (async {
+                let! _ = expectOkAsync "create PRJ-17" (createTaskOk "PRJ-17" "Offset bound projection" [ spec "W1" "First" ])
+                let! atTotal = expectOkAsync "ready PRJ-17 at total" (project tempRoot "PRJ-17" true 1 25)
+                assertEqual "offset at total keeps the pending total" 1 (number atTotal "total")
+                assertEqual "offset at total has no pending item" 0 (pendingItems atTotal).Length
+                assertEqual "offset at total has no nextOffset" None (optionalNumber atTotal "nextOffset")
+                let! beyond = expectOkAsync "ready PRJ-17 beyond total" (project tempRoot "PRJ-17" true 25 25)
+                assertEqual "offset beyond total keeps the pending total" 1 (number beyond "total")
+                assertEqual "offset beyond total has no pending item" 0 (pendingItems beyond).Length
+                assertEqual "offset beyond total has no nextOffset" None (optionalNumber beyond "nextOffset")
+                assertEqual "offset beyond total echoes the offset" 25 (number beyond "offset")
+                assertEqual "offset beyond total echoes the limit" 25 (number beyond "limit")
+            })
+
+        do!
+            scenario "ready projection returns only the requested window of pending work" (async {
+                let items = [ 1 .. 12 ] |> List.map (fun index -> spec (sprintf "W%d" index) "Item")
+                let! _ = expectOkAsync "create PRJ-18" (createTaskOk "PRJ-18" "Window projection" items)
+                let! window = expectOkAsync "ready PRJ-18 window" (project tempRoot "PRJ-18" true 3 2)
+                assertEqual "window keeps the whole pending total" 12 (number window "total")
+                assertEqual "window holds only the requested page" 2 (pendingItems window).Length
+                assertEqual "window starts at the requested offset" "W4" (text (pendingItems window).Head "workItemId")
+                assertEqual "window ends at the requested limit" "W5" (text (pendingItems window).[1] "workItemId")
+                assertEqual "window reports the next offset" (Some 5) (optionalNumber window "nextOffset")
+                let! lastPage = expectOkAsync "ready PRJ-18 last page" (project tempRoot "PRJ-18" true 10 2)
+                assertEqual "last page keeps the whole pending total" 12 (number lastPage "total")
+                assertEqual "last page holds the remaining pending items" 2 (pendingItems lastPage).Length
+                assertEqual "last page starts at the requested offset" "W11" (text (pendingItems lastPage).Head "workItemId")
+                assertEqual "last page has no nextOffset" None (optionalNumber lastPage "nextOffset")
+            })
+
+        do!
             scenario "projection input bounds are enforced" (async {
                 let! _ = expectOkAsync "create PRJ-6" (createTaskOk "PRJ-6" "Bounds projection" [ spec "W1" "Do the work" ])
                 do! expectRejectedAsync "negative offset" "offset must be non-negative" (project tempRoot "PRJ-6" true -1 10)
@@ -332,6 +365,31 @@ async {
                 let! started = expectOkAsync "start PRJ-12 W1" (applyTask tempRoot "PRJ-12" 0 (StartWorkItem "W1"))
                 assertEqual "parity start bumps revision" 1 started.StateRevision
                 do! expectRejectedAsync "blocked item cannot start" "not ready" (applyTask tempRoot "PRJ-12" 1 (StartWorkItem "W2"))
+            })
+
+        do!
+            scenario "projection startability matches the authoritative start decision" (async {
+                let! _ =
+                    expectOkAsync
+                        "create PRJ-19"
+                        (createTaskOk
+                            "PRJ-19"
+                            "Canonical start decision"
+                            [ spec "W1" "First"
+                              specWith "W2" "Second" [ "W1" ] []
+                              specWith "W3" "Third" [ "W2" ] [] ])
+                let! ready = expectOkAsync "ready PRJ-19" (project tempRoot "PRJ-19" true 0 10)
+                let items = pendingItems ready
+                let itemOf id = items |> List.find (fun item -> text item "workItemId" = id)
+                assertEqual "canonical W1 is startable" true (boolean (itemOf "W1") "startable")
+                assertEqual "canonical W1 has no blocker" 0 (number (itemOf "W1") "blockersTotal")
+                for id in [ "W2"; "W3" ] do
+                    assertEqual $"canonical {id} is not startable" false (boolean (itemOf id) "startable")
+                    assertTrue $"canonical {id} names a blocker" ((number (itemOf id) "blockersTotal") > 0)
+                let! started = expectOkAsync "start PRJ-19 W1" (applyTask tempRoot "PRJ-19" 0 (StartWorkItem "W1"))
+                assertEqual "canonical start bumps revision" 1 started.StateRevision
+                do! expectRejectedAsync "canonical W2 cannot start" "not ready" (applyTask tempRoot "PRJ-19" 1 (StartWorkItem "W2"))
+                do! expectRejectedAsync "canonical W3 cannot start" "not ready" (applyTask tempRoot "PRJ-19" 1 (StartWorkItem "W3"))
             })
 
         do!
@@ -440,7 +498,7 @@ async {
             })
 
         if failures.IsEmpty then
-            printfn "OK workflow projections: lenient status, strict ready, dependency blockers, ancestor state and question blockers, unmet guard blockers, terminal lifecycle, blocker truncation, pagination bounds, applied-state tracking, drift split, read-only guarantee, and start-eligibility parity"
+            printfn "OK workflow projections: lenient status, strict ready, dependency blockers, ancestor state and question blockers, unmet guard blockers, terminal lifecycle, blocker truncation, pagination bounds, empty pages beyond the pending total, bounded page selection, applied-state tracking, drift split, read-only guarantee, and start-eligibility parity"
     finally
         if Directory.Exists tempRoot && tempRoot.Contains("projections-tests-", StringComparison.Ordinal) then
             Directory.Delete(tempRoot, true)

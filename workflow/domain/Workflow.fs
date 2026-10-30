@@ -6913,15 +6913,26 @@ let private projectionBlocker (kind: string) (id: string option) (state: string 
     blocker
 
 let private readyProjection (task: TaskModel) (offset: int) (limit: int) =
-    let all = projectionItems task.WorkItems |> List.filter (fun item -> item.State = PendingWork)
-    let evaluated =
-        all
+    let pendingItems = projectionItems task.WorkItems |> List.filter (fun item -> item.State = PendingWork)
+    let total = pendingItems.Length
+    let selectedItems =
+        if offset >= total then []
+        else pendingItems |> List.skip offset |> List.truncate limit
+
+    let selected =
+        selectedItems
         |> List.map (fun item ->
             let blockers = JsonArray()
             let add kind id state ancestorId = blockers.Add(projectionBlocker kind id state ancestorId)
 
             if task.Lifecycle <> "open" then add "lifecycle" None (Some task.Lifecycle) None
-            match Domain.canStartWorkItem task item.Id with
+            let startability = Domain.canStartWorkItem task item.Id
+            let startable =
+                match startability with
+                | Ok() -> true
+                | Error _ -> false
+
+            match startability with
             | Ok() -> ()
             | Error _ ->
                 match Domain.readiness task item with
@@ -6940,16 +6951,18 @@ let private readyProjection (task: TaskModel) (offset: int) (limit: int) =
                     if Domain.questionBlocksWorkItem task ancestor.Id then
                         Domain.openQuestionsForWorkItem task ancestor.Id
                         |> List.iter (fun question -> add "ancestorQuestion" (Some question.Id) None (Some ancestor.Id)))
+
+                if blockers.Count = 0 then add "denial" None None None
+
             let visible = blockers |> Seq.truncate 20 |> Seq.map (fun node -> node.DeepClone()) |> Seq.toArray
             let itemResult = JsonObject()
             itemResult["workItemId"] <- projectionNode item.Id
-            itemResult["startable"] <- projectionNode (blockers.Count = 0)
+            itemResult["startable"] <- projectionNode startable
             itemResult["blockers"] <- JsonArray(visible)
             itemResult["blockersTotal"] <- projectionNode blockers.Count
             itemResult["blockersTruncated"] <- projectionNode (blockers.Count > visible.Length)
             itemResult)
 
-    let selected = evaluated |> List.skip offset |> List.truncate limit
     let pending = JsonArray(selected |> List.map (fun item -> item :> JsonNode) |> List.toArray)
     let result = JsonObject()
     result["validation"] <- projectionNode "valid"
@@ -6957,10 +6970,14 @@ let private readyProjection (task: TaskModel) (offset: int) (limit: int) =
     result["stateRevision"] <- projectionNode task.StateRevision
     result["contractRevision"] <- projectionNode task.ContractRevision
     result["pending"] <- pending
-    result["total"] <- projectionNode evaluated.Length
+    result["total"] <- projectionNode total
     result["offset"] <- projectionNode offset
     result["limit"] <- projectionNode limit
-    result["nextOffset"] <- if offset + selected.Length < evaluated.Length then projectionNode (offset + selected.Length) else null
+    result["nextOffset"] <-
+        if selected.Length > 0 && selected.Length < total - offset then
+            projectionNode (offset + selected.Length)
+        else
+            null
     result
 
 let projectTask root id ready offset limit : Async<Result<JsonNode, RuntimeError>> =

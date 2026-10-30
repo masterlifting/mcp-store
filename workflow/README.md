@@ -71,10 +71,11 @@ WorkItems with `startable` and typed blockers. Blocker fields are exact by type:
 `dependency`, `guard`, and `question` have `type` and `id`; `lifecycle` has
 `type` and `state`; `ancestorState` has `type`, `id` (the ancestor WorkItem ID),
 and `state`; `ancestorQuestion` has `type`, `id` (the question ID), and
-`ancestorId`. Ancestor eligibility does not introduce dependency or guard checks
-on ancestors.
+`ancestorId`; `denial` has only `type` and is used when a start denial has no
+typed readiness blocker. Ancestor eligibility does not introduce dependency or
+guard checks on ancestors.
 Ready pagination defaults to offset 0/limit 25, accepts limits 1–100, evaluates
-eligibility before pagination, and limits each item's visible blockers to 20
+eligibility only for the selected page, and limits each item's visible blockers to 20
 while reporting totals/truncation and the next offset. A projection reads one
 synchronized snapshot and does not persist, evolve, emit events, or reserve
 eligibility; `task_apply` remains authoritative.

@@ -2,7 +2,8 @@
 // Deterministic coverage for the platform-internal Workflow MCP boundary:
 // the native stdio handshake and tool surface, transport parity with the retained library and
 // CLI paths, structured results, bounded failures, workspace validation,
-// expected-revision CAS, and the absence of authority/receipt/effect ingress.
+// expected-revision CAS, bounded ready pagination, canonical start-decision
+// parity, and the absence of authority/receipt/effect ingress.
 // Every child process is a fixed repository script or producer artifact; there is no LLM, network, or model dependency.
 // Plain FSI harness because the frozen solution forbids
 // adding a project/package system.
@@ -311,6 +312,32 @@ let applyArgs root revision command =
           "expectedStateRevision", jint revision
           "command", command ]
 
+let applyArgsFor root taskId revision command =
+    jobj
+        [ "projectRoot", jstr root
+          "taskId", jstr taskId
+          "expectedStateRevision", jint revision
+          "command", command ]
+
+let workItemArgs id title dependsOn =
+    jobj
+        [ "id", jstr id
+          "title", jstr title
+          "dependsOn", jarr (dependsOn |> List.map jstr)
+          "children", jarr [] ]
+
+let createArgsFor root taskId workItems =
+    jobj
+        [ "projectRoot", jstr root
+          "taskId", jstr taskId
+          "title", jstr "MCP boundary task"
+          "kind", jstr "execution"
+          "acceptanceCriteria", jarr [ jobj [ "id", jstr "AC1"; "text", jstr "MCP boundary verified" ] ]
+          "workItems", jarr workItems ]
+
+let pendingOf (projection: JsonNode) =
+    projection.["pending"].AsArray() |> Seq.map (fun item -> item.AsObject()) |> Seq.toList
+
 let tempRoot =
     Path.Combine(Path.GetTempPath(), "opencode", $"taskruntime-mcp-tests-{Guid.NewGuid():N}")
 
@@ -551,6 +578,141 @@ async {
 
     File.WriteAllBytes(sidecar, recordedBytes)
 
+    // Pagination is bounded before readiness is evaluated: an offset at or
+    // beyond the pending total is an empty page rather than an internal
+    // failure, and the reported total still describes the whole pending set.
+    let! readyAtTotal =
+        callTool
+            mcp
+            "task_ready offset at pending total"
+            34
+            "task_ready"
+            (jobj [ "projectRoot", jstr tempRoot; "taskId", jstr "MCP-1"; "offset", jint 1; "limit", jint 25 ])
+
+    let atTotalProjection = (expectToolOk "task_ready offset at pending total" readyAtTotal).["projection"]
+    assertEqual "task_ready offset at pending total total" 1 (atTotalProjection.["total"].GetValue<int>())
+    assertEqual "task_ready offset at pending total items" 0 (atTotalProjection.["pending"].AsArray().Count)
+    assertTrue "task_ready offset at pending total has no nextOffset" (isJsonNull atTotalProjection.["nextOffset"])
+
+    let! readyBeyond =
+        callTool
+            mcp
+            "task_ready offset beyond pending total"
+            35
+            "task_ready"
+            (jobj [ "projectRoot", jstr tempRoot; "taskId", jstr "MCP-1"; "offset", jint 25; "limit", jint 25 ])
+
+    let beyondProjection = (expectToolOk "task_ready offset beyond pending total" readyBeyond).["projection"]
+    assertEqual "task_ready offset beyond pending total total" 1 (beyondProjection.["total"].GetValue<int>())
+    assertEqual "task_ready offset beyond pending total items" 0 (beyondProjection.["pending"].AsArray().Count)
+    assertEqual "task_ready offset beyond pending total offset" 25 (beyondProjection.["offset"].GetValue<int>())
+    assertTrue "task_ready offset beyond pending total has no nextOffset" (isJsonNull beyondProjection.["nextOffset"])
+
+    // Independent pending items expose the page window over the wire.
+    let! createdWindow =
+        callTool
+            mcp
+            "task_create window"
+            36
+            "task_create"
+            (createArgsFor
+                tempRoot
+                "MCP-2"
+                [ workItemArgs "W1" "First" []
+                  workItemArgs "W2" "Second" []
+                  workItemArgs "W3" "Third" [] ])
+
+    expectToolOk "task_create window" createdWindow |> ignore
+
+    let! readyWindow =
+        callTool
+            mcp
+            "task_ready window"
+            37
+            "task_ready"
+            (jobj [ "projectRoot", jstr tempRoot; "taskId", jstr "MCP-2"; "limit", jint 2 ])
+
+    let windowProjection = (expectToolOk "task_ready window" readyWindow).["projection"]
+    assertEqual "task_ready window total" 3 (windowProjection.["total"].GetValue<int>())
+    assertEqual "task_ready window items" 2 (windowProjection.["pending"].AsArray().Count)
+    let windowItems = pendingOf windowProjection
+    assertEqual "task_ready window first id" "W1" (nodeString windowItems.Head.["workItemId"])
+    assertEqual "task_ready window second id" "W2" (nodeString windowItems.[1].["workItemId"])
+    assertTrue "task_ready window reports a nextOffset" (not (isJsonNull windowProjection.["nextOffset"]))
+    assertEqual "task_ready window nextOffset" 2 (windowProjection.["nextOffset"].GetValue<int>())
+
+    let! readyWindowLast =
+        callTool
+            mcp
+            "task_ready window last page"
+            38
+            "task_ready"
+            (jobj [ "projectRoot", jstr tempRoot; "taskId", jstr "MCP-2"; "offset", jint 2; "limit", jint 2 ])
+
+    let windowLastProjection = (expectToolOk "task_ready window last page" readyWindowLast).["projection"]
+    assertEqual "task_ready window last page total" 3 (windowLastProjection.["total"].GetValue<int>())
+    assertEqual "task_ready window last page items" 1 (windowLastProjection.["pending"].AsArray().Count)
+    assertEqual "task_ready window last page id" "W3" (nodeString (pendingOf windowLastProjection).Head.["workItemId"])
+    assertTrue "task_ready window last page has no nextOffset" (isJsonNull windowLastProjection.["nextOffset"])
+
+    // A denied item is never advertised as startable, and an advertised
+    // startable item starts through the authoritative apply path.
+    let! createdDependency =
+        callTool
+            mcp
+            "task_create dependency"
+            39
+            "task_create"
+            (createArgsFor
+                tempRoot
+                "MCP-3"
+                [ workItemArgs "W1" "First" []
+                  workItemArgs "W2" "Second" [ "W1" ] ])
+
+    expectToolOk "task_create dependency" createdDependency |> ignore
+
+    let! readyDependency =
+        callTool
+            mcp
+            "task_ready dependency"
+            40
+            "task_ready"
+            (jobj [ "projectRoot", jstr tempRoot; "taskId", jstr "MCP-3" ])
+
+    let dependencyProjection = (expectToolOk "task_ready dependency" readyDependency).["projection"]
+    let dependencyItems = pendingOf dependencyProjection
+    let freeItem = dependencyItems |> List.find (fun item -> nodeString item.["workItemId"] = "W1")
+    let deniedItem = dependencyItems |> List.find (fun item -> nodeString item.["workItemId"] = "W2")
+    assertEqual "task_ready dependency free startable" true (freeItem.["startable"].GetValue<bool>())
+    assertEqual "task_ready dependency free blockers" 0 (freeItem.["blockersTotal"].GetValue<int>())
+    assertEqual "task_ready dependency denied startable" false (deniedItem.["startable"].GetValue<bool>())
+    assertEqual "task_ready dependency denied blockers" 1 (deniedItem.["blockersTotal"].GetValue<int>())
+    let dependencyBlocker = deniedItem.["blockers"].AsArray().[0].AsObject()
+    assertEqual "task_ready dependency blocker type" "dependency" (nodeString dependencyBlocker.["type"])
+    assertEqual "task_ready dependency blocker id" "W1" (nodeString dependencyBlocker.["id"])
+
+    let! deniedStart =
+        callTool
+            mcp
+            "task_apply start denied"
+            41
+            "task_apply"
+            (applyArgsFor tempRoot "MCP-3" 0 (jobj [ "type", jstr "start"; "workItemId", jstr "W2" ]))
+
+    let deniedStartError = expectToolError "task_apply start denied" "INVALID_INPUT" deniedStart
+    assertContains "denied start message" "not ready" (nodeString deniedStartError.["message"])
+
+    let! allowedStart =
+        callTool
+            mcp
+            "task_apply start allowed"
+            42
+            "task_apply"
+            (applyArgsFor tempRoot "MCP-3" 0 (jobj [ "type", jstr "start"; "workItemId", jstr "W1" ]))
+
+    let allowedStartStructured = expectToolOk "task_apply start allowed" allowedStart
+    assertEqual "allowed start increments revision" 1 (allowedStartStructured.["task"].["stateRevision"].GetValue<int>())
+
     // Expected-revision CAS: a successful apply increments; a stale apply is a
     // bounded CONFLICT that leaves persisted state untouched.
     let! applied =
@@ -753,7 +915,7 @@ async {
     assertTrue "independent MCP stderr carries no protocol responses" (not (independentStderr.Contains("\"jsonrpc\"", StringComparison.Ordinal)))
 
     printfn
-        "OK platform-internal task runtime MCP boundary: stdio handshake, tools/list, structured results, library/CLI parity, TaskApply CLI unknown-flag/authority fail-closed exit, workspace rejection, CAS preservation, authority/receipt/effect rejection, bounded failures, and stdout cleanliness"
+        "OK platform-internal task runtime MCP boundary: stdio handshake, tools/list, structured results, library/CLI parity, TaskApply CLI unknown-flag/authority fail-closed exit, workspace rejection, CAS preservation, authority/receipt/effect rejection, bounded failures, stdout cleanliness, bounded ready pagination, and canonical start-decision parity"
     mcp.Dispose()
     secondMcp.Dispose()
     if Directory.Exists tempRoot && tempRoot.Contains("taskruntime-mcp-tests-", StringComparison.Ordinal) then
