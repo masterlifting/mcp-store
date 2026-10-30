@@ -202,7 +202,7 @@ Assert-JobCount -Job "publisher" -Name "publisher stages only compile items that
 Assert-JobCount -Job "publisher" -Name "publisher publishes the staged project in isolation" -Pattern 'dotnet publish \$stageProject' -Expected 1
 Assert-JobCount -Job "publisher" -Name "publisher suppresses repository-wide build imports" -Pattern 'p:ImportDirectoryBuildProps=false -p:ImportDirectoryBuildTargets=false' -Expected 2
 Assert-JobCount -Job "publisher" -Name "publisher restores from the cleared isolated source list" -Pattern 'dotnet restore \$stageProject --configfile' -Expected 1
-Assert-JobCount -Job "publisher" -Name "twelve non-packaging Workflow entrypoints" -Pattern '^\s+"workflow/tests/[A-Za-z0-9]+\.fsx",?\s*$' -Expected 12
+Assert-JobCount -Job "publisher" -Name "thirteen non-packaging Workflow entrypoints" -Pattern '^\s+"workflow/tests/[A-Za-z0-9]+\.fsx",?\s*$' -Expected 13
 Assert-JobCount -Job "publisher" -Name "publisher runs the producer Expecto gate" -Pattern 'dotnet run --project dotnet/tests/Mcp\.Dotnet\.Tests' -Expected 1
 Assert-JobCount -Job "publisher" -Name "publisher builds the compiled release regression project" -Pattern 'dotnet build infrastructure/release/tests/Tests\.fsproj' -Expected 1
 Assert-JobCount -Job "publisher" -Name "publisher builds the compiled resolver project" -Pattern 'dotnet build infrastructure/resolver/Resolver\.fsproj -c Release' -Expected 1

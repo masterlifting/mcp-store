@@ -371,7 +371,10 @@ async {
     assertEqual "tools/list id" 2 (listed.["id"].GetValue<int>())
     let tools = (resultOf "tools/list" listed).["tools"].AsArray()
     let toolNames = tools |> Seq.map (fun tool -> nodeString tool.["name"]) |> List.ofSeq
-    assertEqual "tools/list names" [ "task_create"; "task_get"; "task_apply"; "task_clean"; "task_validate" ] toolNames
+    assertEqual
+        "tools/list names"
+        [ "task_create"; "task_status"; "task_ready"; "task_get"; "task_apply"; "task_clean"; "task_validate" ]
+        toolNames
     let applyTool = tools |> Seq.find (fun tool -> nodeString tool.["name"] = "task_apply")
     let toolsJson = (resultOf "tools/list" listed).["tools"].ToJsonString()
     let! secondListed = send secondMcp "independent client tools/list" 25 "tools/list" (jobj [])
@@ -475,6 +478,78 @@ async {
 
     let! validated = callTool mcp "task_validate" 6 "task_validate" (getArgs tempRoot)
     expectToolOk "task_validate" validated |> ignore
+
+    // Read-only projections over the wire: task_status is lenient, task_ready is
+    // registry-validated, and task_ready owns the pagination surface.
+    let! projectedStatus = callTool mcp "task_status" 27 "task_status" (getArgs tempRoot)
+    let statusProjection = (expectToolOk "task_status" projectedStatus).["projection"]
+    assertEqual "task_status validation" "notChecked" (nodeString statusProjection.["validation"])
+    assertEqual "task_status taskId" "MCP-1" (nodeString statusProjection.["taskId"])
+    assertEqual "task_status stateRevision" 0 (statusProjection.["stateRevision"].GetValue<int>())
+
+    let! projectedReady = callTool mcp "task_ready" 28 "task_ready" (getArgs tempRoot)
+    let readyProjection = (expectToolOk "task_ready" projectedReady).["projection"]
+    assertEqual "task_ready validation" "valid" (nodeString readyProjection.["validation"])
+    assertEqual "task_ready total" 1 (readyProjection.["total"].GetValue<int>())
+    assertEqual "task_ready default offset" 0 (readyProjection.["offset"].GetValue<int>())
+    assertEqual "task_ready default limit" 25 (readyProjection.["limit"].GetValue<int>())
+    assertEqual "task_ready pending" 1 (readyProjection.["pending"].AsArray().Count)
+
+    let! statusLimit =
+        callTool
+            mcp
+            "task_status limit rejected"
+            29
+            "task_status"
+            (jobj [ "projectRoot", jstr tempRoot; "taskId", jstr "MCP-1"; "limit", jint 10 ])
+
+    let statusLimitError = expectToolError "task_status limit rejected" "INVALID_INPUT" statusLimit
+    assertContains "task_status limit rejected" "unknown property 'limit'" (nodeString statusLimitError.["message"])
+
+    let! readyLimitOutOfRange =
+        callTool
+            mcp
+            "task_ready limit out of range"
+            30
+            "task_ready"
+            (jobj [ "projectRoot", jstr tempRoot; "taskId", jstr "MCP-1"; "limit", jint 101 ])
+
+    let readyLimitError = expectToolError "task_ready limit out of range" "INVALID_INPUT" readyLimitOutOfRange
+    assertContains "task_ready limit rejected" "property 'limit' must be between 1 and 100" (nodeString readyLimitError.["message"])
+
+    let! projectedAuthority =
+        callTool
+            mcp
+            "task_ready args authority"
+            31
+            "task_ready"
+            (jobj [ "projectRoot", jstr tempRoot; "taskId", jstr "MCP-1"; "authority", jstr "user" ])
+
+    let projectedAuthorityError = expectToolError "task_ready args authority" "INVALID_INPUT" projectedAuthority
+    assertContains "task_ready authority rejected" "unknown property 'authority'" (nodeString projectedAuthorityError.["message"])
+
+    // A drifted recorded profile fingerprint is a strict registry failure for
+    // task_ready while task_status stays lenient. The recorded bytes are
+    // restored so the later CAS steps keep exercising the same persisted task.
+    let sidecar = Path.Combine(tempRoot, ".tasks", "MCP-1", "runtime.json")
+    let recordedBytes = File.ReadAllBytes sidecar
+    let drifted =
+        match JsonNode.Parse(File.ReadAllText sidecar) with
+        | :? JsonObject as node ->
+            node.["profileFingerprint"] <- jstr "drifted-fingerprint"
+            node.ToJsonString()
+        | _ -> failwith "the persisted MCP task sidecar is not a JSON object"
+    File.WriteAllText(sidecar, drifted)
+
+    let! driftedReady = callTool mcp "task_ready drifted profile" 32 "task_ready" (getArgs tempRoot)
+    let driftedReadyError = expectToolError "task_ready drifted profile" "INVALID_TRANSITION" driftedReady
+    assertContains "task_ready rejects profile drift" "PROFILE_DRIFT" (nodeString driftedReadyError.["message"])
+
+    let! driftedStatus = callTool mcp "task_status drifted profile" 33 "task_status" (getArgs tempRoot)
+    let driftedStatusProjection = (expectToolOk "task_status drifted profile" driftedStatus).["projection"]
+    assertEqual "task_status stays lenient under profile drift" "notChecked" (nodeString driftedStatusProjection.["validation"])
+
+    File.WriteAllBytes(sidecar, recordedBytes)
 
     // Expected-revision CAS: a successful apply increments; a stale apply is a
     // bounded CONFLICT that leaves persisted state untouched.

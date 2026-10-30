@@ -3693,13 +3693,16 @@ module private Domain =
         | Some error -> Error error
         | None -> Ok()
 
-    let private questionBlocksWorkItem (task: TaskModel) (workItemIdText: string) =
+    let openQuestionsForWorkItem (task: TaskModel) (workItemIdText: string) =
         task.Questions
-        |> List.exists (fun question ->
+        |> List.filter (fun question ->
             match question.State, question.Impact with
             | Open, TaskWide -> true
             | Open, WorkItems ids -> List.contains workItemIdText ids
             | _ -> false)
+
+    let questionBlocksWorkItem (task: TaskModel) (workItemIdText: string) =
+        openQuestionsForWorkItem task workItemIdText |> List.isEmpty |> not
 
     let private hasOpenTaskWideQuestion (task: TaskModel) =
         task.Questions
@@ -3784,7 +3787,7 @@ module private Domain =
                 | Some rest -> Some(item :: rest)
                 | None -> None)
 
-    let private ancestorItems id items =
+    let ancestorItems id items =
         match itemPath id items with
         | Some path -> path |> List.take (path.Length - 1)
         | None -> []
@@ -3804,7 +3807,7 @@ module private Domain =
         | SkippedWork _ -> true
         | _ -> false
 
-    let private stateName state =
+    let stateName state =
         match state with
         | PendingWork -> "pending"
         | ActiveWork -> "active"
@@ -4413,15 +4416,8 @@ module private Domain =
                 |> List.filter (fun guard -> not (guardSatisfied task guard))
                 |> List.map (fun guard -> UnmetGuard guard.Id)
 
-            // an open TaskWide question blocks every pending WorkItem;
-            // a WorkItems-scoped question blocks only its listed WorkItems.
             let openQuestions =
-                task.Questions
-                |> List.filter (fun question ->
-                    match question.State, question.Impact with
-                    | Open, TaskWide -> true
-                    | Open, WorkItems ids -> List.contains workItem.Id ids
-                    | _ -> false)
+                openQuestionsForWorkItem task workItem.Id
                 |> List.map (fun question -> OpenQuestion question.Id)
 
             let reasons = (unmet |> List.map UnmetDependency) @ unmetGuards @ openQuestions
@@ -4438,6 +4434,39 @@ module private Domain =
             | UnmetGuard id -> $"guard '{id}' is not satisfied"
             | OpenQuestion id -> $"question '{id}' is open")
         |> String.concat "; "
+
+    let private startEligibility (task: TaskModel) (id: string) =
+        match findWorkItem id task.WorkItems with
+        | None -> Error(NotFound $"WorkItem '{id}' was not found")
+        | Some _ when task.Lifecycle <> "open" -> Error(InvalidTransition "a complete task cannot start work")
+        | Some item when item.State <> PendingWork ->
+            Error(InvalidTransition $"WorkItem '{id}' must be pending before it starts")
+        | Some item ->
+            match readiness task item with
+            | NotReady reasons ->
+                Error(InvalidTransition $"WorkItem '{id}' is not ready: {describeReadiness reasons}")
+            | Ready ->
+                match
+                    ancestorItems id task.WorkItems
+                    // Pending ancestors are promoted with the started descendant.
+                    |> List.tryFind (fun ancestor -> ancestor.State <> PendingWork && ancestor.State <> ActiveWork)
+                with
+                | Some ancestor ->
+                    Error(
+                        InvalidTransition
+                            $"WorkItem '{id}' cannot start while ancestor '{ancestor.Id}' is {stateName ancestor.State}"
+                    )
+                | None ->
+                    // Open ancestor questions block the descendant's atomic activation.
+                    match ancestorItems id task.WorkItems |> List.tryFind (fun ancestor -> questionBlocksWorkItem task ancestor.Id) with
+                    | Some ancestor ->
+                        Error(
+                            InvalidTransition
+                                $"WorkItem '{id}' cannot start while ancestor '{ancestor.Id}' is blocked by an open question"
+                        )
+                    | None -> Ok()
+
+    let canStartWorkItem (task: TaskModel) (id: string) = startEligibility task id
 
     let private activatePath id (items: WorkItem list) =
         let pathIds =
@@ -5008,45 +5037,16 @@ module private Domain =
     let private decideCommand (now: DateTimeOffset) (task: TaskModel) command =
         match command with
         | StartWorkItem id ->
-            match findWorkItem id task.WorkItems with
-            | None -> Error [ NotFound $"WorkItem '{id}' was not found" ]
-            | Some _ when task.Lifecycle <> "open" -> Error [ InvalidTransition "a complete task cannot start work" ]
-            | Some item when item.State <> PendingWork -> Error [ InvalidTransition $"WorkItem '{id}' must be pending before it starts" ]
-            | Some item ->
-                // a child may start only under a Pending/Active ancestry;
-                // activatePath then promotes the still-Pending ancestors atomically.
-                match readiness task item with
-                | NotReady reasons -> Error [ InvalidTransition $"WorkItem '{id}' is not ready: {describeReadiness reasons}" ]
-                | Ready ->
-                    match
-                        ancestorItems id task.WorkItems
-                        |> List.tryFind (fun ancestor -> ancestor.State <> PendingWork && ancestor.State <> ActiveWork)
-                    with
-                    | Some ancestor ->
-                        Error
-                            [ InvalidTransition
-                                  $"WorkItem '{id}' cannot start while ancestor '{ancestor.Id}' is {stateName ancestor.State}" ]
-                    | None ->
-                        // activation promotes still-Pending ancestors, so a
-                        // question-blocked ancestor must also reject the descendant start.
-                        match
-                            ancestorItems id task.WorkItems
-                            |> List.tryFind (fun ancestor -> questionBlocksWorkItem task ancestor.Id)
-                        with
-                        | Some ancestor ->
-                            Error
-                                [ InvalidTransition
-                                      $"WorkItem '{id}' cannot start while ancestor '{ancestor.Id}' is blocked by an open question" ]
-                        | None ->
-                            // the first material start establishes the
-                            // baseline and records the contract fingerprint immediately
-                            // before the WorkItem starts.
-                            match task.ContractState with
-                            | Draft ->
-                                Ok
-                                    [ ContractBaselined(contractFingerprintOf (contractContentOf task))
-                                      StartWorkItem id ]
-                            | Baselined -> Ok [ StartWorkItem id ]
+            match startEligibility task id with
+            | Error error -> Error [ error ]
+            | Ok() ->
+                // The first material start records its baseline immediately before activation.
+                match task.ContractState with
+                | Draft ->
+                    Ok
+                        [ ContractBaselined(contractFingerprintOf (contractContentOf task))
+                          StartWorkItem id ]
+                | Baselined -> Ok [ StartWorkItem id ]
         | CompleteWorkItem (id, completion) ->
             match findWorkItem id task.WorkItems with
             | None -> Error [ NotFound $"WorkItem '{id}' was not found" ]
@@ -6870,6 +6870,125 @@ let validateTask root id : Async<Result<TaskModel, RuntimeError>> =
                     match Domain.validationFindings profiles task with
                     | [] -> return Ok task
                     | findings -> return Error(InvalidTransition(findings |> String.concat "; "))
+    }
+
+let private projectionNode<'T> (value: 'T) : JsonNode = JsonValue.Create<'T>(value) :> JsonNode
+
+let private projectionItems (items: WorkItem list) =
+    let rec walk (values: WorkItem list) : WorkItem list = values |> List.collect (fun (item: WorkItem) -> item :: walk item.Children)
+    walk items
+
+let private statusProjection (task: TaskModel) =
+    let items = projectionItems task.WorkItems
+    let counts = JsonObject()
+
+    [ "pending"; "active"; "waiting"; "blocked"; "done"; "skipped" ]
+    |> List.iter (fun state ->
+        counts[state] <- projectionNode (items |> List.filter (fun item -> Domain.stateName item.State = state) |> List.length))
+
+    let result = JsonObject()
+    result["validation"] <- projectionNode "notChecked"
+    result["taskId"] <- projectionNode task.Id
+    result["stateRevision"] <- projectionNode task.StateRevision
+    result["contractRevision"] <- projectionNode task.ContractRevision
+    result["kind"] <- projectionNode (kindToString task.Kind)
+    result["profile"] <- projectionNode task.Profile
+    result["lifecycle"] <- projectionNode task.Lifecycle
+    result["contractState"] <- projectionNode (contractStateToString task.ContractState)
+    result["workItemProgress"] <- counts
+    result
+
+let private projectionBlocker (kind: string) (id: string option) (state: string option) (ancestorId: string option) =
+    let blocker = JsonObject()
+    blocker["type"] <- projectionNode kind
+    match id with
+    | Some value -> blocker["id"] <- projectionNode value
+    | None -> ()
+    match state with
+    | Some value -> blocker["state"] <- projectionNode value
+    | None -> ()
+    match ancestorId with
+    | Some value -> blocker["ancestorId"] <- projectionNode value
+    | None -> ()
+    blocker
+
+let private readyProjection (task: TaskModel) (offset: int) (limit: int) =
+    let all = projectionItems task.WorkItems |> List.filter (fun item -> item.State = PendingWork)
+    let evaluated =
+        all
+        |> List.map (fun item ->
+            let blockers = JsonArray()
+            let add kind id state ancestorId = blockers.Add(projectionBlocker kind id state ancestorId)
+
+            if task.Lifecycle <> "open" then add "lifecycle" None (Some task.Lifecycle) None
+            match Domain.canStartWorkItem task item.Id with
+            | Ok() -> ()
+            | Error _ ->
+                match Domain.readiness task item with
+                | NotReady reasons ->
+                    reasons |> List.iter (function
+                        | UnmetDependency id -> add "dependency" (Some id) None None
+                        | UnmetGuard id -> add "guard" (Some id) None None
+                        | OpenQuestion id -> add "question" (Some id) None None
+                        | WorkItemNotPending -> ())
+                | Ready -> ()
+
+                Domain.ancestorItems item.Id task.WorkItems
+                |> List.iter (fun ancestor ->
+                    if ancestor.State <> PendingWork && ancestor.State <> ActiveWork then
+                        add "ancestorState" (Some ancestor.Id) (Some(Domain.stateName ancestor.State)) None
+                    if Domain.questionBlocksWorkItem task ancestor.Id then
+                        Domain.openQuestionsForWorkItem task ancestor.Id
+                        |> List.iter (fun question -> add "ancestorQuestion" (Some question.Id) None (Some ancestor.Id)))
+            let visible = blockers |> Seq.truncate 20 |> Seq.map (fun node -> node.DeepClone()) |> Seq.toArray
+            let itemResult = JsonObject()
+            itemResult["workItemId"] <- projectionNode item.Id
+            itemResult["startable"] <- projectionNode (blockers.Count = 0)
+            itemResult["blockers"] <- JsonArray(visible)
+            itemResult["blockersTotal"] <- projectionNode blockers.Count
+            itemResult["blockersTruncated"] <- projectionNode (blockers.Count > visible.Length)
+            itemResult)
+
+    let selected = evaluated |> List.skip offset |> List.truncate limit
+    let pending = JsonArray(selected |> List.map (fun item -> item :> JsonNode) |> List.toArray)
+    let result = JsonObject()
+    result["validation"] <- projectionNode "valid"
+    result["taskId"] <- projectionNode task.Id
+    result["stateRevision"] <- projectionNode task.StateRevision
+    result["contractRevision"] <- projectionNode task.ContractRevision
+    result["pending"] <- pending
+    result["total"] <- projectionNode evaluated.Length
+    result["offset"] <- projectionNode offset
+    result["limit"] <- projectionNode limit
+    result["nextOffset"] <- if offset + selected.Length < evaluated.Length then projectionNode (offset + selected.Length) else null
+    result
+
+let projectTask root id ready offset limit : Async<Result<JsonNode, RuntimeError>> =
+    async {
+        if offset < 0 then return Error(InvalidInput "offset must be non-negative")
+        elif limit < 1 || limit > 100 then return Error(InvalidInput "limit must be between 1 and 100")
+        else
+            match sidecarPath root id with
+            | Error error -> return Error error
+            | Ok(path, taskDirectory) ->
+                if ready then
+                    let! profilesResult = resolveProfiles root
+                    match profilesResult with
+                    | Error error -> return Error error
+                    | Ok profiles ->
+                        let! loaded = withExistingSidecar root taskDirectory path (fun () -> loadTaskWith profiles path)
+                        match loaded with
+                        | Error error -> return Error error
+                        | Ok task ->
+                            match Domain.validationFindings profiles task with
+                            | findings when not findings.IsEmpty ->
+                                return Error(InvalidTransition(findings |> String.concat "; "))
+                            | _ -> return Ok(readyProjection task offset limit :> JsonNode)
+                else
+                    let! loaded = withExistingSidecar root taskDirectory path (fun () -> loadTaskLenient path)
+                    match loaded with
+                    | Error error -> return Error error
+                    | Ok task -> return Ok(statusProjection task :> JsonNode)
     }
 
 [<RequireQualifiedAccess>]

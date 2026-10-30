@@ -403,5 +403,35 @@ assertEqual
     [ "execution"; "research" ]
     (enumStrings reclassifyTask.["properties"].["kind"])
 
+// --- 4. projection tool schema parity ----------------------------------------
+
+// The published projection schemas must agree with the protocol parser: the
+// lenient status read publishes no pagination, and the strict ready read owns
+// the offset/limit bounds.
+let taskStatus = findTool "task_status"
+let taskReady = findTool "task_ready"
+
+let taskStatusSchema = taskStatus.["inputSchema"]
+let taskReadySchema = taskReady.["inputSchema"]
+
+assertEqual "task_status required" (Set.ofList [ "projectRoot"; "taskId" ]) (requiredNames taskStatusSchema)
+assertEqual "task_status properties" (Set.ofList [ "projectRoot"; "taskId" ]) (propertyNames taskStatusSchema)
+
+assertEqual
+    "task_status publishes no pagination"
+    Set.empty
+    (propertyNames taskStatusSchema |> Set.filter (fun name -> name = "offset" || name = "limit"))
+
+assertEqual "task_ready required" (Set.ofList [ "projectRoot"; "taskId" ]) (requiredNames taskReadySchema)
+
+assertEqual
+    "task_ready properties"
+    (Set.ofList [ "projectRoot"; "taskId"; "offset"; "limit" ])
+    (propertyNames taskReadySchema)
+
+assertEqual "task_ready offset minimum" 0 (taskReadySchema.["properties"].["offset"].["minimum"].GetValue<int>())
+assertEqual "task_ready limit minimum" 1 (taskReadySchema.["properties"].["limit"].["minimum"].GetValue<int>())
+assertEqual "task_ready limit maximum" 100 (taskReadySchema.["properties"].["limit"].["maximum"].GetValue<int>())
+
 printfn
-    "OK Workflow schema/parser parity: required/properties invariant, command/patch/plan coverage, and evidence identifier grammar"
+    "OK Workflow schema/parser parity: required/properties invariant, command/patch/plan coverage, projection schema bounds, and evidence identifier grammar"
