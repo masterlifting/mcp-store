@@ -35,8 +35,7 @@ let private awaitComplete (work: Task) : Async<unit> =
         | error -> return raise error
     }
 
-// Schema 2 is the sole canonical persisted Workflow representation: a task is
-// either this exact document or it is rejected.
+// Rejecting noncanonical task formats prevents implicit migration.
 [<Literal>]
 let SchemaVersion = 3
 
