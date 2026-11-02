@@ -2,7 +2,7 @@
 
 This directory is the standalone producer boundary for the bounded .NET
 build/test MCP server. It owns the Dotnet producer implementation and publishes
-the `dotnet` v1.0.5 framework-dependent `net11.0` runtime distribution. Consumers
+the `dotnet` v1.0.6 framework-dependent `net11.0` runtime distribution. Consumers
 do not build or run this source checkout at runtime.
 
 ## Consumer installation
@@ -72,7 +72,7 @@ dotnet fsi dotnet/tests/provenance/Run.fsx
 
 ## Producer packaging
 
-From the repository root, build and pin the immutable `v1.0.5.zip`
+From the repository root, build and pin the immutable `v1.0.6.zip`
 release with:
 
 ```text
@@ -86,7 +86,7 @@ The scripts stage only the allowlisted runtime files under
 allowlist and a lowercase SHA-256 for every runtime file. The generated archive
 contains the runtime files, `NOTICE.txt`, and the manifest; source, project,
 build output, PDB, and apphost files are rejected. The archive filename
-encodes the version only (`v1.0.5.zip`); the producer identity already comes
+encodes the version only (`v1.0.6.zip`); the producer identity already comes
 from the producer directory, the manifest `id`, the project/assembly
 identity, the release context, and the consumer descriptor. Packaging refuses
 to run from a dirty source tree and stamps each manifest with the clean

@@ -52,8 +52,8 @@ let private canonicalComponentIds = [ "dotnet"; "workflow" ]
 //   sibling's version literal and still pass, so the expected version is keyed per component and an unlisted
 //   canonical component fails closed instead of silently skipping the assertion.
 let private canonicalComponentVersions =
-    [ "dotnet", "1.0.5"
-      "workflow", "2.0.0" ]
+    [ "dotnet", "1.0.6"
+      "workflow", "3.0.0" ]
     |> Map.ofList
 
 let private projectionTests =
