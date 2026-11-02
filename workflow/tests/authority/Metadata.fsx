@@ -73,7 +73,8 @@ async {
 
         let now = DateTimeOffset.UtcNow
 
-        // Case 1: end-to-end via applyTask, waiving a User-waivable guard with a DecisionRef that does not exist.
+        // Case 1: end-to-end via applyTask, waiving a User-waivable guard without any DecisionRef, which
+        // cannot be authorized by an ordinary apply and must publish the structured authority metadata.
         let guardSpec : GuardSpec =
             { Id = "G1"
               Target = GuardTarget.TaskTarget
@@ -92,7 +93,7 @@ async {
                 tempRoot
                 afterGuard.Id
                 afterGuard.StateRevision
-                (TaskCommand.WaiveGuard ("G1", Some (DecisionRef "D999")))
+                (TaskCommand.WaiveGuard ("G1", None))
 
         match waiveResult with
         | Error (AuthorityDenied (metadata, _)) ->
@@ -107,10 +108,73 @@ async {
             | Some kind ->
                 assertEqual "Case 1 DecisionKind value" WaiverDecision kind
             | None -> failWith "Case 1 DecisionKind expected Some"
+            match metadata.Target with
+            | Some target ->
+                assertEqual "Case 1 Target value" (GuardDispositionTarget "G1") target
+            | None -> failWith "Case 1 Target expected Some"
         | Error other ->
             failWith (sprintf "Case 1: expected AuthorityDenied, got %s" (renderError other))
         | Ok _ ->
             failWith "Case 1: expected authority rejection"
+
+        // Case 1b: an explicit unknown DecisionRef is rejected as a not-found decision, so it carries no
+        // authority metadata and must leave the persisted task bytes, revision, and decisions unchanged.
+        let sidecarPath =
+            Path.Combine(Path.GetFullPath tempRoot, ".tasks", afterGuard.Id, "runtime.json")
+
+        if not (File.Exists sidecarPath) then
+            failWith (sprintf "Case 1b: persisted sidecar is missing at %s" sidecarPath)
+
+        let persistedBefore =
+            JsonNode.Parse(File.ReadAllText sidecarPath) :?> JsonObject
+
+        let sidecarBytesBefore = File.ReadAllBytes sidecarPath
+
+        let! unknownReferenceResult =
+            applyTask
+                tempRoot
+                afterGuard.Id
+                afterGuard.StateRevision
+                (TaskCommand.WaiveGuard ("G1", Some (DecisionRef "D999")))
+
+        let unknownReferenceError =
+            match unknownReferenceResult with
+            | Error error -> error
+            | Ok _ -> failWith "Case 1b: expected the unknown decision reference to be rejected"
+
+        // The domain reports the unknown reference as NotFound, and the ordinary apply envelope carries
+        // every non-authority rejection as InvalidInput with the same canonical reason.
+        match unknownReferenceError with
+        | InvalidInput message ->
+            assertEqual "Case 1b unknown reference message" "Decision 'D999' was not found" message
+        | other ->
+            failWith (sprintf "Case 1b: expected InvalidInput, got %s" (renderError other))
+
+        assertNone
+            "Case 1b unknown reference carries no authority metadata"
+            (tryAuthorityMetadata unknownReferenceError)
+
+        let sidecarBytesAfter = File.ReadAllBytes sidecarPath
+
+        assertEqual "Case 1b persisted bytes unchanged" sidecarBytesBefore sidecarBytesAfter
+
+        let persistedAfter =
+            JsonNode.Parse(File.ReadAllText sidecarPath) :?> JsonObject
+
+        assertEqual
+            "Case 1b persisted revision unchanged"
+            afterGuard.StateRevision
+            (persistedAfter.["stateRevision"].GetValue<int>())
+
+        assertEqual
+            "Case 1b persisted revision matches the pre-rejection revision"
+            (persistedBefore.["stateRevision"].GetValue<int>())
+            (persistedAfter.["stateRevision"].GetValue<int>())
+
+        assertEqual
+            "Case 1b persisted decision count unchanged"
+            (persistedBefore.["decisions"].AsArray().Count)
+            (persistedAfter.["decisions"].AsArray().Count)
 
         // Case 2: tryAuthorityMetadata round-trip
         let case2Error =
@@ -188,7 +252,7 @@ async {
             "Case 6 schema description disclaims User authority manufacturing"
             (toolsSource.Contains("cannot manufacture User authority"))
 
-        printfn "OK Workflow authority metadata contract: AuthorityDenied round-trips, non-authority errors stay envelope-clean, render handles None fields, schema description documents the contract"
+        printfn "OK Workflow authority metadata contract: an omitted reference denies with structured authority metadata, an explicit unknown reference is a not-found error without authority metadata or a persisted change, AuthorityDenied round-trips, non-authority errors stay envelope-clean, render handles None fields, schema description documents the contract"
     finally
         if Directory.Exists tempRoot then
             Directory.Delete(tempRoot, true)

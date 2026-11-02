@@ -738,7 +738,9 @@ async {
 
         assertEqual "coordinator decision authority" Coordinator coordinatorDecision.Authority
 
-        do! expectRejected "coordinator-authored decision cannot dispose user-required review guard" "does not authorize the exact operation" (applyTask rootH "TST-920" withCoordinatorDecision.StateRevision (MarkGuardNotApplicable(harnessReview.Id, Some(DecisionRef coordinatorDecision.Id))))
+        // The decision targets the exact guard and carries the right kind, so the rejection is the
+        // insufficient-authority denial, not a wrong-target input error.
+        do! expectRejected "coordinator-authored decision cannot dispose user-required review guard" "matches the operation but does not provide user authority" (applyTask rootH "TST-920" withCoordinatorDecision.StateRevision (MarkGuardNotApplicable(harnessReview.Id, Some(DecisionRef coordinatorDecision.Id))))
 
         // Research materializes only the non-waivable investigation obligation.
         let! harnessResearch = expectOk "create harness research task" (createTaskWithProfile rootH (Some HarnessProfileId) { createRequest "TST-921" "Harness research" with Kind = Research })
