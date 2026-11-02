@@ -71,7 +71,7 @@ let private topLevelBridgeSites =
           "workflow/tests/artifacts/Run.fsx", [ "|> Async.RunSynchronously" ]
           "workflow/tests/coordination/Run.fsx", [ "|> Async.RunSynchronously" ]
           "workflow/tests/evidence/Run.fsx", [ "|> Async.RunSynchronously" ]
-          "workflow/tests/integrity/Cases.fsx", [ "|> Async.RunSynchronously" ]
+          "workflow/tests/integrity/Cases.fsx", [ "suite |> Async.RunSynchronously" ]
           "workflow/tests/integrity/Run.fsx", [ "|> Async.RunSynchronously" ]
           "workflow/tests/authority/Cases.fsx", [ "|> Async.RunSynchronously" ]
           "workflow/tests/authority/Run.fsx", [ "|> Async.RunSynchronously" ]

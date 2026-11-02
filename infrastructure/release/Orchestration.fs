@@ -197,8 +197,12 @@ let renderResolution (resolution: ReleaseEvaluate.Resolution) : string =
     node["publishedMetadataSha256"] <- JsonValue.Create(resolution.PublishedMetadataAssetSha256 |> Option.toObj)
     node.ToJsonString(JsonSerializerOptions(WriteIndented = true))
 
-// Runs one .fsx child with the canonical config; the explicit semantic stage keeps the typed `ProcessFailed` operation stable so structured phase failures stay distinct from the script path.
-let private runProducerScript (root: string) (phase: string) (scriptPath: string) (configPath: string) : Async<Result<unit, ReleaseError>> =
+type private ProducerScriptRunner =
+    | DotnetFsi
+    | RootRun
+
+// The coordination gate must use the repository root's isolation wrapper because it starts a fresh child environment.
+let private runProducerScript (root: string) (phase: string) (scriptPath: string) (configPath: string) (runner: ProducerScriptRunner) : Async<Result<unit, ReleaseError>> =
     async {
         let absoluteScript = Path.GetFullPath(Path.Combine(root, scriptPath))
         let absoluteConfig = Path.GetFullPath(Path.Combine(root, configPath))
@@ -206,21 +210,37 @@ let private runProducerScript (root: string) (phase: string) (scriptPath: string
         if not (File.Exists absoluteScript) then
             return Error(MissingArtifact absoluteScript)
         else
-            let! result = runChild root publicationEnvVars "dotnet" [ "fsi"; "--nologo"; absoluteScript ]
+            let invocation =
+                match runner with
+                | DotnetFsi ->
+                    Ok("dotnet", [ "fsi"; "--nologo"; absoluteScript ])
+                | RootRun ->
+                    let helperPath = Path.Combine(root, "Run.ps1")
+                    if not (File.Exists helperPath) then
+                        Error(MissingArtifact helperPath)
+                    else
+                        Ok("pwsh", [ "-NoProfile"; "-File"; helperPath; "-Script"; scriptPath ])
 
-            match result with
+            match invocation with
             | Error error -> return Error error
-            | Ok (0, _, _) -> return Ok()
-            | Ok (exitCode, _stdout, stderr) ->
-                return Error(ProcessFailed(phase, exitCode, stderr.Trim()))
+            | Ok (executable, args) ->
+                let! result = runChild root publicationEnvVars executable args
+
+                match result with
+                | Error error -> return Error error
+                | Ok (0, _, _) -> return Ok()
+                | Ok (exitCode, _stdout, stderr) ->
+                    return Error(ProcessFailed(phase, exitCode, stderr.Trim()))
     }
 
-// Explicit per-component test gate list (no dynamic discovery): ordered relative to the producer's component root. Workflow's pack requires an additional runtime-coordination test against the freshly built artifacts.
-let private producerScriptTests (componentId: string) : string list =
+// Explicit per-component test gate list (no dynamic discovery): paths are relative to the producer root unless the root runner is selected.
+let private producerScriptTests (componentId: string) : (string * ProducerScriptRunner) list =
     match componentId with
-    | "dotnet" -> [ "tests/distribution/Run.fsx" ]
-    | "workflow" -> [ "tests/distribution/Run.fsx"; "tests/coordination/Run.fsx" ]
-    | _ -> [ "tests/distribution/Run.fsx" ]
+    | "dotnet" -> [ "tests/distribution/Run.fsx", DotnetFsi ]
+    | "workflow" ->
+        [ "tests/distribution/Run.fsx", DotnetFsi
+          "workflow/tests/coordination/Run.fsx", RootRun ]
+    | _ -> [ "tests/distribution/Run.fsx", DotnetFsi ]
 
 let private runProducerTests
     (root: string)
@@ -232,13 +252,16 @@ let private runProducerTests
         let mutable failure : (ReleaseError * string) option = None
         let mutable index = 0
 
-        for testsScript in producerScriptTests componentId do
+        for testsScript, runner in producerScriptTests componentId do
             match failure with
             | None ->
                 index <- index + 1
                 let phase = if index = 1 then "tests" else sprintf "tests[%d]" index
-                let scriptPath = Path.Combine(componentId, testsScript)
-                let! result = runProducerScript root phase scriptPath configPath
+                let scriptPath =
+                    match runner with
+                    | DotnetFsi -> Path.Combine(componentId, testsScript)
+                    | RootRun -> testsScript
+                let! result = runProducerScript root phase scriptPath configPath runner
 
                 match result with
                 | Ok () -> ()
@@ -293,12 +316,12 @@ let private prepareInternal (root: string) (configPath: string) : Async<Result<P
                             let manifestPath = Path.Combine(distributionDirectory, DistributionContract.manifestEntryName)
                             let configAbsolute = Path.GetFullPath(Path.Combine(root, configPath))
 
-                            let! buildResult = runProducerScript root "build" (Path.Combine(componentId, "release", "Build.fsx")) configPath
+                            let! buildResult = runProducerScript root "build" (Path.Combine(componentId, "release", "Build.fsx")) configPath DotnetFsi
 
                             match buildResult with
                             | Error error -> return Error error
                             | Ok () ->
-                                let! pinsResult = runProducerScript root "pins" (Path.Combine(componentId, "release", "Pin.fsx")) configPath
+                                let! pinsResult = runProducerScript root "pins" (Path.Combine(componentId, "release", "Pin.fsx")) configPath DotnetFsi
 
                                 match pinsResult with
                                 | Error error -> return Error error

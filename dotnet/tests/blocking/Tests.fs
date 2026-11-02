@@ -235,6 +235,55 @@ let literalCalls = @"pendingTask.Result pendingTask.Wait()"
                 1
                 "the exact bridge is not allowlisted at another path"
 
+        testCase "the integrity child script entry bridge requires its exact path, shape, and documentation" <| fun _ ->
+            let documented =
+                "// Standalone entry bridge: FSI owns the process entry for this isolated\n"
+                + "// child script; the parent suite owns the redirection and the aggregation.\n"
+                + "suite |> Async.RunSynchronously\n"
+
+            Expect.isEmpty
+                (violations (checkText "workflow/tests/integrity/Cases.fsx" documented))
+                "the documented exact child entry bridge is allowed"
+
+            Expect.equal
+                (violations (checkText "workflow/tests/integrity/Cases.fsx" "suite |> Async.RunSynchronously\n") |> List.length)
+                1
+                "an undocumented bridge remains blocked"
+
+            Expect.equal
+                (violations (checkText "other.fsx" documented) |> List.length)
+                1
+                "the exact bridge is not allowlisted at another path"
+
+            Expect.equal
+                (violations (checkText "workflow/tests/integrity/Run.fsx" documented) |> List.length)
+                1
+                "the sibling parent suite keeps its own exact bridge shape"
+
+            Expect.equal
+                (violations (checkText "workflow/tests/integrity/Cases.fsx" (documented + "runAgain () |> Async.RunSynchronously\n")) |> List.length)
+                2
+                "a second bridge invalidates the exact allowlist"
+
+            Expect.equal
+                (violations (checkText "workflow/tests/integrity/Cases.fsx" "// Standalone entry bridge: FSI owns the process entry for this isolated\nlet bridge () = Async.RunSynchronously(work)\n") |> List.length)
+                1
+                "a nested helper bridge is not accepted"
+
+        testCase "the integrity child script allows only its one real entry bridge" <| fun _ ->
+            let root = repositoryRoot ()
+            let relative = "workflow/tests/integrity/Cases.fsx"
+            let source = File.ReadAllText(Path.Combine(root, "workflow", "tests", "integrity", "Cases.fsx"))
+            Expect.isEmpty (violations (checkText relative source)) "the documented standalone child entry bridge is allowed"
+
+            let withoutDoc = source.Replace("Standalone entry bridge", "no entry-bridge doc")
+            Expect.isTrue ((violations (checkText relative withoutDoc) |> List.length) >= 1) "the bridge without its WHY comment is blocked"
+
+            Expect.isTrue ((violations (checkText "other.fsx" source) |> List.length) >= 1) "the exact bridge is not allowlisted at another path"
+
+            let extraBridge = source + Environment.NewLine + "let unexpected () = Async.RunSynchronously(work)"
+            Expect.equal (violations (checkText relative extraBridge) |> List.length) 2 "an extra bridge invalidates the exact allowlist"
+
         testCase "ordinary inline comments cannot exempt blocking calls" <| fun _ ->
             let source = "// SYNC-OVER-ASYNC-ALLOW: no suppression syntax exists\ntask.Wait()\n"
             Expect.equal (violations (checkText "sample.fs" source) |> List.length) 1 "inline comment is not an exemption"
