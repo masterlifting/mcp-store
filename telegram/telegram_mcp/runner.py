@@ -1,6 +1,6 @@
 """Application entrypoints for the Telegram MCP server."""
 
-from telegram_mcp.install_guard import UnsafeInstallationError, assert_safe_distribution
+from telegram_mcp.guard import UnsafeInstallationError, assert_safe_distribution
 
 try:
     assert_safe_distribution()
@@ -43,7 +43,7 @@ async def _connect_authorized_client(label, client) -> None:
         raise RuntimeError(
             f"Telegram client '{label}' is not authorized. Interactive phone login "
             "is disabled for the MCP server because it runs over stdio. Generate a "
-            "session string with `uv run session_string_generator.py`, then set "
+            "session string with `uv run generate.py`, then set "
             "TELEGRAM_SESSION_STRING or TELEGRAM_SESSION_STRING_<LABEL> in .env. "
             "For existing file sessions, run the login outside the MCP server first."
         )

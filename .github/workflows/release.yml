@@ -62,7 +62,7 @@ jobs:
         env:
           # The projection step's own value, because a step-local GITHUB_OUTPUT file holds only that step's writes.
           PROJECTED_COMPONENTS: ${{ steps.project.outputs.components }}
-        run: pwsh infrastructure/release/Coherence.ps1 -Components $env:PROJECTED_COMPONENTS
+        run: pwsh infrastructure/release/Check.ps1 -Components $env:PROJECTED_COMPONENTS
 
       - name: setup .NET SDK from the canonical projection
         uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
@@ -84,7 +84,7 @@ jobs:
           foreach ($component in $components) {
             & dotnet fsi --nologo "$component/release/Build.fsx"
             if ($LASTEXITCODE -ne 0) { throw "$component distribution build failed (exit $LASTEXITCODE)" }
-            & dotnet fsi --nologo "$component/release/Pins.fsx"
+            & dotnet fsi --nologo "$component/release/Pin.fsx"
             if ($LASTEXITCODE -ne 0) { throw "$component consumer pin failed (exit $LASTEXITCODE)" }
           }
 
@@ -203,11 +203,11 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           # Build the exact projects the Expecto gates execute; the --no-build runs below then execute that same output.
-          dotnet build dotnet/Mcp.Dotnet.fsproj -c Release
+          dotnet build dotnet/Dotnet.fsproj -c Release
           if ($LASTEXITCODE -ne 0) { throw "dotnet producer build failed (exit $LASTEXITCODE)" }
-          dotnet build workflow/Mcp.Workflow.fsproj -c Release
+          dotnet build workflow/Workflow.fsproj -c Release
           if ($LASTEXITCODE -ne 0) { throw "workflow producer build failed (exit $LASTEXITCODE)" }
-          dotnet build dotnet/tests/Mcp.Dotnet.Tests/Mcp.Dotnet.Tests.fsproj -c Release
+          dotnet build dotnet/tests/Tests.fsproj -c Release
           if ($LASTEXITCODE -ne 0) { throw "producer Expecto test project build failed (exit $LASTEXITCODE)" }
           dotnet build infrastructure/release/tests/Tests.fsproj -c Release
           if ($LASTEXITCODE -ne 0) { throw "compiled release Expecto project build failed (exit $LASTEXITCODE)" }
@@ -222,7 +222,7 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           # Actual compiled Expecto entrypoint: no --ignore, no filter, no result rewriting; the native failure exit blocks the release job.
-          dotnet run --project dotnet/tests/Mcp.Dotnet.Tests/Mcp.Dotnet.Tests.fsproj -c Release --no-build
+          dotnet run --project dotnet/tests/Tests.fsproj -c Release --no-build
           exit $LASTEXITCODE
 
       - name: run the resolver Expecto gate (native exit preserved)
@@ -243,26 +243,73 @@ jobs:
           }
           # Explicit deterministic selection of the thirteen Workflow suites that need no built distribution; never globbed.
           $entrypoints = @(
-            "workflow/tests/AuthorityMetadataTests.fsx",
-            "workflow/tests/EphemeralLockInvariantTests.fsx",
-            "workflow/tests/EvidenceIdentifierV2Tests.fsx",
+            "workflow/tests/authority/Metadata.fsx",
+            "workflow/tests/locking/Run.fsx",
+            "workflow/tests/evidence/Run.fsx",
             "workflow/tests/Projections.fsx",
-            "workflow/tests/SchemaParityGuardTests.fsx",
-            "workflow/tests/TaskContractTests.fsx",
-            "workflow/tests/TaskPathSafetyTests.fsx",
-            "workflow/tests/TaskProfileTests.fsx",
-            "workflow/tests/TaskSupportingArtifactTests.fsx",
-            "workflow/tests/WorkflowMcpFindingTests.fsx",
-            "workflow/tests/WorkflowMcpNativeCompatTests.fsx",
-            "workflow/tests/WorkflowMcpTests.fsx",
-            "workflow/tests/WorkflowTests.fsx"
+            "workflow/tests/schema/Run.fsx",
+            "workflow/tests/contract/Run.fsx",
+            "workflow/tests/path/Run.fsx",
+            "workflow/tests/profile/Run.fsx",
+            "workflow/tests/artifacts/Run.fsx",
+            "workflow/tests/protocol/Findings.fsx",
+            "workflow/tests/protocol/Negotiation.fsx",
+            "workflow/tests/protocol/Run.fsx",
+            "workflow/tests/domain/Run.fsx"
+          )
+          $tempBase = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { [System.IO.Path]::GetTempPath() }
+          # The suites compare this pre-redirection path with their resolved directory, so it is captured before any child starts.
+          $realAppData = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::LocalApplicationData)
+          $redirected = @(
+            "LOCALAPPDATA",
+            "APPDATA",
+            "ProgramData",
+            "USERPROFILE",
+            "HOME",
+            "TEMP",
+            "TMP",
+            "DOTNET_CLI_HOME",
+            "MCP_WORKFLOW_TEST_EXPECTED_APP_DATA",
+            "MCP_WORKFLOW_TEST_REAL_APP_DATA"
           )
           foreach ($entrypoint in $entrypoints) {
             if (-not (Test-Path -LiteralPath $entrypoint)) { throw "Workflow test entrypoint is missing: $entrypoint" }
+            # A unique run root per suite keeps one suite's resolved key path out of every other suite's reach.
+            $runRoot = Join-Path $tempBase ("workflow-test-" + [guid]::NewGuid().ToString("N"))
+            $appData = Join-Path $runRoot "appdata"
+            $homeDirectory = Join-Path $runRoot "home"
+            $tempDirectory = Join-Path $runRoot "temp"
+            $cliHome = Join-Path $runRoot "cli"
+            foreach ($directory in @($appData, $homeDirectory, $tempDirectory, $cliHome)) {
+              New-Item -ItemType Directory -Path $directory -Force | Out-Null
+            }
+            $previous = @{}
+            foreach ($name in $redirected) {
+              $previous[$name] = [System.Environment]::GetEnvironmentVariable($name)
+            }
             Write-Host "::group::workflow test $entrypoint"
-            & dotnet fsi --nologo $entrypoint
-            $code = $LASTEXITCODE
-            Write-Host "::endgroup::"
+            $code = 1
+            try {
+              # Set before the child starts, so the suite guard resolves the sandbox before a producer captures a key path.
+              $env:LOCALAPPDATA = $appData
+              $env:APPDATA = $appData
+              $env:ProgramData = $appData
+              $env:USERPROFILE = $homeDirectory
+              $env:HOME = $homeDirectory
+              $env:TEMP = $tempDirectory
+              $env:TMP = $tempDirectory
+              $env:DOTNET_CLI_HOME = $cliHome
+              $env:MCP_WORKFLOW_TEST_EXPECTED_APP_DATA = $appData
+              $env:MCP_WORKFLOW_TEST_REAL_APP_DATA = $realAppData
+              & dotnet fsi --nologo $entrypoint
+              $code = $LASTEXITCODE
+            } finally {
+              foreach ($name in $redirected) {
+                [System.Environment]::SetEnvironmentVariable($name, $previous[$name])
+              }
+              Write-Host "::endgroup::"
+              Remove-Item -LiteralPath $runRoot -Recurse -Force -ErrorAction SilentlyContinue
+            }
             if ($code -ne 0) {
               Write-Host "::error::Workflow test entrypoint failed: $entrypoint (exit $code)"
               exit $code
@@ -271,9 +318,9 @@ jobs:
 
       - name: run the complete compiled release regression gate
         shell: pwsh
-        # Suite.ps1 runs the complete compiled suite with a case-count check and never excludes or rewrites a case; its
+        # Test.ps1 runs the complete compiled suite with a case-count check and never excludes or rewrites a case; its
         # retained baseline regression reads canonical fixtures, so no stage downloads or stages a fixture transport.
-        run: pwsh infrastructure/release/Suite.ps1
+        run: pwsh infrastructure/release/Test.ps1
 
       - name: strict FCS typecheck of the retained release scripts
         shell: pwsh
@@ -328,9 +375,9 @@ jobs:
           $ErrorActionPreference = "Stop"
           dotnet build infrastructure/release/Release.fsproj -c Release
           if ($LASTEXITCODE -ne 0) { throw "release runner build failed (exit $LASTEXITCODE)" }
-          dotnet build dotnet/Mcp.Dotnet.fsproj -c Release
+          dotnet build dotnet/Dotnet.fsproj -c Release
           if ($LASTEXITCODE -ne 0) { throw "dotnet producer build failed (exit $LASTEXITCODE)" }
-          dotnet build workflow/Mcp.Workflow.fsproj -c Release
+          dotnet build workflow/Workflow.fsproj -c Release
           if ($LASTEXITCODE -ne 0) { throw "workflow producer build failed (exit $LASTEXITCODE)" }
 
       - name: run both producers' distribution package gates (native exit preserved)
@@ -343,7 +390,7 @@ jobs:
           }
           $components = @(ConvertFrom-Json $env:RELEASE_COMPONENTS)
           foreach ($component in $components) {
-            $entrypoint = "$component/tests/DistributionTests.fsx"
+            $entrypoint = "$component/tests/distribution/Run.fsx"
             if (-not (Test-Path -LiteralPath $entrypoint)) { throw "producer package gate is missing: $entrypoint" }
             Write-Host "::group::producer package gate $entrypoint"
             & dotnet fsi --nologo $entrypoint
@@ -363,7 +410,7 @@ jobs:
           if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
             $PSNativeCommandUseErrorActionPreference = $false
           }
-          $entrypoint = "workflow/tests/PackagedRuntimeCoordinationTests.fsx"
+          $entrypoint = "workflow/tests/coordination/Run.fsx"
           if (-not (Test-Path -LiteralPath $entrypoint)) { throw "Workflow packaged coordination gate is missing: $entrypoint" }
           & dotnet fsi --nologo $entrypoint
           exit $LASTEXITCODE

@@ -38,7 +38,7 @@ let private awaitComplete (work: Task) : Async<unit> =
 // Schema 2 is the sole canonical persisted Workflow representation: a task is
 // either this exact document or it is rejected.
 [<Literal>]
-let SchemaVersion = 2
+let SchemaVersion = 3
 
 [<Literal>]
 let GeneralProfileId = "general"
@@ -563,17 +563,61 @@ type TaskCommand =
     | ProfileGuardsSynced of MaterializedGuard list
     | CompleteTask of TerminalHandoff
 
+// Binding confirmation to command, revision, and requirement prevents reuse for another operation.
+type internal TrustedDecisionContext =
+    private
+        { TaskId: string
+          StateRevision: int
+          Command: TaskCommand
+          Operation: string
+          Kind: DecisionKind
+          Target: DecisionTarget
+          ConfirmationRef: string }
+
+type internal TrustedDecisionRequest =
+    { TaskId: string
+      StateRevision: int
+      Command: TaskCommand
+      Operation: string
+      Kind: DecisionKind
+      Target: DecisionTarget }
+
+// Matching task state and command prevents stale confirmation reuse.
+let internal bindTrustedDecisionRequest
+    (request: TrustedDecisionRequest)
+    (task: TaskModel)
+    (command: TaskCommand)
+    (confirmationRef: string)
+    : TrustedDecisionContext option =
+    if
+        task.Id = request.TaskId
+        && task.StateRevision = request.StateRevision
+        && command = request.Command
+        && not (String.IsNullOrWhiteSpace confirmationRef)
+    then
+        Some
+            { TaskId = request.TaskId
+              StateRevision = request.StateRevision
+              Command = request.Command
+              Operation = request.Operation
+              Kind = request.Kind
+              Target = request.Target
+              ConfirmationRef = confirmationRef }
+    else
+        None
+
 type RuntimeError =
     | InvalidInput of string
     | NotFound of string
     | Conflict of expected: int * actual: int
     | InvalidTransition of string
     | PersistenceFailure of string
-    // Carries the exact rendered message so the text surface is unchanged while
-    // the transport can publish the structured remediation block.
     | AuthorityDenied of metadata: AuthorityMetadata * message: string
-    // Unexpected faults reach this only at the transport safety boundary.
     | InternalFailure of string
+
+// Only affirmative trusted-host confirmation may create a reference.
+type internal TrustedConfirmationCallback =
+    TrustedDecisionRequest -> Async<Result<string option, RuntimeError>>
 
 // Extracts the structured authority remediation from a runtime error.
 let tryAuthorityMetadata (error: RuntimeError) : AuthorityMetadata option =
@@ -682,7 +726,8 @@ type TaskDto =
       Questions: QuestionDto list
       WorkItems: WorkItemDto list
       TerminalHandoff: TerminalHandoffDto option
-      CompletionHistory: TerminalHandoffDto list }
+      CompletionHistory: TerminalHandoffDto list
+      IntegrityReceipt: string }
 
 type CreateRequest =
     { Id: string
@@ -691,12 +736,7 @@ type CreateRequest =
       AcceptanceCriteria: (string * string) list
       WorkItems: WorkItemSpec list }
 
-// Authority is fail-closed because no adapter-issued signed attestation exists:
-// ordinary runtime and CLI invocation is Coordinator-only. There is no
-// in-process User ingress (no receipt factory, no authority parameter, no
-// flag/environment input), so a User-required operation cannot be authorized
-// here. Untrusted sidecar Decisions claiming User/ProfilePolicy provenance are
-// rejected at the DTO/domain boundary rather than trusted.
+// Requiring trusted attestation prevents ordinary inputs from establishing User authority.
 
 let private idRegex = Regex("^[A-Za-z]+-[0-9]+$", RegexOptions.CultureInvariant)
 let private acceptanceIdRegex = Regex("^AC[0-9]+$", RegexOptions.CultureInvariant)
@@ -2447,7 +2487,8 @@ module private Dto =
           Questions = task.Questions |> List.map questionDto
           WorkItems = task.WorkItems |> List.map workItemDto
           TerminalHandoff = task.TerminalHandoff |> Option.map handoffDto
-          CompletionHistory = task.CompletionHistory |> List.map handoffDto }
+          CompletionHistory = task.CompletionHistory |> List.map handoffDto
+          IntegrityReceipt = "" }
 
     let private writeString (writer: Utf8JsonWriter) (name: string) (value: string) =
         writer.WriteString(name, value)
@@ -2605,6 +2646,9 @@ module private Dto =
             writer.WriteEndObject()
 
         writer.WriteEndArray()
+
+        if not (String.IsNullOrEmpty dto.IntegrityReceipt) then
+            writeString writer "integrityReceipt" dto.IntegrityReceipt
 
         writer.WriteEndObject()
         writer.Flush()
@@ -2961,19 +3005,28 @@ module private Dto =
             use document = JsonDocument.Parse(json, JsonDocumentOptions(CommentHandling = JsonCommentHandling.Disallow, AllowTrailingCommas = false))
             result {
                 let! props = objectValue "task" document.RootElement
+                let! schemaVersion =
+                    match tryProperty "schemaVersion" props with
+                    | None -> Error (InvalidInput "task is missing property 'schemaVersion'")
+                    | Some value ->
+                        match value.ValueKind with
+                        | JsonValueKind.Number ->
+                            match value.TryGetInt32() with
+                            | true, number -> Ok number
+                            | false, _ -> Error (InvalidInput "property 'schemaVersion' must be a 32-bit integer")
+                        | _ -> Error (InvalidInput "property 'schemaVersion' must be an integer")
+                do!
+                    if schemaVersion = SchemaVersion then Ok()
+                    else Error(InvalidInput $"unsupported schemaVersion {schemaVersion}")
                 do!
                     propertiesWithin
                         "task"
                         [ "schemaVersion"; "id"; "title"; "created"; "kind"; "profile"; "profileFingerprint";
                           "objective"; "scope"; "nonGoals"; "contractState"; "contractFingerprint";
                           "contractRevision"; "stateRevision"; "lifecycle"; "evidence"; "acceptanceCriteria";
-                          "guards"; "profileGuardKeys"; "decisions"; "questions"; "workItems"; "completionHistory" ]
+                          "guards"; "profileGuardKeys"; "decisions"; "questions"; "workItems"; "completionHistory"; "integrityReceipt" ]
                         [ "terminalHandoff" ]
                         props
-                let! schemaVersion = intProperty "schemaVersion" props
-                do!
-                    if schemaVersion = SchemaVersion then Ok()
-                    else Error(InvalidInput $"unsupported schemaVersion {schemaVersion}")
                 let! id = stringProperty "id" props
                 let! title = stringProperty "title" props
                 let! created = stringProperty "created" props
@@ -3002,6 +3055,10 @@ module private Dto =
                 let! completionHistory =
                     arrayProperty "completionHistory" props
                     |> Result.bind (List.map parseHandoff >> collectResults)
+                let! integrityReceipt =
+                    match tryProperty "integrityReceipt" props with
+                    | Some value when value.ValueKind = JsonValueKind.String -> Ok(value.GetString())
+                    | _ -> Error (InvalidInput "task state integrity receipt is missing or malformed")
                 let! evidence = evidenceJson |> List.map parseEvidence |> collectResults
                 let! acceptanceCriteria = acceptanceJson |> List.map parseAcceptance |> collectResults
                 let! guards = guardsJson |> List.map parseGuard |> collectResults
@@ -3032,7 +3089,8 @@ module private Dto =
                       Questions = questions
                       WorkItems = workItems
                       TerminalHandoff = terminalHandoff
-                      CompletionHistory = completionHistory }
+                      CompletionHistory = completionHistory
+                      IntegrityReceipt = integrityReceipt }
             }
         with
         | :? JsonException as error -> Error (InvalidInput $"invalid JSON: {error.Message}")
@@ -3431,10 +3489,7 @@ module private Domain =
             return { request with Reason = reason; Targets = targets }
         }
 
-    // A Decision authorizes only when its trusted authority satisfies the
-    // required minimum and a typed target exactly matches. User authority has no
-    // trusted ingress, and ProfilePolicy never participates in ExplicitDecision
-    // checks, so both fail closed.
+    // Restricting ordinary decisions prevents callers from asserting trusted provenance.
     let private decisionAuthorizes (decision: Decision) (minimumAuthority: MinimumAuthority) (target: DecisionTarget) =
         let authoritySatisfied =
             match decision.Authority with
@@ -3479,7 +3534,10 @@ module private Domain =
                 match findDecision referenceId task.Decisions with
                 | Some decision ->
                     decision.Kind = requiredKind
-                    && decisionAuthorizes decision authority (GuardDispositionTarget guard.Id)
+                    && (decisionAuthorizes decision authority (GuardDispositionTarget guard.Id)
+                        || (authority = MinimumAuthority.UserAuthority
+                            && decision.Authority = User
+                            && decision.Targets |> List.contains (GuardDispositionTarget guard.Id)))
                 | None -> false
         | _ -> false
 
@@ -3968,17 +4026,15 @@ module private Domain =
                   Disposition = disposition }
         }
 
-    let private decisionFromDto (dto: DecisionDto) : Result<Decision, RuntimeError> =
+    let private decisionFromDto (allowVerifiedUser: bool) (dto: DecisionDto) : Result<Decision, RuntimeError> =
         result {
             let! id = decisionId dto.Id
             let! authority = parseDecisionAuthority dto.Authority
 
-            // Sidecar JSON is untrusted: only Coordinator provenance is accepted.
-            // User and ProfilePolicy Decisions cannot be verified without a
-            // signed-attestation bridge, so they are rejected explicitly rather
-            // than silently demoted.
+            // Receipt verification prevents forged persisted User claims from gaining authority.
             do!
                 match authority with
+                | User when allowVerifiedUser -> Ok()
                 | User ->
                     Error(
                         AuthorityDenied(
@@ -3987,7 +4043,7 @@ module private Domain =
                               DecisionKind = None
                               Target = None
                               DecisionRefStatus = DecisionRefStatus.Absent },
-                            $"decision '{dto.Id}' claims User authority, which is rejected until the #13 signed-attestation bridge verifies it"
+                            $"decision '{dto.Id}' claims User authority without verified persisted provenance"
                         )
                     )
                 | ProfilePolicy ->
@@ -4023,6 +4079,7 @@ module private Domain =
 
             do!
                 match confirmationRef with
+                | Some _ when allowVerifiedUser && authority = User -> Ok()
                 | Some _ ->
                     Error(
                         AuthorityDenied(
@@ -4031,7 +4088,7 @@ module private Domain =
                               DecisionKind = None
                               Target = None
                               DecisionRefStatus = DecisionRefStatus.Absent },
-                            $"decision '{dto.Id}' carries an unverifiable confirmationRef, which is rejected until the #13 signed-attestation bridge verifies it"
+                            $"decision '{dto.Id}' carries an unverifiable confirmationRef without verified persisted provenance"
                         )
                     )
                 | None -> Ok()
@@ -4080,7 +4137,7 @@ module private Domain =
             return { Id = id; Text = text; Impact = impact; State = state }
         }
 
-    let fromDto (profiles: Map<string, EffectiveProfile>) (strictProfile: bool) (dto: TaskDto) =
+    let private fromDtoCore (allowVerifiedUser: bool) (profiles: Map<string, EffectiveProfile>) (strictProfile: bool) (dto: TaskDto) =
         result {
             if dto.SchemaVersion <> SchemaVersion then
                 return! Error (InvalidInput $"unsupported schemaVersion {dto.SchemaVersion}")
@@ -4123,7 +4180,7 @@ module private Domain =
             let! evidence = dto.Evidence |> List.map evidenceFromDto |> collectResults
             let! acceptanceCriteria = dto.AcceptanceCriteria |> List.map acceptanceFromDto |> collectResults
             let! guards = dto.Guards |> List.map guardFromDto |> collectResults
-            let! decisions = dto.Decisions |> List.map decisionFromDto |> collectResults
+            let! decisions = dto.Decisions |> List.map (decisionFromDto allowVerifiedUser) |> collectResults
             let! questions = dto.Questions |> List.map questionFromDto |> collectResults
             let! workItems = dto.WorkItems |> List.map workItemFromDto |> collectResults
             let! terminalHandoff =
@@ -4243,6 +4300,11 @@ module private Domain =
             do! validateDecisionGraph task
             return task
         }
+
+    let fromDto profiles strictProfile dto = fromDtoCore false profiles strictProfile dto
+
+    // Receipt verification prevents forged persisted User claims from gaining authority.
+    let internal fromVerifiedDto profiles strictProfile dto = fromDtoCore true profiles strictProfile dto
 
     let rec private workItemFromSpec (acceptanceIds: string list) (spec: WorkItemSpec) =
         result {
@@ -4667,10 +4729,6 @@ module private Domain =
         else
             next
 
-    // One canonical authorization resolver. Every semantic operation declares
-    // its exact typed target and minimum authority. The only invocation authority
-    // is the Coordinator, so User-required operations fail closed; a referenced
-    // Decision must still authorize the exact target at the required authority.
     type private AuthorizationOutcome =
         | ReuseDecision of DecisionRef
         | NewDecision of Decision
@@ -4683,80 +4741,98 @@ module private Domain =
         (operationTarget: DecisionTarget)
         (minimumAuthority: MinimumAuthority)
         (decisionRef: DecisionRef option)
+        (trustedContext: TrustedDecisionContext option)
         : Result<AuthorizationOutcome, RuntimeError> =
         result {
             let! target = validateDecisionTarget task operationTarget
 
-            match decisionRef with
-            | Some (DecisionRef referenceId) ->
-                match findDecision referenceId task.Decisions with
-                | None when minimumAuthority <> MinimumAuthority.CoordinatorAuthority ->
-                    // a User-required operation whose supplied DecisionRef
-                    // does not exist is an absent authorization, not a text-only
-                    // NotFound; report the exact missing authority so the caller can
-                    // distinguish a missing ref from a mismatched one.
-                    return!
-                        Error(
-                            AuthorityDenied(
-                                { RequiredAuthority = minimumAuthority
-                                  Operation = operation
-                                  DecisionKind = Some decisionKind
-                                  Target = Some target
-                                  DecisionRefStatus = DecisionRefStatus.Absent },
-                                $"operation requires {minimumAuthorityToString minimumAuthority} authority and Decision '{referenceId}' was not found; ordinary Coordinator invocation cannot authorize it"
-                            )
-                        )
-                | None -> return! Error(NotFound $"Decision '{referenceId}' was not found")
-                | Some decision when
-                    decision.Kind = decisionKind
-                    && decisionAuthorizes decision minimumAuthority target
-                    ->
-                    return ReuseDecision(DecisionRef referenceId)
-                | Some decision ->
-                    // reuse must match both the exact typed target and
-                    // the operation's Decision kind; a Decision for another kind
-                    // (for example a waiver) never authorizes a different operation.
-                    return!
-                        Error(
-                            AuthorityDenied(
-                                { RequiredAuthority = minimumAuthority
-                                  Operation = operation
-                                  DecisionKind = Some decisionKind
-                                  Target = Some target
-                                  DecisionRefStatus = DecisionRefStatus.Mismatched },
-                                $"Decision '{referenceId}' has kind {decisionKindToString decision.Kind} and does not authorize the exact operation {decisionTargetToString target} as kind {decisionKindToString decisionKind} at {minimumAuthorityToString minimumAuthority} authority"
-                            )
-                        )
+            // Trusted authority must match the resolver's operation, kind, and exact target.
+            let trustedDecision =
+                match trustedContext with
+                | Some context when
+                    minimumAuthority = MinimumAuthority.UserAuthority
+                    && context.TaskId = task.Id
+                    && context.StateRevision = task.StateRevision
+                    && context.Operation = operation
+                    && context.Kind = decisionKind
+                    && context.Target = target
+                    && not (String.IsNullOrWhiteSpace context.ConfirmationRef) ->
+                    Some
+                        (NewDecision
+                            { Id = nextDecisionId task
+                              Authority = User
+                              Kind = decisionKind
+                              Targets = [ target ]
+                              Rationale = $"trusted User confirmation for {operation} on {decisionTargetToString target}"
+                              CreatedAt = now
+                              ConfirmationRef = Some context.ConfirmationRef })
+                | _ -> None
+
+            match trustedDecision with
+            | Some decision -> return decision
             | None ->
-                if minimumAuthority <> MinimumAuthority.CoordinatorAuthority then
-                    return!
-                        Error(
-                            AuthorityDenied(
-                                { RequiredAuthority = minimumAuthority
-                                  Operation = operation
-                                  DecisionKind = Some decisionKind
-                                  Target = Some target
-                                  DecisionRefStatus = DecisionRefStatus.Absent },
-                                $"operation requires {minimumAuthorityToString minimumAuthority} authority; ordinary Coordinator invocation cannot authorize it"
+                match decisionRef with
+                | Some (DecisionRef referenceId) ->
+                    match findDecision referenceId task.Decisions with
+                    | None when minimumAuthority <> MinimumAuthority.CoordinatorAuthority ->
+                        // A missing User-required reference is absent authority, not ordinary NotFound.
+                        return!
+                            Error(
+                                AuthorityDenied(
+                                    { RequiredAuthority = minimumAuthority
+                                      Operation = operation
+                                      DecisionKind = Some decisionKind
+                                      Target = Some target
+                                      DecisionRefStatus = DecisionRefStatus.Absent },
+                                    $"operation requires {minimumAuthorityToString minimumAuthority} authority and Decision '{referenceId}' was not found; ordinary Coordinator invocation cannot authorize it"
+                                )
                             )
-                        )
-                else
-                    // runtime creates the durable target-bound Decision
-                    // atomically instead of requiring the model to manufacture it.
-                    let decision: Decision =
-                        { Id = nextDecisionId task
-                          Authority = Coordinator
-                          Kind = decisionKind
-                          Targets = [ target ]
-                          Rationale = $"coordinator authorization for {decisionTargetToString target}"
-                          CreatedAt = now
-                          ConfirmationRef = None }
+                    | None -> return! Error(NotFound $"Decision '{referenceId}' was not found")
+                    | Some decision when
+                        decision.Kind = decisionKind
+                        && decisionAuthorizes decision minimumAuthority target
+                        ->
+                        return ReuseDecision(DecisionRef referenceId)
+                    | Some decision ->
+                        // Reuse requires the exact target and decision kind.
+                        return!
+                            Error(
+                                AuthorityDenied(
+                                    { RequiredAuthority = minimumAuthority
+                                      Operation = operation
+                                      DecisionKind = Some decisionKind
+                                      Target = Some target
+                                      DecisionRefStatus = DecisionRefStatus.Mismatched },
+                                    $"Decision '{referenceId}' has kind {decisionKindToString decision.Kind} and does not authorize the exact operation {decisionTargetToString target} as kind {decisionKindToString decisionKind} at {minimumAuthorityToString minimumAuthority} authority"
+                                )
+                            )
+                | None ->
+                    if minimumAuthority <> MinimumAuthority.CoordinatorAuthority then
+                        return!
+                            Error(
+                                AuthorityDenied(
+                                    { RequiredAuthority = minimumAuthority
+                                      Operation = operation
+                                      DecisionKind = Some decisionKind
+                                      Target = Some target
+                                      DecisionRefStatus = DecisionRefStatus.Absent },
+                                    $"operation requires {minimumAuthorityToString minimumAuthority} authority; ordinary Coordinator invocation cannot authorize it"
+                                )
+                            )
+                    else
+                        // Atomic creation avoids relying on model-supplied authority.
+                        let decision: Decision =
+                            { Id = nextDecisionId task
+                              Authority = Coordinator
+                              Kind = decisionKind
+                              Targets = [ target ]
+                              Rationale = $"coordinator authorization for {decisionTargetToString target}"
+                              CreatedAt = now
+                              ConfirmationRef = None }
 
-                    return NewDecision decision
-        }
+                        return NewDecision decision
+            }
 
-    // one operation-based patch model. Validation normalizes every
-    // payload so evolve persists exactly the values decide authorized.
     let private validateContractPatch (task: TaskModel) (patch: ContractPatch) : Result<ContractPatch, RuntimeError> =
         match patch with
         | ContractPatch.AddAcceptanceCriterion draft ->
@@ -5034,7 +5110,7 @@ module private Domain =
 
             Some(id, patchText, snapshot task.WorkItems, snapshot after.WorkItems)
 
-    let private decideCommand (now: DateTimeOffset) (task: TaskModel) command =
+    let private decideCommand (now: DateTimeOffset) (trustedContext: TrustedDecisionContext option) (task: TaskModel) command =
         match command with
         | StartWorkItem id ->
             match startEligibility task id with
@@ -5169,11 +5245,17 @@ module private Domain =
                                 target
                                 minimumAuthority
                                 request.DecisionRef
+                                trustedContext
                         with
                         | Error error -> Error [ error ]
                         | Ok (ReuseDecision _) -> Ok [ TaskReopened validRequest ]
                         | Ok (NewDecision decision) ->
-                            Ok [ DecisionAdded decision; TaskReopened validRequest ]
+                            let authorizedRequest =
+                                if decision.Authority = User then
+                                    { validRequest with DecisionRef = Some(DecisionRef decision.Id) }
+                                else
+                                    validRequest
+                            Ok [ DecisionAdded decision; TaskReopened authorizedRequest ]
                     else
                         Error [ InvalidTransition "reopening must invalidate at least one completion requirement" ]
             | _ -> Error [ InvalidTransition "only a terminal task can be reopened" ]
@@ -5193,8 +5275,7 @@ module private Domain =
                     | Ok() ->
                         match task.ContractState with
                         | Draft ->
-                            // ordinary Coordinator invocation is sufficient
-                            // before baseline; draft edits create no contractRevision history.
+                            // Draft edits precede baseline history, so Coordinator authority suffices.
                             match validateDraftGuardRemoval task validPatch with
                             | Error error -> Error [ error ]
                             | Ok() -> Ok [ ContractPatchApplied(validPatch, false) ]
@@ -5202,8 +5283,7 @@ module private Domain =
                             match baselinedPatchAuthority task validPatch with
                             | Error error -> Error [ error ]
                             | Ok minimumAuthority ->
-                                // the exact patch payload is the authorization
-                                // target, not the revision the patch will create.
+                                // The exact patch payload is authorized, not its resulting revision.
                                 let target = ContractPatchTarget(contractPatchIdOf validPatch)
 
                                 match
@@ -5215,6 +5295,7 @@ module private Domain =
                                         target
                                         minimumAuthority
                                         decisionRef
+                                        trustedContext
                                 with
                                 | Error error -> Error [ error ]
                                 | Ok (ReuseDecision (DecisionRef referenceId)) ->
@@ -5236,8 +5317,13 @@ module private Domain =
                                     | Some(id, patchText, before, after) ->
                                         let decision =
                                             { decision with
-                                                Targets = [ target; WorkItemPatchTarget id ]
-                                                Rationale = $"runtime application audit; patch={patchText}; before={before}; after={after}; contractRevision={task.ContractRevision}->{task.ContractRevision + 1}; stateRevision={task.StateRevision}->{task.StateRevision + 1}" }
+                                                Targets =
+                                                    if decision.Authority = User then
+                                                        [ target ]
+                                                    else
+                                                        [ target; WorkItemPatchTarget id ]
+                                                Rationale =
+                                                    $"{decision.Rationale}; runtime application audit; patch={patchText}; before={before}; after={after}; contractRevision={task.ContractRevision}->{task.ContractRevision + 1}; stateRevision={task.StateRevision}->{task.StateRevision + 1}" }
                                         Ok [ DecisionAdded decision; ContractPatchApplied(validPatch, true) ]
         | ContractPatchApplied _ ->
             Error
@@ -5266,6 +5352,7 @@ module private Domain =
                                 target
                                 MinimumAuthority.CoordinatorAuthority
                                 None
+                                trustedContext
                         with
                         | Error error -> Error [ error ]
                         | Ok (ReuseDecision _) -> Ok [ ContractDriftReconciled plan ]
@@ -5286,6 +5373,7 @@ module private Domain =
                             target
                             MinimumAuthority.UserAuthority
                             None
+                            trustedContext
                     with
                     | Error error -> Error [ error ]
                     | Ok (ReuseDecision _) -> Ok [ ContractDriftReconciled plan ]
@@ -5368,6 +5456,7 @@ module private Domain =
                                 (GuardDispositionTarget id)
                                 minimumAuthority
                                 decisionRef
+                                trustedContext
                         with
                         | Error error -> Error [ error ]
                         | Ok (ReuseDecision (DecisionRef reference)) ->
@@ -5397,6 +5486,7 @@ module private Domain =
                                 (GuardDispositionTarget id)
                                 minimumAuthority
                                 decisionRef
+                                trustedContext
                         with
                         | Error error -> Error [ error ]
                         | Ok (ReuseDecision (DecisionRef reference)) ->
@@ -5442,19 +5532,38 @@ module private Domain =
                     | Some decision when decision.Targets |> List.contains (QuestionResolutionTarget question.Id) ->
                         Ok [ QuestionResolved(id, reference) ]
                     | Some _ ->
-                        // A present DecisionRef that does not target this question
-                        // is a mismatch, not a syntax error; report the canonical
-                        // User/UserDecision remediation. The signed User path is the
-                        // durable authorization but has no trusted ingress.
-                        Error
-                            [ AuthorityDenied(
-                                  { RequiredAuthority = MinimumAuthority.UserAuthority
-                                    Operation = "task_apply.resolve-question"
-                                    DecisionKind = Some UserDecision
-                                    Target = Some(QuestionResolutionTarget question.Id)
-                                    DecisionRefStatus = DecisionRefStatus.Mismatched },
-                                  $"Decision '{referenceId}' does not target Question '{id}'"
-                              ) ]
+                        let target = QuestionResolutionTarget question.Id
+                        match trustedContext with
+                        | Some context when
+                            context.TaskId = task.Id
+                            && context.StateRevision = task.StateRevision
+                            && context.Command = command
+                            && context.Operation = "task_apply.resolve-question"
+                            && context.Kind = UserDecision
+                            && context.Target = target
+                            && not (String.IsNullOrWhiteSpace context.ConfirmationRef) ->
+                            let decision: Decision =
+                                { Id = nextDecisionId task
+                                  Authority = User
+                                  Kind = UserDecision
+                                  Targets = [ target ]
+                                  Rationale = $"trusted User confirmation for task_apply.resolve-question on {decisionTargetToString target}"
+                                  CreatedAt = now
+                                  ConfirmationRef = Some context.ConfirmationRef }
+                            Ok
+                                [ DecisionAdded decision
+                                  QuestionResolved(id, DecisionRef decision.Id) ]
+                        | _ ->
+                            // A mismatched reference cannot be reused as trusted authorization.
+                            Error
+                                [ AuthorityDenied(
+                                      { RequiredAuthority = MinimumAuthority.UserAuthority
+                                        Operation = "task_apply.resolve-question"
+                                        DecisionKind = Some UserDecision
+                                        Target = Some target
+                                        DecisionRefStatus = DecisionRefStatus.Mismatched },
+                                      $"Decision '{referenceId}' does not target Question '{id}'"
+                                  ) ]
         | QuestionResolved _ ->
             Error [ InvalidInput "question resolution events are produced by decide and cannot be applied as commands" ]
         | ReclassifyTask _ ->
@@ -5526,12 +5635,11 @@ module private Domain =
     let private reclassificationTarget (kind: Kind) (profileIdText: string) =
         ReclassificationTarget($"{kindToString kind}|{profileIdText}")
 
-    // Draft reclassification is ordinary design; a baselined change
-    // is Coordinator-only while it stays non-weakening, otherwise it needs User
-    // authority (which has no trusted ingress yet and therefore fails closed).
+    // Baselined weakening requires User authority through the trusted context path.
     let private decideReclassification
         (profiles: Map<string, EffectiveProfile>)
         (now: DateTimeOffset)
+        (trustedContext: TrustedDecisionContext option)
         (task: TaskModel)
         (request: ReclassificationRequest)
         =
@@ -5583,6 +5691,7 @@ module private Domain =
                         (reclassificationTarget kind targetProfileId)
                         minimumAuthority
                         None
+                        trustedContext
                 with
                 | Error error -> return! Error error
                 | Ok (ReuseDecision _) -> return syncEvents
@@ -5594,6 +5703,7 @@ module private Domain =
     let private decideProfileReconciliation
         (profiles: Map<string, EffectiveProfile>)
         (now: DateTimeOffset)
+        (trustedContext: TrustedDecisionContext option)
         (task: TaskModel)
         =
         if task.Lifecycle <> "open" then
@@ -5613,6 +5723,7 @@ module private Domain =
                         (ReclassificationTarget($"profileDrift:{task.Profile}"))
                         MinimumAuthority.CoordinatorAuthority
                         None
+                        trustedContext
                 with
                 | Error error -> Error [ error ]
                 | Ok (ReuseDecision _) ->
@@ -5632,11 +5743,11 @@ module private Domain =
     // profile availability/drift gates every mutation. Draft absorbs
     // the current profile by replacement, baselined drift blocks until explicit
     // reconciliation, and reopening syncs atomically with the current profile.
-    let private decideCore (profiles: Map<string, EffectiveProfile>) (now: DateTimeOffset) (task: TaskModel) command =
+    let private decideCore (profiles: Map<string, EffectiveProfile>) (now: DateTimeOffset) (trustedContext: TrustedDecisionContext option) (task: TaskModel) command =
         match command with
-        | ReconcileProfileDrift -> decideProfileReconciliation profiles now task
+        | ReconcileProfileDrift -> decideProfileReconciliation profiles now trustedContext task
         | ReclassifyTask request ->
-            decideReclassification profiles now task request |> Result.mapError List.singleton
+            decideReclassification profiles now trustedContext task request |> Result.mapError List.singleton
         | _ ->
             match Map.tryFind task.Profile profiles with
             | None -> Error [ profileUnavailableError task ]
@@ -5647,7 +5758,7 @@ module private Domain =
                 | ReopenTask request when drift ->
                     // reopen re-resolves the profile and materializes
                     // new/stronger requirements in the same apply as the reopen.
-                    match decideCommand now task command with
+                    match decideCommand now trustedContext task command with
                     | Error errors -> Error errors
                     | Ok events ->
                         let reopened = applyReopen task request
@@ -5680,7 +5791,7 @@ module private Domain =
                                 (task.Guards |> List.filter (fun guard -> guard.Origin <> ProfileMaterialized))
                                 @ (syncedGuards |> List.map _.Guard) }
 
-                    match decideCommand now prospective command with
+                    match decideCommand now trustedContext prospective command with
                     | Error errors -> Error errors
                     | Ok events ->
                         Ok(
@@ -5689,7 +5800,7 @@ module private Domain =
                             :: events
                         )
                 | _ ->
-                    match decideCommand now task command with
+                    match decideCommand now trustedContext task command with
                     | Error errors -> Error errors
                     | Ok events -> Ok events
 
@@ -5698,12 +5809,18 @@ module private Domain =
     // proceed. Read-only analysis uses getTask/validateTask, not decide. The
     // decision instant is an explicit input so decide stays pure and
     // deterministic; the imperative apply boundary supplies it.
-    let decide (profiles: Map<string, EffectiveProfile>) (now: DateTimeOffset) (task: TaskModel) command =
+    let private decideWithTrustedContext (profiles: Map<string, EffectiveProfile>) (now: DateTimeOffset) trustedContext (task: TaskModel) command =
         match command with
-        | ReconcileContractDrift _ -> decideCore profiles now task command
+        | ReconcileContractDrift _ -> decideCore profiles now trustedContext task command
         | _ when contractDrift task ->
             Error [ InvalidTransition (contractDriftMessage + "; reconcile before mutating state") ]
-        | _ -> decideCore profiles now task command
+        | _ -> decideCore profiles now trustedContext task command
+
+    let decide (profiles: Map<string, EffectiveProfile>) (now: DateTimeOffset) (task: TaskModel) command =
+        decideWithTrustedContext profiles now None task command
+
+    let decideTrusted (profiles: Map<string, EffectiveProfile>) (now: DateTimeOffset) context task command =
+        decideWithTrustedContext profiles now (Some context) task command
 
     let evolve (task: TaskModel) events =
         events
@@ -5936,6 +6053,56 @@ module private Domain =
 let decideAt (profiles: Map<string, EffectiveProfile>) (now: DateTimeOffset) (task: TaskModel) command =
     Domain.decide profiles now task command
 
+let internal prepareTrustedDecision
+    (profiles: Map<string, EffectiveProfile>)
+    (now: DateTimeOffset)
+    (task: TaskModel)
+    (command: TaskCommand)
+    : Result<TrustedDecisionRequest, RuntimeError list> =
+    match decideAt profiles now task command with
+    | Ok _ -> Error [ InvalidTransition "the command does not require a new trusted User decision" ]
+    | Error errors ->
+        match errors with
+        | [ AuthorityDenied (metadata, _) ] when
+            metadata.RequiredAuthority = MinimumAuthority.UserAuthority
+            && metadata.Target.IsSome
+            && metadata.DecisionKind.IsSome ->
+            match metadata.DecisionKind, metadata.Target with
+            | Some kind, Some target ->
+                Ok
+                    { TaskId = task.Id
+                      StateRevision = task.StateRevision
+                      Command = command
+                      Operation = metadata.Operation
+                      Kind = kind
+                      Target = target }
+            | _ -> Error errors
+        | _ -> Error errors
+
+// Revalidation under the lock prevents stale confirmation from authorizing a changed task.
+let internal decideTrustedAt
+    (profiles: Map<string, EffectiveProfile>)
+    (now: DateTimeOffset)
+    (context: TrustedDecisionContext)
+    (task: TaskModel)
+    (command: TaskCommand)
+    : Result<TaskCommand list, RuntimeError list> =
+    if
+        context.TaskId <> task.Id
+        || context.StateRevision <> task.StateRevision
+        || context.Command <> command
+    then
+        Error [ InvalidTransition "trusted User decision context does not match this task, revision, and command" ]
+    else
+        match prepareTrustedDecision profiles now task command with
+        | Error errors -> Error errors
+        | Ok request
+            when request.Operation = context.Operation
+                 && request.Kind = context.Kind
+                 && request.Target = context.Target ->
+            Domain.decideTrusted profiles now context task command
+        | Ok _ -> Error [ InvalidTransition "trusted User decision context does not match the canonical authorization requirement" ]
+
 // Deterministic 3-arg entry for callers/tests that already hold a task: it
 // anchors runtime-created Decisions to the task creation instant, so replaying
 // a domain model yields identical events with no ambient time read.
@@ -5967,6 +6134,93 @@ let deserialize json =
     match Dto.fromJson json with
     | Error error -> Error error
     | Ok dto -> Domain.fromDto builtinProfiles true dto
+
+let private canonicalRoot (root: string) =
+    let full = Path.GetFullPath root
+    let filesystemRoot = Path.GetPathRoot full
+    let normalized =
+        if String.Equals(full, filesystemRoot, StringComparison.OrdinalIgnoreCase) then filesystemRoot
+        else full.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+
+    if OperatingSystem.IsWindows() then
+        if normalized.StartsWith("\\\\?\\", StringComparison.Ordinal)
+           || normalized.StartsWith("\\\\.\\", StringComparison.Ordinal) then
+            invalidArg (nameof root) "device-prefixed project roots are unsupported for authenticated task identity"
+
+        normalized.ToUpperInvariant()
+    else
+        normalized
+
+let private frameField (stream: Stream) (value: byte array) =
+    if uint64 value.Length > uint64 UInt32.MaxValue then
+        invalidArg (nameof value) "integrity frame field exceeds the supported length"
+
+    let length = uint32 value.Length
+    stream.WriteByte(byte (length >>> 24))
+    stream.WriteByte(byte (length >>> 16))
+    stream.WriteByte(byte (length >>> 8))
+    stream.WriteByte(byte length)
+    stream.Write(value, 0, value.Length)
+
+let private receiptPayload (root: string) (requestedId: string) (dto: TaskDto) =
+    use stream = new MemoryStream()
+    let prefix = Encoding.UTF8.GetBytes("Mcp.Workflow.TaskIntegrity\000v1\000")
+    stream.Write(prefix, 0, prefix.Length)
+    let platform: string = if OperatingSystem.IsWindows() then "windows" else "unix"
+    frameField stream (Encoding.UTF8.GetBytes(platform))
+    frameField stream (Encoding.UTF8.GetBytes(canonicalRoot root))
+    frameField stream (Encoding.UTF8.GetBytes requestedId)
+    // Excluding the receipt avoids authenticating a value derived from itself.
+    frameField stream (Encoding.UTF8.GetBytes(Dto.toJson { dto with IntegrityReceipt = "" }))
+    stream.ToArray()
+
+let private hasPersistedUserClaim (dto: TaskDto) =
+    dto.Decisions
+    |> List.exists (fun decision ->
+        String.Equals(decision.Authority, "user", StringComparison.OrdinalIgnoreCase)
+        || not (String.IsNullOrWhiteSpace decision.ConfirmationRef))
+
+let private verifyIntegrityReceiptWithKey root requestedId (key: byte array) (dto: TaskDto) : Result<unit, RuntimeError> =
+    let receipt = dto.IntegrityReceipt
+    if isNull receipt || not (System.Text.RegularExpressions.Regex.IsMatch(receipt, "^hmac-sha256-v1:[0-9a-f]{64}$")) then
+        Error(InvalidInput "task state integrity receipt is missing or malformed")
+    else
+        try
+            let tag = Convert.FromHexString(receipt.Substring("hmac-sha256-v1:".Length))
+            try
+                let valid = WorkflowIntegrity.verify key (receiptPayload root requestedId dto) tag
+                if valid then Ok() else Error(InvalidInput "task state integrity receipt is invalid")
+            finally
+                CryptographicOperations.ZeroMemory tag
+        with
+        | :? FormatException -> Error(InvalidInput "task state integrity receipt is malformed")
+        | :? IOException as error -> Error(PersistenceFailure $"could not verify task state integrity receipt: {error.Message}")
+        | :? UnauthorizedAccessException as error ->
+            Error(PersistenceFailure $"could not verify task state integrity receipt: {error.Message}")
+        | :? CryptographicException as error ->
+            Error(PersistenceFailure $"could not verify task state integrity receipt: {error.Message}")
+
+let private verifyIntegrityReceipt root requestedId dto =
+    try
+        let key = WorkflowIntegrity.loadExistingKey ()
+        try verifyIntegrityReceiptWithKey root requestedId key dto
+        finally CryptographicOperations.ZeroMemory key
+    with
+    | :? IOException as error -> Error(PersistenceFailure $"could not verify task state integrity receipt: {error.Message}")
+    | :? UnauthorizedAccessException as error -> Error(PersistenceFailure $"could not verify task state integrity receipt: {error.Message}")
+    | :? CryptographicException as error -> Error(PersistenceFailure $"could not verify task state integrity receipt: {error.Message}")
+
+let private parseVerifiedDto root requestedId json =
+    match Dto.fromJson json with
+    | Error error -> Error error
+    | Ok dto when dto.Id <> requestedId -> Error(InvalidInput "runtime task identity does not match requested task")
+    | Ok dto -> verifyIntegrityReceipt root requestedId dto |> Result.map (fun () -> dto)
+
+let private parseVerifiedDtoWithKey root requestedId key json =
+    match Dto.fromJson json with
+    | Error error -> Error error
+    | Ok dto when dto.Id <> requestedId -> Error(InvalidInput "runtime task identity does not match requested task")
+    | Ok dto -> verifyIntegrityReceiptWithKey root requestedId key dto |> Result.map (fun () -> dto)
 
 // Runtime sidecars and locks must stay physically inside the project root. A
 // junction/symlink planted at `.tasks`, the task directory, or the sidecar/lock
@@ -6070,22 +6324,27 @@ module private DirectoryBoundary =
         if not (OperatingSystem.IsWindows()) then
             true
         else
+            let normalizeComparisonPath (value: string) =
+                let full = Path.GetFullPath value
+                let filesystemRoot = Path.GetPathRoot full
+
+                if String.Equals(full, filesystemRoot, StringComparison.OrdinalIgnoreCase) then
+                    filesystemRoot
+                else
+                    full.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+
             let buffer = StringBuilder(1024)
             let length = getFinalPathNameByHandle(handle, buffer, uint32 buffer.Capacity, 0u)
 
             if length = 0u || length >= uint32 buffer.Capacity then
                 false
             else
-                let actual = buffer.ToString().TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                let actual = buffer.ToString()
                 let withoutDevicePrefix =
                     if actual.StartsWith("\\\\?\\", StringComparison.Ordinal) then actual.Substring(4)
                     else actual
 
-                String.Equals(
-                    Path.GetFullPath withoutDevicePrefix,
-                    Path.GetFullPath path,
-                    StringComparison.OrdinalIgnoreCase
-                )
+                String.Equals(normalizeComparisonPath withoutDevicePrefix, normalizeComparisonPath path, StringComparison.OrdinalIgnoreCase)
 
     let openExisting (path: string) : Result<SafeFileHandle, RuntimeError> =
         try
@@ -6242,9 +6501,7 @@ let private sidecarPath root requestedTaskId =
             return sidecar, safeTaskDirectory
         }
 
-// The coordination object is an OS-named mutex rather than a sidecar file. It
-// therefore spans producer processes while remaining ephemeral and leaves the
-// schema-v2 task directory free of runtime.lock artifacts.
+// The OS mutex coordinates processes without leaving task-directory artifacts.
 let private coordinationName (path: string) =
     let canonical =
         let fullPath = Path.GetFullPath path
@@ -6525,7 +6782,7 @@ let private withWindowsDirectoryBoundaries
 
 // Read-only get path: lenient and registry-free so a task can still be inspected
 // while its profile entry is missing or drifted.
-let private readTaskLenient path : Async<Result<TaskModel, RuntimeError>> =
+let private readTaskLenient root requestedId path : Async<Result<TaskModel, RuntimeError>> =
     async {
         try
             if not (File.Exists path) then
@@ -6533,11 +6790,12 @@ let private readTaskLenient path : Async<Result<TaskModel, RuntimeError>> =
             elif PathSafety.isReparseLeaf path then
                 return Error(PersistenceFailure $"runtime sidecar must not be a reparse point: {path}")
             else
-                let! text = awaitOperational (File.ReadAllTextAsync path)
+                let! bytes = awaitOperational (File.ReadAllBytesAsync path)
+                let text = Encoding.UTF8.GetString bytes
 
-                match Dto.fromJson text with
+                match parseVerifiedDto root requestedId text with
                 | Error error -> return Error error
-                | Ok dto -> return Domain.fromDto Map.empty false dto
+                | Ok dto -> return Domain.fromVerifiedDto Map.empty false dto
         with
         | :? OperationCanceledException as error -> return raise error
         | :? IOException as error -> return Error(PersistenceFailure $"could not read runtime sidecar: {error.Message}")
@@ -6547,7 +6805,7 @@ let private readTaskLenient path : Async<Result<TaskModel, RuntimeError>> =
 
 // Registry-backed read used by apply/validate: a fingerprint mismatch is
 // tolerated so decide can surface and reconcile drift.
-let private readTaskWith profiles path : Async<Result<TaskModel, RuntimeError>> =
+let private readTaskWith root requestedId profiles path : Async<Result<TaskModel, RuntimeError>> =
     async {
         try
             if not (File.Exists path) then
@@ -6555,11 +6813,12 @@ let private readTaskWith profiles path : Async<Result<TaskModel, RuntimeError>> 
             elif PathSafety.isReparseLeaf path then
                 return Error(PersistenceFailure $"runtime sidecar must not be a reparse point: {path}")
             else
-                let! text = awaitOperational (File.ReadAllTextAsync path)
+                let! bytes = awaitOperational (File.ReadAllBytesAsync path)
+                let text = Encoding.UTF8.GetString bytes
 
-                match Dto.fromJson text with
+                match parseVerifiedDto root requestedId text with
                 | Error error -> return Error error
-                | Ok dto -> return Domain.fromDto profiles false dto
+                | Ok dto -> return Domain.fromVerifiedDto profiles false dto
         with
         | :? OperationCanceledException as error -> return raise error
         | :? IOException as error -> return Error(PersistenceFailure $"could not read runtime sidecar: {error.Message}")
@@ -6567,9 +6826,34 @@ let private readTaskWith profiles path : Async<Result<TaskModel, RuntimeError>> 
             return Error(PersistenceFailure $"could not read runtime sidecar: {error.Message}")
     }
 
-let private loadTaskLenient path = readTaskLenient path
+// Reusing the authenticated bytes prevents decisions from applying to a different snapshot.
+let private readTaskWithSnapshot root requestedId profiles path : Async<Result<TaskModel * byte array, RuntimeError>> =
+    async {
+        try
+            if not (File.Exists path) then
+                return Error(NotFound $"runtime sidecar does not exist: {path}")
+            elif PathSafety.isReparseLeaf path then
+                return Error(PersistenceFailure $"runtime sidecar must not be a reparse point: {path}")
+            else
+                let! bytes = awaitOperational (File.ReadAllBytesAsync path)
+                let text = Encoding.UTF8.GetString bytes
 
-let private loadTaskWith (profiles: Map<string, EffectiveProfile>) path = readTaskWith profiles path
+                match parseVerifiedDto root requestedId text with
+                | Error error -> return Error error
+                | Ok dto ->
+                    match Domain.fromVerifiedDto profiles false dto with
+                    | Error error -> return Error error
+                    | Ok task -> return Ok(task, bytes)
+        with
+        | :? OperationCanceledException as error -> return raise error
+        | :? IOException as error -> return Error(PersistenceFailure $"could not read runtime sidecar: {error.Message}")
+        | :? UnauthorizedAccessException as error ->
+            return Error(PersistenceFailure $"could not read runtime sidecar: {error.Message}")
+    }
+
+let private loadTaskLenient root requestedId path = readTaskLenient root requestedId path
+
+let private loadTaskWith root requestedId (profiles: Map<string, EffectiveProfile>) path = readTaskWith root requestedId profiles path
 
 // Nested task-root contents stay opaque so validation never follows user-controlled files or directories.
 let private validateTaskDirectory (taskDirectory: string) : Result<unit, RuntimeError> =
@@ -6708,7 +6992,66 @@ let private atomicWrite (path: string) (content: string) : Async<Result<unit, Ru
                 cleanupTemporary ()
     }
 
-let private persist path task = atomicWrite path (serialize task)
+let private persist root requestedId path (expectedBytes: byte array option) (creation: bool) taskModel : Async<Result<unit, RuntimeError>> =
+    async {
+        try
+            let! previous =
+                if File.Exists path then
+                    async {
+                        let! bytes = awaitOperational (File.ReadAllBytesAsync path)
+                        if expectedBytes |> Option.exists (fun expected -> not (bytes.AsSpan().SequenceEqual(expected.AsSpan()))) then
+                            return Error(InvalidTransition "task state changed before authenticated persistence")
+                        else
+                            return Ok(Some bytes)
+                    }
+                else
+                    async {
+                        if expectedBytes.IsSome then
+                            return Error(InvalidTransition "task state disappeared before authenticated persistence")
+                        else
+                            return Ok None
+                    }
+
+            match previous with
+            | Error error -> return Error error
+            | Ok None when not creation -> return Error(InvalidTransition "authenticated task disappeared before continuation")
+            | Ok(Some _) when creation -> return Error(InvalidInput "task already exists; creation cannot replace existing state")
+            | Ok previous ->
+                let nextDto = Dto.fromDomain taskModel
+
+                if previous.IsNone && hasPersistedUserClaim nextDto then
+                    return Error(InvalidInput "new task cannot contain pre-existing User authority claims")
+                else
+                    let key = if previous.IsSome then WorkflowIntegrity.loadExistingKey () else WorkflowIntegrity.loadOrCreateKey ()
+
+                    try
+                        let priorValidation =
+                            previous
+                            |> Option.map (fun bytes ->
+                                Encoding.UTF8.GetString bytes
+                                |> parseVerifiedDtoWithKey root requestedId key)
+                            |> Option.defaultValue (Ok nextDto)
+
+                        match priorValidation with
+                        | Error error -> return Error error
+                        | Ok _ ->
+                            let tag = WorkflowIntegrity.authenticate key (receiptPayload root requestedId nextDto)
+
+                            try
+                                let authenticated = { nextDto with IntegrityReceipt = "hmac-sha256-v1:" + Convert.ToHexString(tag).ToLowerInvariant() }
+                                return! atomicWrite path (Dto.toJson authenticated)
+                            finally
+                                CryptographicOperations.ZeroMemory tag
+                    finally
+                        CryptographicOperations.ZeroMemory key
+        with
+        | :? OperationCanceledException as error -> return raise error
+        | :? IOException as error -> return Error(PersistenceFailure $"could not preserve task state integrity receipt: {error.Message}")
+        | :? UnauthorizedAccessException as error ->
+            return Error(PersistenceFailure $"could not preserve task state integrity receipt: {error.Message}")
+        | :? CryptographicException as error ->
+            return Error(PersistenceFailure $"could not preserve task state integrity receipt: {error.Message}")
+    }
 
 // the caller may name an explicit active profile; an omitted profile
 // falls back to general and an unknown id fails before any sidecar is written.
@@ -6777,7 +7120,7 @@ let createTaskWithProfile root profileId request : Async<Result<TaskModel, Runti
                                                             $"task directory is already occupied: {taskDirectory}"
                                                     )
                                             else
-                                                return! persist path task
+                                                return! persist root request.Id path None true task
                                     }))
 
                         match outcome with
@@ -6792,7 +7135,7 @@ let getTask root id : Async<Result<TaskModel, RuntimeError>> =
         match sidecarPath root id with
         | Error error -> return Error error
         | Ok(path, taskDirectory) ->
-            return! withExistingSidecar root taskDirectory path (fun () -> loadTaskLenient path)
+            return! withExistingSidecar root taskDirectory path (fun () -> loadTaskLenient root id path)
     }
 
 // Ordinary CLI/model apply boundary. Invocation is Coordinator-only: there is no
@@ -6811,11 +7154,11 @@ let applyTask root id expectedRevision command : Async<Result<TaskModel, Runtime
                 return!
                     withExistingSidecar root taskDirectory path (fun () ->
                         async {
-                            let! taskResult = loadTaskWith profiles path
+                            let! taskResult = readTaskWithSnapshot root id profiles path
 
                             match taskResult with
                             | Error error -> return Error error
-                            | Ok task ->
+                            | Ok(task, originalBytes) ->
                                 if task.StateRevision <> expectedRevision then
                                     return Error(Conflict(expectedRevision, task.StateRevision))
                                 else
@@ -6840,13 +7183,119 @@ let applyTask root id expectedRevision command : Async<Result<TaskModel, Runtime
                                     | Ok events ->
                                         let next = evolve task events
                                         let next = { next with StateRevision = task.StateRevision + 1 }
-                                        let! persisted = persist path next
+                                        let! persisted = persist root id path (Some originalBytes) false next
 
                                         match persisted with
                                         | Error error -> return Error error
                                         | Ok() -> return Ok next
                         })
     }
+
+// Await confirmation outside the task lock so user interaction cannot hold synchronization resources.
+let internal applyTrustedTask
+    root
+    id
+    expectedRevision
+    command
+    (confirm: TrustedConfirmationCallback)
+    : Async<Result<TaskModel, RuntimeError>> =
+    if isNull (box confirm) then
+        async { return Error(InvalidInput "trusted confirmation callback is required") }
+    else
+      async {
+        match sidecarPath root id with
+        | Error error -> return Error error
+        | Ok(path, taskDirectory) ->
+            let! prepared =
+                withExistingSidecar root taskDirectory path (fun () ->
+                    async {
+                        let! profilesResult = resolveProfiles root
+
+                        match profilesResult with
+                        | Error error -> return Error error
+                        | Ok profiles ->
+                            let! rawBytes = awaitOperational (File.ReadAllBytesAsync path)
+                            let taskResult =
+                                Encoding.UTF8.GetString rawBytes
+                                |> parseVerifiedDto root id
+                                |> Result.bind (Domain.fromVerifiedDto profiles false)
+
+                            match taskResult with
+                            | Error error -> return Error error
+                            | Ok task when task.Id <> id ->
+                                return Error(InvalidInput "runtime task identity does not match requested task")
+                            | Ok task when task.StateRevision <> expectedRevision ->
+                                return Error(Conflict(expectedRevision, task.StateRevision))
+                            | Ok task ->
+                                match prepareTrustedDecision profiles DateTimeOffset.UtcNow task command with
+                                | Error _ ->
+                                    return Error(InvalidTransition "the command does not require a new trusted User decision")
+                                | Ok request ->
+                                    return Ok(profiles, task, request, rawBytes)
+                    })
+
+            match prepared with
+            | Error error -> return Error error
+            | Ok(profiles, task, request, originalBytes) ->
+                // Confirmation runs after these resources are released to avoid holding them during user interaction.
+                let! confirmation = confirm request
+
+                match confirmation with
+                | Error error -> return Error error
+                | Ok None -> return Error(InvalidTransition "trusted User confirmation was rejected or cancelled")
+                | Ok(Some confirmationRef) when
+                    String.IsNullOrWhiteSpace confirmationRef
+                    || confirmationRef.Length > 256
+                    || confirmationRef.Contains '\r'
+                    || confirmationRef.Contains '\n'
+                    || confirmationRef <> confirmationRef.Trim() ->
+                    return Error(InvalidInput "trusted confirmation reference is malformed")
+                | Ok(Some confirmationRef) ->
+                    return!
+                        withExistingSidecar root taskDirectory path (fun () ->
+                            async {
+                                let! currentProfilesResult = resolveProfiles root
+
+                                match currentProfilesResult with
+                                | Error error -> return Error error
+                                | Ok currentProfiles when currentProfiles <> profiles ->
+                                    return Error(InvalidTransition "effective profile context changed during trusted confirmation")
+                                | Ok currentProfiles ->
+                                    let! currentBytes = awaitOperational (File.ReadAllBytesAsync path)
+
+                                    if not (currentBytes.AsSpan().SequenceEqual(originalBytes.AsSpan())) then
+                                        return Error(InvalidTransition "task state changed during trusted confirmation")
+                                    else
+                                        let taskResult =
+                                            Encoding.UTF8.GetString currentBytes
+                                            |> parseVerifiedDto root id
+                                            |> Result.bind (Domain.fromVerifiedDto currentProfiles false)
+
+                                        match taskResult with
+                                        | Error error -> return Error error
+                                        | Ok current when
+                                            current.Id <> task.Id
+                                            || current.StateRevision <> expectedRevision
+                                            || current.StateRevision <> task.StateRevision ->
+                                            return Error(Conflict(expectedRevision, current.StateRevision))
+                                        | Ok current ->
+                                            match bindTrustedDecisionRequest request current command confirmationRef with
+                                            | None ->
+                                                return Error(InvalidTransition "trusted confirmation no longer matches task, revision, and command")
+                                            | Some context ->
+                                                match decideTrustedAt currentProfiles DateTimeOffset.UtcNow context current command with
+                                                | Error errors ->
+                                                    return Error(InvalidInput(errors |> List.map errorMessage |> String.concat "; "))
+                                                | Ok events ->
+                                                    let next = evolve current events
+                                                    let next = { next with StateRevision = current.StateRevision + 1 }
+                                                    let! persisted = persist root id path (Some originalBytes) false next
+
+                                                    match persisted with
+                                                    | Error error -> return Error error
+                                                    | Ok() -> return Ok next
+                            })
+      }
 
 let validateTask root id : Async<Result<TaskModel, RuntimeError>> =
     async {
@@ -6858,7 +7307,7 @@ let validateTask root id : Async<Result<TaskModel, RuntimeError>> =
             match profilesResult with
             | Error error -> return Error error
             | Ok profiles ->
-                let! taskResult = withExistingSidecar root taskDirectory path (fun () -> loadTaskWith profiles path)
+                let! taskResult = withExistingSidecar root taskDirectory path (fun () -> loadTaskWith root id profiles path)
 
                 match taskResult with
                 | Error error -> return Error error
@@ -6993,7 +7442,7 @@ let projectTask root id ready offset limit : Async<Result<JsonNode, RuntimeError
                     match profilesResult with
                     | Error error -> return Error error
                     | Ok profiles ->
-                        let! loaded = withExistingSidecar root taskDirectory path (fun () -> loadTaskWith profiles path)
+                        let! loaded = withExistingSidecar root taskDirectory path (fun () -> loadTaskWith root id profiles path)
                         match loaded with
                         | Error error -> return Error error
                         | Ok task ->
@@ -7002,7 +7451,7 @@ let projectTask root id ready offset limit : Async<Result<JsonNode, RuntimeError
                                 return Error(InvalidTransition(findings |> String.concat "; "))
                             | _ -> return Ok(readyProjection task offset limit :> JsonNode)
                 else
-                    let! loaded = withExistingSidecar root taskDirectory path (fun () -> loadTaskLenient path)
+                    let! loaded = withExistingSidecar root taskDirectory path (fun () -> loadTaskLenient root id path)
                     match loaded with
                     | Error error -> return Error error
                     | Ok task -> return Ok(statusProjection task :> JsonNode)
@@ -7098,7 +7547,7 @@ let cleanTask root requestedTaskId operation : Async<Result<CleanResult, Runtime
                     let taskResult =
                         try
                             let json = File.ReadAllText sidecar
-                            Dto.fromJson json |> Result.bind (Domain.fromDto Map.empty false)
+                            parseVerifiedDto root requestedTaskId json |> Result.bind (Domain.fromVerifiedDto Map.empty false)
                         with
                         | :? FileNotFoundException as error -> Error(NotFound error.Message)
                         | :? DirectoryNotFoundException as error -> Error(NotFound error.Message)

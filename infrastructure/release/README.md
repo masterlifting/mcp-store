@@ -45,7 +45,7 @@ parser can be built.
 ## Retained scripts
 
 - `Update.ps1 -Project` / `-Verify` — canonical toolchain projection and executing-toolchain check.
-- `Coherence.ps1 -Components <projection>` — cross-stage guard over `release.yml`, the pinned action transfers and the enrollment roster.
+- `Check.ps1 -Components <projection>` — cross-stage guard over `release.yml`, the pinned action transfers and the enrollment roster.
 - `Verify.ps1 -Root <dir> -InventoryJson <json>` / `-MembersJson <json>` — deterministic membership, path and SHA-256 proof of a downloaded artifact; it reads no network, token or receipt state, so it runs before anything from the verified set executes.
 - `Typecheck.ps1 -SdkVersion <sdk>` — strict FCS typecheck of the retained producer scripts.
-- `Suite.ps1` — the complete compiled release regression gate.
+- `Test.ps1` — the complete compiled release regression gate.

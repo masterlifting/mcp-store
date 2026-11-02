@@ -697,14 +697,7 @@ async def get_chat(chat_id: Union[int, str], account: Optional[str] = None) -> s
             record["bot"] = bool(entity.bot)
             record["verified"] = bool(entity.verified)
 
-        # Get unread count + last activity for THIS specific peer.
-        #
-        # NOTE: do NOT use get_dialogs(limit=1, offset_peer=entity) here. In
-        # Telethon `offset_peer` is a pagination cursor, not a per-chat filter —
-        # with offset_id=0 it is effectively ignored, so limit=1 returns the
-        # account's top dialog and its unread/archived/last-message get wrongly
-        # attributed to the requested chat. GetPeerDialogsRequest resolves the
-        # dialog for exactly the requested peer instead.
+        # offset_peer is ignored by get_dialogs, so fetch this peer via GetPeerDialogsRequest.
         try:
             input_peer = await cl.get_input_entity(entity)
             peer_dialogs = await cl(

@@ -130,7 +130,7 @@ let releaseWorkflowAndRosterUseDynamicParticipants () =
     assertTrue "release prepare path is not hardcoded to a participant" (not hardcodedPreparePath)
     assertTrue
         "the publisher job invokes the production cross-stage coherence guard"
-        (containsIgnoreCase source "Coherence.ps1 -Components $env:PROJECTED_COMPONENTS")
+        (containsIgnoreCase source "Check.ps1 -Components $env:PROJECTED_COMPONENTS")
 let noUvPytestInReleaseWorkflows () =
     let workflowsDir = Path.Combine(repoRoot, ".github", "workflows")
     let uvHits = ResizeArray<string * string>()

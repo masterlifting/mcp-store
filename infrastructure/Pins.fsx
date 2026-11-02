@@ -1,8 +1,5 @@
 // role: reusable module/helper
-// Repo-shared consumer-pin mechanism loaded as the explicit ReleasePins module.
-// Single-sources clean-HEAD revision validation, the strict distribution parse, and
-// the canonical unwrapped pin record so producer pins cannot drift from the
-// published release-metadata projection.
+// Sharing pin validation keeps producer release metadata consistent.
 module ReleasePins
 
 #load "Failure.fs"
@@ -23,12 +20,6 @@ let private assertIdentity (field: string) (expected: string) (actual: string) :
     else
         Error(IdentityMismatch(field, expected, actual))
 
-// Validates the packaged manifest against the producer's canonical policy and the
-// committed clean HEAD, then writes the canonical consumer pin for one producer.
-// Callers pass the canonical Config.json path, never a parsed projection: FSI gives
-// each #load chain its own PolicyProjection, an incompatible type across helpers.
-// Returns the archive hash, manifest hash, and validated revision for the caller's
-// diagnostics.
 let writeConsumerPins
     (root: string)
     (configPath: string)

@@ -15,15 +15,15 @@ This package is published from the `telegram/` directory of [`masterlifting/mcp-
 
 Basic Telegram MCP usage in Claude:
 
-![Telegram MCP in action](screenshots/1.png)
+![Telegram MCP in action](screenshots/action.png)
 
 Asking Claude to analyze chat history and send a response:
 
-![Telegram MCP Request](screenshots/2.png)
+![Telegram MCP Request](screenshots/request.png)
 
 Message sent successfully:
 
-![Telegram MCP Result](screenshots/3.png)
+![Telegram MCP Result](screenshots/result.png)
 
 ## Contents
 
@@ -87,7 +87,7 @@ uv sync
 ### 2. Generate a Session String
 
 ```bash
-uv run session_string_generator.py
+uv run generate.py
 ```
 
 Follow the prompts. Save the generated session string securely.
@@ -96,10 +96,10 @@ For scripted setup or operational runbooks, choose the login method explicitly:
 
 ```bash
 # QR login, recommended when you already have Telegram open on another device
-uv run session_string_generator.py --qr
+uv run generate.py --qr
 
 # Phone number + verification code login
-uv run session_string_generator.py --phone
+uv run generate.py --phone
 ```
 
 Without a flag, the generator keeps the interactive method prompt.
@@ -528,9 +528,9 @@ Telegram messages, display names, chat titles, and button labels are untrusted c
 ## Troubleshooting
 
 - **No Telegram session configured:** set `TELEGRAM_SESSION_STRING`, `TELEGRAM_SESSION_NAME`, or suffixed multi-account variants.
-- **Session is not authorized:** run `uv run session_string_generator.py --qr` outside
+- **Session is not authorized:** run `uv run generate.py --qr` outside
   the MCP server when you can scan from an existing Telegram app, or
-  `uv run session_string_generator.py --phone` when you need phone-code login.
+  `uv run generate.py --phone` when you need phone-code login.
   Then set `TELEGRAM_SESSION_STRING` in `.env`. The MCP server does not perform
   interactive phone-code login over stdio.
 - **Invalid API credentials:** verify `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` at [my.telegram.org/apps](https://my.telegram.org/apps).

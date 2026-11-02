@@ -60,7 +60,7 @@ let private runCoherenceWithOutput (root: string) (workflowText: string) (compon
         info.RedirectStandardError <- true
         [ "-NoProfile"
           "-File"
-          Path.Combine(repoRoot, "infrastructure", "release", "Coherence.ps1")
+          Path.Combine(repoRoot, "infrastructure", "release", "Check.ps1")
           "-Root"
           root
           "-Workflow"
@@ -247,7 +247,7 @@ let private modernWorkflowGaps workflow =
     | Some (_, body) when not (Regex.IsMatch(body, "(?i)contents:\\s*write")) -> gaps.Add "the publisher job does not declare its write authority"
     | Some (_, body) when Regex.IsMatch(body, "(?i)dotnet\\s+(build|restore|fsi|test)\\b")
                           || body.Contains("Build.fsx", StringComparison.Ordinal)
-                          || body.Contains("Pins.fsx", StringComparison.Ordinal) ->
+                          || body.Contains("Pin.fsx", StringComparison.Ordinal) ->
         gaps.Add "the publication job still executes build/test/toolchain work"
     | _ -> ()
 
@@ -300,7 +300,7 @@ let private releaseWorkflowRequiresFreshPreparationBuilderAndPublisherJobs =
         Expect.isEmpty gaps (String.concat Environment.NewLine gaps))
 
 let private coherenceGuardChecksActualRosterAndWorkflowMarkers =
-    testCaseAsync "the production Coherence.ps1 accepts roster wiring and rejects marker drift" <| async {
+    testCaseAsync "the production Check.ps1 accepts roster wiring and rejects marker drift" <| async {
         do!
             withRoot (fun root ->
                 async {
@@ -375,7 +375,7 @@ let private coherenceGuardChecksActualRosterAndWorkflowMarkers =
     }
 
 let private coherenceGuardRejectsRosterPolicyAndInventoryDrift =
-    testCaseAsync "the production Coherence.ps1 rejects roster policy and inventory drift" <| async {
+    testCaseAsync "the production Check.ps1 rejects roster policy and inventory drift" <| async {
         do!
             withRoot (fun root ->
                 async {
@@ -463,19 +463,19 @@ let private releaseWorkflowStopsBeforePublicationWhenWorkflowTestsFail =
                     let workflowPath = Path.Combine(repoRoot, ".github", "workflows", "release.yml")
                     let workflow = File.ReadAllText workflowPath
                     let paths =
-                        [ "workflow/tests/AuthorityMetadataTests.fsx"
-                          "workflow/tests/EphemeralLockInvariantTests.fsx"
-                          "workflow/tests/EvidenceIdentifierV2Tests.fsx"
+                        [ "workflow/tests/authority/Metadata.fsx"
+                          "workflow/tests/locking/Run.fsx"
+                          "workflow/tests/evidence/Run.fsx"
                           "workflow/tests/Projections.fsx"
-                          "workflow/tests/SchemaParityGuardTests.fsx"
-                          "workflow/tests/TaskContractTests.fsx"
-                          "workflow/tests/TaskPathSafetyTests.fsx"
-                          "workflow/tests/TaskProfileTests.fsx"
-                          "workflow/tests/TaskSupportingArtifactTests.fsx"
-                          "workflow/tests/WorkflowMcpFindingTests.fsx"
-                          "workflow/tests/WorkflowMcpNativeCompatTests.fsx"
-                          "workflow/tests/WorkflowMcpTests.fsx"
-                          "workflow/tests/WorkflowTests.fsx" ]
+                          "workflow/tests/schema/Run.fsx"
+                          "workflow/tests/contract/Run.fsx"
+                          "workflow/tests/path/Run.fsx"
+                          "workflow/tests/profile/Run.fsx"
+                          "workflow/tests/artifacts/Run.fsx"
+                          "workflow/tests/protocol/Findings.fsx"
+                          "workflow/tests/protocol/Negotiation.fsx"
+                          "workflow/tests/protocol/Run.fsx"
+                          "workflow/tests/domain/Run.fsx" ]
                     let stepName = "run the non-packaging Workflow test entrypoints (native exit preserved)"
                     let script = extractWorkflowStep workflow stepName
                     let listedPaths =

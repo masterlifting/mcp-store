@@ -174,11 +174,11 @@ let private writeFixture (root: string) (failure: StageFailure option) =
 
             write root $"{componentId}/release/Config.json" (policySource componentId) |> ignore
             write root $"{componentId}/release/Build.fsx" (stageScript "build" (scriptFails selectedProducer selectedStage componentId "build")) |> ignore
-            write root $"{componentId}/release/Pins.fsx" (stageScript "pins" (scriptFails selectedProducer selectedStage componentId "pins")) |> ignore
-            write root $"{componentId}/tests/DistributionTests.fsx" (stageScript "distribution" (scriptFails selectedProducer selectedStage componentId "distribution")) |> ignore
+            write root $"{componentId}/release/Pin.fsx" (stageScript "pins" (scriptFails selectedProducer selectedStage componentId "pins")) |> ignore
+            write root $"{componentId}/tests/distribution/Run.fsx" (stageScript "distribution" (scriptFails selectedProducer selectedStage componentId "distribution")) |> ignore
 
             if componentId = "workflow" then
-                write root "workflow/tests/PackagedRuntimeCoordinationTests.fsx" (stageScript "packaged" (scriptFails selectedProducer selectedStage componentId "packaged"))
+                write root "workflow/tests/coordination/Run.fsx" (stageScript "packaged" (scriptFails selectedProducer selectedStage componentId "packaged"))
                 |> ignore
 
         do! runGit root [ "init"; "--quiet" ]

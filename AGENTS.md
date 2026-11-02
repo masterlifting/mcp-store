@@ -17,8 +17,8 @@ The official GitHub MCP is an external dependency and is not produced or install
 
 ## Validation
 
-- Dotnet: `dotnet build dotnet/Mcp.Dotnet.fsproj -c Release` plus the Expecto project under `dotnet/tests/Mcp.Dotnet.Tests/`.
-- Workflow: `dotnet build workflow/Mcp.Workflow.fsproj -c Release` plus the F# script tests under `workflow/tests/`.
+- Dotnet: build `dotnet/Dotnet.fsproj` and `dotnet/tests/Tests.fsproj` in Release; the compiled Expecto suite is owned separately from its deferred FSI scripts.
+- Workflow: `dotnet build workflow/Workflow.fsproj -c Release` plus the F# script tests under `workflow/tests/`.
 - Telegram: from `telegram/`, use `uv run pytest`; deterministic tests must not require live credentials.
 
 ## Telegram package
@@ -32,4 +32,4 @@ The official GitHub MCP is an external dependency and is not produced or install
 
 - Never read, print, commit, or transmit `.env`, Telegram session files, tokens, credentials, or private keys. Use `.env.example` and dummy values for local validation.
 - The Telegram HTTP endpoint is unauthenticated; bind it to localhost unless an explicit security decision authorizes otherwise.
-- Workflow User-authority requirements fail closed; ordinary `add-decision` cannot manufacture User authority. The trusted User-authority ingress belongs to a separate follow-up.
+- Workflow task persistence is forward-only schema 3: every persisted task requires a destination-bound integrity receipt; schema 2 is rejected without migration or rewrite. Ordinary `add-decision` cannot manufacture User authority; trusted native confirmation remains a separate host-only path. Existing installed schema-2 task state is not migrated by source changes.

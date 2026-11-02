@@ -131,7 +131,7 @@ let launchCommand
 let extractDistribution (archivePath: string) (extractionRoot: string) =
     if not (File.Exists archivePath) then
         failwithf
-            "the produced distribution archive is missing: %s (run the producer package gate first: dotnet fsi --nologo <producer>/tests/DistributionTests.fsx)"
+            "the produced distribution archive is missing: %s (run the producer package gate first: dotnet fsi --nologo <producer>/tests/distribution/Run.fsx)"
             archivePath
 
     if Directory.Exists extractionRoot then Directory.Delete(extractionRoot, true)

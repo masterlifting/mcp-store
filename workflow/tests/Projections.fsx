@@ -1,17 +1,11 @@
 // role: test entrypoint
-// Deterministic coverage for the compact Workflow projections (task_status and
-// task_ready): lenient status reads, strict readiness reads, dependency
-// blockers, ancestor state and question blockers, unmet guard blockers,
-// terminal lifecycle, blocker truncation,
-// pagination bounds, empty pages at or beyond the pending total, bounded page
-// selection, applied-state tracking, the
-// lenient/strict split on drifted state, read-only guarantees, and start
-// eligibility parity. Uses the repository's plain FSI test harness rather than
-// Expecto because the solution contract forbids adding a project/package
-// system. All fixtures live under one fresh GUID temp root and only that root
-// is removed.
+// Deterministic coverage for the compact Workflow projections (task_status and task_ready): lenient/strict read split, blockers, lifecycle, pagination, and start eligibility parity.
+// Uses the repository's plain FSI test harness because the solution contract forbids adding a project/package system; all fixtures live under one fresh GUID temp root.
+// The schema3 authenticated boundary signs every persisted task, so the suite runs only in an isolated child process whose per-account application data directory is redirected to a sandbox before the domain sources load.
 
-#load "../domain/ComputationExpressions.fs"
+#load "Isolation.fsx"
+#load "../domain/Computation.fs"
+#load "../domain/Integrity.fs"
 #load "../domain/Workflow.fs"
 #load "../protocol/Adapter.fs"
 
@@ -19,6 +13,7 @@ open System
 open System.IO
 open System.Text.Json
 open System.Text.Json.Nodes
+open System.Text.RegularExpressions
 open Workflow
 open WorkflowAdapter
 
@@ -51,6 +46,11 @@ let expectErrorAsync name (result: Async<Result<'a, RuntimeError>>) : Async<stri
         | Ok _ -> return failwithf "%s: expected Error, got Ok" name
         | Error error -> return renderError error
     }
+
+let unwrap name result =
+    match result with
+    | Ok value -> value
+    | Error error -> failwithf "%s: %s" name (renderError error)
 
 let text (node: JsonNode) (name: string) = node.[name].GetValue<string>()
 let number (node: JsonNode) (name: string) = node.[name].GetValue<int>()
@@ -103,6 +103,22 @@ let guardSpec id target checkpoint =
               RequireIndependentProducer = false }
       Applicability = Always
       Waiver = NotWaivable }
+
+// The canonical terminal handoff used by the completion path.
+let defaultHandoff : TerminalHandoff =
+    { State = "Complete"
+      EvidenceSummary = "Evidence recorded"
+      Next = "No task work remains." }
+
+let evidenceRecord id kind summary =
+    { Id = id
+      Kind = kind
+      Source = EvidenceSource "tester"
+      Subject = None
+      ProducerRole = None
+      ProducerId = None
+      Reference = None
+      Summary = summary }
 
 let tempRoot =
     Path.Combine(Path.GetTempPath(), "opencode", $"projections-tests-{Guid.NewGuid():N}")
@@ -313,18 +329,50 @@ async {
             scenario "status stays lenient where ready is strict" (async {
                 let! _ = expectOkAsync "create PRJ-9" (createTaskOk "PRJ-9" "Drift projection" [ spec "W1" "Do the work" ])
                 let sidecar = sidecarPath tempRoot "PRJ-9"
-                let drifted =
-                    match JsonNode.Parse(File.ReadAllText sidecar) with
-                    | :? JsonObject as node ->
-                        node.["profileFingerprint"] <- JsonValue.Create "drifted-fingerprint"
-                        node.ToJsonString()
-                    | _ -> failwith "sidecar is not a JSON object"
-                File.WriteAllText(sidecar, drifted)
-                let! status = expectOkAsync "status PRJ-9 after drift" (project tempRoot "PRJ-9" false 0 10)
-                assertEqual "drifted status stays lenient" "notChecked" (text status "validation")
-                let! strict = expectErrorAsync "ready PRJ-9 after drift" (project tempRoot "PRJ-9" true 0 10)
-                let lowered = strict.ToLowerInvariant()
-                assertTrue "strict ready rejects drift" (lowered.Contains "profile" || lowered.Contains "fingerprint")
+                let recordedBytes = File.ReadAllBytes sidecar
+                // The persisted record is signed under the schema3 authenticated
+                // boundary, so editing the sidecar bytes would only produce an
+                // integrity failure. The drift is therefore produced by changing
+                // the resolved profile registry - a project profile overlay -
+                // and the signed bytes are left untouched.
+                let profileDirectory = Path.Combine(tempRoot, ".workflow", "profiles")
+                Directory.CreateDirectory profileDirectory |> ignore
+                let profileOverlay = Path.Combine(profileDirectory, "general.json")
+
+                File.WriteAllText(
+                    profileOverlay,
+                    """{"schemaVersion":2,"id":"general","description":"Drifted general profile for the schema3 projection test."}"""
+                )
+
+                try
+                    let! status = expectOkAsync "status PRJ-9 after drift" (project tempRoot "PRJ-9" false 0 10)
+                    assertEqual "drifted status stays lenient" "notChecked" (text status "validation")
+                    let! strict = expectErrorAsync "ready PRJ-9 after drift" (project tempRoot "PRJ-9" true 0 10)
+                    let lowered = strict.ToLowerInvariant()
+                    assertTrue "strict ready rejects drift" (lowered.Contains "profile" || lowered.Contains "fingerprint")
+                    // The drift came from the registry, not from the record: the
+                    // signed bytes are unchanged and still carry a framed receipt.
+                    assertTrue "profile drift leaves the signed bytes unchanged" (recordedBytes = File.ReadAllBytes sidecar)
+
+                    let recorded =
+                        match JsonNode.Parse(File.ReadAllText sidecar) with
+                        | :? JsonObject as node -> node
+                        | _ -> failwith "the persisted task sidecar is not a JSON object"
+
+                    let receipt = recorded.["integrityReceipt"]
+                    assertTrue "the persisted record carries a receipt" (not (isNull receipt))
+
+                    assertTrue
+                        "the persisted record still carries a framed receipt"
+                        (Regex.IsMatch(
+                            receipt.GetValue<string>(),
+                            "^hmac-sha256-v1:[0-9a-f]{64}$",
+                            RegexOptions.CultureInvariant))
+                finally
+                    // The overlay is a registry change, not a record change: it is
+                    // removed again so the later scenarios keep exercising the
+                    // same persisted task against the unmodified registry.
+                    File.Delete profileOverlay
             })
 
         do!
@@ -470,39 +518,80 @@ async {
         do!
             scenario "terminal lifecycle task reports no startable work" (async {
                 let! _ = expectOkAsync "create PRJ-16" (createTaskOk "PRJ-16" "Terminal projection" [ spec "W1" "Do the work" ])
-                let sidecar = sidecarPath tempRoot "PRJ-16"
-                // The canonical completion path requires every WorkItem to be terminal,
-                // so the terminal fixture is written directly to reach a terminal task
-                // that still owns pending work.
-                let terminal =
-                    match JsonNode.Parse(File.ReadAllText sidecar) with
-                    | :? JsonObject as node ->
-                        node.["lifecycle"] <- JsonValue.Create "complete"
-                        node.ToJsonString()
-                    | _ -> failwith "sidecar is not a JSON object"
-                File.WriteAllText(sidecar, terminal)
+                // The canonical completion path requires every WorkItem to be
+                // terminal, so the terminal task is reached by completing the
+                // work, verifying the acceptance criterion, and completing the
+                // task itself. A terminal task therefore owns no pending work,
+                // and the pure fixture below covers the terminal-with-pending
+                // shape that the canonical path cannot produce.
+                let! _ = expectOkAsync "start PRJ-16 W1" (applyTask tempRoot "PRJ-16" 0 (StartWorkItem "W1"))
+
+                let! _ =
+                    expectOkAsync
+                        "complete PRJ-16 W1"
+                        (applyTask tempRoot "PRJ-16" 1 (CompleteWorkItem("W1", { Result = "work result"; EvidenceRefs = [] })))
+
+                let! _ =
+                    expectOkAsync
+                        "add evidence PRJ-16"
+                        (applyTask tempRoot "PRJ-16" 2 (AddEvidence (evidenceRecord "E1" (evidenceKind "source-verification") "terminal work evidence")))
+
+                let! _ =
+                    expectOkAsync
+                        "verify PRJ-16 AC1"
+                        (applyTask tempRoot "PRJ-16" 3 (VerifyAcceptanceCriterion("AC1", [ "E1" ])))
+
+                let! completed = expectOkAsync "complete PRJ-16" (applyTask tempRoot "PRJ-16" 4 (CompleteTask defaultHandoff))
+                assertEqual "terminal lifecycle" "complete" completed.Lifecycle
                 let! status = expectOkAsync "status PRJ-16" (project tempRoot "PRJ-16" false 0 10)
                 expectTextFields "terminal status" status [ "validation", "notChecked"; "lifecycle", "complete" ]
-                assertEqual "terminal pending count" 1 (number (child status "workItemProgress") "pending")
+                expectNumberFields "terminal progress" (child status "workItemProgress") [ "pending", 0; "done", 1 ]
                 let! ready = expectOkAsync "ready PRJ-16" (project tempRoot "PRJ-16" true 0 10)
-                let item = pendingItems ready |> List.find (fun item -> text item "workItemId" = "W1")
-                assertEqual "terminal item not startable" false (boolean item "startable")
-                assertEqual "terminal blockersTotal" 1 (number item "blockersTotal")
-                let blocker = (array item "blockers").[0].AsObject()
-                expectTextFields "terminal blocker" blocker [ "type", "lifecycle"; "state", "complete" ]
+                assertEqual "terminal ready total" 0 (number ready "total")
+                assertEqual "terminal ready owns no pending work" 0 (pendingItems ready).Length
                 do!
                     expectRejectedAsync
                         "terminal task cannot start"
                         "a complete task cannot start work"
-                        (applyTask tempRoot "PRJ-16" 0 (StartWorkItem "W1"))
+                        (applyTask tempRoot "PRJ-16" completed.StateRevision (StartWorkItem "W1"))
+            })
+
+        do!
+            scenario "pure terminal task with pending work is not startable" (async {
+                let! _ = expectOkAsync "create PRJ-20" (createTaskOk "PRJ-20" "Pure terminal projection" [ spec "W1" "Do the work" ])
+                // A terminal task that still owns a pending WorkItem is not
+                // reachable through the canonical completion path, which
+                // requires every WorkItem to be terminal first. The fixture is
+                // therefore a pure in-memory domain model that is never
+                // persisted: it proves the start-eligibility rule the projection
+                // uses to report such an item as not startable and to attach the
+                // terminal lifecycle blocker.
+                let terminal =
+                    match JsonNode.Parse(File.ReadAllText(sidecarPath tempRoot "PRJ-20")) with
+                    | :? JsonObject as node ->
+                        node.["lifecycle"] <- JsonValue.Create "complete"
+                        node.ToJsonString()
+                    | _ -> failwith "the persisted task sidecar is not a JSON object"
+
+                let pureTask = deserialize terminal |> unwrap "deserialize pure terminal task"
+                assertEqual "pure terminal lifecycle" "complete" pureTask.Lifecycle
+                assertEqual "pure terminal work item is still pending" PendingWork pureTask.WorkItems.Head.State
+                let! profiles = expectOkAsync "resolve profiles" (resolveProfiles tempRoot)
+
+                match decideAt profiles pureTask.Created pureTask (StartWorkItem "W1") with
+                | Error [ InvalidTransition message ] ->
+                    assertEqual "pure terminal task refuses to start work" "a complete task cannot start work" message
+                | Error errors -> failwithf "expected a terminal start refusal, got %A" errors
+                | Ok _ -> failwith "a terminal task must not start work"
             })
 
         if failures.IsEmpty then
-            printfn "OK workflow projections: lenient status, strict ready, dependency blockers, ancestor state and question blockers, unmet guard blockers, terminal lifecycle, blocker truncation, pagination bounds, empty pages beyond the pending total, bounded page selection, applied-state tracking, drift split, read-only guarantee, and start-eligibility parity"
+            printfn "OK workflow projections: lenient status, strict ready, dependency blockers, ancestor state and question blockers, unmet guard blockers, terminal lifecycle and the pure terminal-with-pending-work fixture, blocker truncation, pagination bounds, empty pages beyond the pending total, bounded page selection, applied-state tracking, drift split, read-only guarantee, and start-eligibility parity"
     finally
         if Directory.Exists tempRoot && tempRoot.Contains("projections-tests-", StringComparison.Ordinal) then
             Directory.Delete(tempRoot, true)
 }
+// Standalone entry bridge: FSI needs one synchronous script entry.
 |> Async.RunSynchronously
 
 if not failures.IsEmpty then

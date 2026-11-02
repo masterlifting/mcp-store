@@ -218,9 +218,9 @@ let private runProducerScript (root: string) (phase: string) (scriptPath: string
 // Explicit per-component test gate list (no dynamic discovery): ordered relative to the producer's component root. Workflow's pack requires an additional runtime-coordination test against the freshly built artifacts.
 let private producerScriptTests (componentId: string) : string list =
     match componentId with
-    | "dotnet" -> [ "tests/DistributionTests.fsx" ]
-    | "workflow" -> [ "tests/DistributionTests.fsx"; "tests/PackagedRuntimeCoordinationTests.fsx" ]
-    | _ -> [ "tests/DistributionTests.fsx" ]
+    | "dotnet" -> [ "tests/distribution/Run.fsx" ]
+    | "workflow" -> [ "tests/distribution/Run.fsx"; "tests/coordination/Run.fsx" ]
+    | _ -> [ "tests/distribution/Run.fsx" ]
 
 let private runProducerTests
     (root: string)
@@ -298,7 +298,7 @@ let private prepareInternal (root: string) (configPath: string) : Async<Result<P
                             match buildResult with
                             | Error error -> return Error error
                             | Ok () ->
-                                let! pinsResult = runProducerScript root "pins" (Path.Combine(componentId, "release", "Pins.fsx")) configPath
+                                let! pinsResult = runProducerScript root "pins" (Path.Combine(componentId, "release", "Pin.fsx")) configPath
 
                                 match pinsResult with
                                 | Error error -> return Error error

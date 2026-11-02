@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net11.0</TargetFramework>
+    <RootNamespace>Mcp.Dotnet</RootNamespace>
+    <AssemblyName>Mcp.Dotnet</AssemblyName>
+    <OutputType>Exe</OutputType>
+    <!-- Release builds must match publish output to keep packaged assemblies reproducible. -->
+    <DebugType>None</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <WarningsAsErrors>3390;3391;3392;3393</WarningsAsErrors>
+    <LangVersion>9.0</LangVersion>
+    <!-- Packaging must not embed a checkout-specific source revision. -->
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="domain/Domain.fs" />
+    <Compile Include="domain/Budgets.fs" />
+    <Compile Include="runtime/Authorization.fs" />
+    <Compile Include="runtime/Invocation.fs" />
+    <Compile Include="runtime/Process.fs" />
+    <Compile Include="runtime/Parsers.fs" />
+    <Compile Include="runtime/Artifacts.fs" />
+    <Compile Include="runtime/Service.fs" />
+    <Compile Include="protocol/Host.fs" />
+  </ItemGroup>
+</Project>
