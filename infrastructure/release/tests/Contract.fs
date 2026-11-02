@@ -80,6 +80,10 @@ let private canonicalManifestWithoutNotice () =
 let private isInsideRoot (root: string) (path: string) =
     path.StartsWith(Path.GetFullPath root + string Path.DirectorySeparatorChar, StringComparison.Ordinal)
 
+// Caller-owned directory names must not influence entrypoint resolution.
+let private expectedUnderRoot (root: string) (memberName: string) =
+    Path.GetFullPath(Path.Combine(Path.GetFullPath root, memberName))
+
 let private resolveRootWithSpaces () =
     let outer = Fixture.newTempDir "mcp-contract-root"
     let root = Path.Combine(outer, "nested root with spaces")
@@ -98,10 +102,14 @@ let private unsafeMembers =
 let arbitraryRootResolution () =
     let root = resolveRootWithSpaces ()
     let otherRootOuter = Fixture.newTempDir "mcp-contract-other"
+    let namedRootOuter = Fixture.newTempDir "mcp-contract-named-root"
 
     try
         let otherRoot = Path.Combine(otherRootOuter, "second root with spaces")
         Directory.CreateDirectory otherRoot |> ignore
+        // A root named like an install location must still resolve beneath itself, so names never decide the contract.
+        let namedRoot = Path.Combine(namedRootOuter, "opencode")
+        Directory.CreateDirectory namedRoot |> ignore
         let entry = Fixture.canonicalEntrypoint
 
         match resolveUnderRoot root entry with
@@ -109,7 +117,13 @@ let arbitraryRootResolution () =
         | Ok resolved ->
             assertEqual "arbitrary root keeps the member leaf name" entry (Path.GetFileName resolved)
             assertTrue "arbitrary root composes beneath the supplied root" (isInsideRoot root resolved)
-            assertTrue "the resolved entrypoint is not an installed or harness location" (not (resolved.Contains("opencode", StringComparison.OrdinalIgnoreCase)))
+            // Exact composition proves only the supplied root was consulted, so a name inside it stays legitimate.
+            assertEqual "arbitrary root resolves exactly beneath the supplied root" (expectedUnderRoot root entry) resolved
+
+        match resolveUnderRoot namedRoot entry with
+        | Error error -> recordFailure "an install-named root resolves the canonical entrypoint" (ReleaseError.message error)
+        | Ok namedResolved ->
+            assertEqual "an install-named root resolves exactly beneath that root" (expectedUnderRoot namedRoot entry) namedResolved
 
         match resolveUnderRoot otherRoot entry, resolveUnderRoot root entry with
         | Ok other, Ok first ->
@@ -130,6 +144,7 @@ let arbitraryRootResolution () =
         Fixture.safeDeleteDir root
         Fixture.safeDeleteDir (Path.GetDirectoryName root)
         Fixture.safeDeleteDir otherRootOuter
+        Fixture.safeDeleteDir namedRootOuter
 
 let bothProducerPolicies () =
     for relative in [ "dotnet/release/Config.json"; "workflow/release/Config.json" ] do

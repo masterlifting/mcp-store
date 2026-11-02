@@ -324,9 +324,7 @@ async def get_bot_info(bot_username: str, account: Optional[str] = None) -> str:
 
         result = await cl(functions.users.GetFullUserRequest(id=entity))
 
-        # Build a structured response with sanitized user-controlled fields.
-        # We intentionally avoid raw to_dict() which would include unsanitized
-        # user content (names, about) directly in the tool result.
+        # to_dict() would expose unsanitized names and about text; build the response explicitly.
         info = {
             "bot_info": {
                 "id": get_marked_id(entity),

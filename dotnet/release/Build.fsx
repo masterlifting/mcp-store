@@ -8,19 +8,17 @@ open BuildProvenance
 let root = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", ".."))
 let config = DistributionBuild.loadConfig (Path.Combine(__SOURCE_DIRECTORY__, "Config.json"))
 
-// The publication repository is not a free parameter: it is derived from the
-// fixed release asset URI so the manifest claim and the pin cannot drift.
+// Derive the publication repository from the fixed asset URI to prevent manifest and pin drift.
 let sourceRepository =
     match DistributionContract.sourceRepositoryFromAssetUri config.AssetUri with
     | Ok value -> value
     | Error error -> failwith (ReleaseError.message error)
 
-// Framework-dependent publish of this producer; the allowlist is the runtime
-// contract and the shared builder rejects any extra publish output.
+// The allowlist defines runtime output and rejects extra publish files.
 let run () =
     DistributionBuild.build
         { Root = root
-          ProjectPath = "dotnet/Mcp.Dotnet.fsproj"
+          ProjectPath = "dotnet/Dotnet.fsproj"
           OutputRoot = Path.Combine(root, "dotnet", "dist")
           ComponentId = config.ComponentId
           Version = config.Version
@@ -35,7 +33,7 @@ let run () =
           ExtraPublishProperties = [ "-p:GenerateDocumentationFile=false" ]
           Notice = "mcp-store dotnet MCP distribution\n" }
 
-// Standalone entry bridge: the only synchronous wait in this script's flow.
+// Standalone entry bridge: release work is asynchronous.
 let result =
     match run () |> Async.RunSynchronously with
     | Ok value -> value

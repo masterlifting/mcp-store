@@ -26,10 +26,10 @@ let private repoRoot = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..",
 
 let private producers =
     [ { Name = "dotnet"
-        ProjectPath = Path.Combine(repoRoot, "dotnet", "Mcp.Dotnet.fsproj")
+        ProjectPath = Path.Combine(repoRoot, "dotnet", "Dotnet.fsproj")
         BuiltAssemblyPath = Path.Combine(repoRoot, "dotnet", "bin", "Release", "net11.0", "Mcp.Dotnet.dll") }
       { Name = "workflow"
-        ProjectPath = Path.Combine(repoRoot, "workflow", "Mcp.Workflow.fsproj")
+        ProjectPath = Path.Combine(repoRoot, "workflow", "Workflow.fsproj")
         BuiltAssemblyPath = Path.Combine(repoRoot, "workflow", "bin", "Release", "net11.0", "Mcp.Workflow.dll") } ]
 
 let private revisionA = String.replicate 40 "1"

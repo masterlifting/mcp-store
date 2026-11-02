@@ -56,18 +56,18 @@ consumer descriptor, launcher, and tool-facing contracts.
 The deterministic F#-native implementation suite is an Expecto executable:
 
 ```text
-dotnet run --project tests/Mcp.Dotnet.Tests/Mcp.Dotnet.Tests.fsproj --configuration Release
+dotnet run --project tests/Tests.fsproj --configuration Release
 ```
 
 Run the command from this directory. It targets `net11.0`, references
-`Mcp.Dotnet.fsproj` directly, and owns the dotnet build/test domain, authorization,
+`Dotnet.fsproj` directly, and owns the dotnet build/test domain, authorization,
 process, quota, and MCP transport coverage.
 
 The repo-shared provenance guard has a focused check that does not require a clean
 tree:
 
 ```text
-dotnet fsi dotnet/tests/ProvenanceTests.fsx
+dotnet fsi dotnet/tests/provenance/Run.fsx
 ```
 
 ## Producer packaging
@@ -77,8 +77,8 @@ release with:
 
 ```text
 dotnet fsi dotnet/release/Build.fsx
-dotnet fsi dotnet/release/Pins.fsx
-dotnet fsi dotnet/tests/DistributionTests.fsx
+dotnet fsi dotnet/release/Pin.fsx
+dotnet fsi dotnet/tests/distribution/Run.fsx
 ```
 
 The scripts stage only the allowlisted runtime files under

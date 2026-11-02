@@ -135,7 +135,7 @@ let private runMuxer (muxer: string) (workingDirectory: string) (arguments: stri
 let private producerArtifacts (producer: string) =
     let pinPath = Path.Combine(repositoryRoot, producer, "dist", "consumer-pins.json")
     let prerequisite =
-        $"`dotnet fsi --nologo {producer}/release/Build.fsx` and `dotnet fsi --nologo {producer}/release/Pins.fsx`"
+        $"`dotnet fsi --nologo {producer}/release/Build.fsx` and `dotnet fsi --nologo {producer}/release/Pin.fsx`"
 
     // Fail closed on an unpacked producer so an absent distribution can never read as a passed launch.
     if not (File.Exists pinPath) then

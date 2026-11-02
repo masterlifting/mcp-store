@@ -11,7 +11,7 @@ changes nor generated artifacts update a consumer's installed producer or pin.
 
 ## Persisted task state
 
-`.tasks/<TASK-ID>/runtime.json` in strict schema v2 is the sole task-state
+`.tasks/<TASK-ID>/runtime.json` in strict schema v3 is the sole task-state
 authority. The task root permits only four entry names/kinds: a regular
 `runtime.json` file and optional `docs/`, `scripts/`, and `temp/` directories. Their nested
 contents are opaque to ordinary task operations. Cleanup/archive inspect nested
@@ -43,9 +43,49 @@ do not protect against hostile external filesystem writers or authorize edits
 outside Workflow operations.
 
 User-authority requirements fail closed: ordinary `add-decision` cannot
-manufacture User authority, and this producer has no trusted User-authority
-ingress. Do not forge authority, edit task records directly, or infer permission
-to mutate user data.
+manufacture User authority. The native MCP host wires the domain's internal
+trusted confirmation/apply seam for `task_apply`: only a canonical User-authority
+denial from the ordinary Coordinator path can initiate the client's native form
+confirmation. Routine Coordinator applies remain prompt-free. Unsupported client
+protocol or form-elicitation capability returns a distinct unsupported-native-
+confirmation diagnostic before waiting for a response; rejection, malformed
+responses, timeout, or transport loss retain the confirmation-rejected
+diagnostic. All paths fail closed without persistence. The confirmation is not a
+tool argument and does not change the public tool schema. Do not forge authority,
+edit task records directly,
+or infer permission to mutate user data.
+
+The producer-owned integrity primitive stores a random 256-bit key under the
+current account's `LocalApplicationData/mcp-store/workflow/integrity.key`,
+outside task files. Existing-key verification never creates directories or
+rotates/repairs a key; only creation of a new task may bootstrap a missing key.
+Every schema-v3 task requires an `integrityReceipt` exactly matching
+`hmac-sha256-v1:` plus 64 lowercase hexadecimal characters. The HMAC-SHA256
+frame binds platform, canonical project root, requested task ID, and the complete
+deterministic receipt-excluded schema-v3 DTO. Missing, malformed, invalid, or
+wrong-destination receipts reject every task operation. Schema v2 is unsupported
+and is neither migrated nor rewritten; existing installed task data is left
+untouched. Creation and authenticated continuation use the signed atomic writer;
+continuation verifies the prior receipt and expected bytes before replacing it.
+Ordinary `add-decision` remains fail-closed; User-required task mutations proceed
+only through the host's exact-context prepare/confirm/revalidate/apply seam. The
+seam is not a model-callable tool argument. Source changes do not install or
+activate the producer, and focused boundary testing remains a separate gate.
+
+### Current threat model
+
+The native operator confirmation path and destination-bound HMAC receipt provide
+approval guardrails and detection of unauthenticated persisted-byte tampering.
+The HMAC authenticates bytes only while its secret key remains inaccessible; it
+does not prove protected-UI provenance when a caller can access the key. Direct
+file-tool permissions are a harness guardrail for normal agent behavior, not
+producer enforcement, and their activation and testing remain pending. Shell,
+script, or MCP code execution under the same OS account may bypass those
+permissions and access the key; this design makes no forgery-protection guarantee
+against that actor. Excluding the key from model-callable tools is a prerequisite
+for any stronger same-account security claim, not a prerequisite for the narrower
+guardrail claim above. Source and installed-runtime qualification remain
+unverified.
 
 Before installing a producer update, obtain operator authorization and safely
 inventory the actual task data against the target producer's four-entry root
@@ -94,8 +134,13 @@ existing obligations require trusted User authority and fail closed without it.
 Reopen accepts only the singleton target `task` for completed tasks, is
 Coordinator-authorized, preserves records, and does not change
 `contractRevision`; aborted and nonterminal tasks cannot be structurally
-reopened. See [manual verification](docs/ManualVerification.md) for operator
-instructions; the instructions are not evidence of execution.
+reopened. See [manual verification](docs/Verification.md) for operator
+instructions; the instructions are not evidence of execution. Schema-v3 receipt
+authentication and protected native User-confirmation qualification are scoped in
+[the manual procedure](docs/Verification.md#schema-v3-integrity-and-native-user-confirmation-disposable-only);
+cleanup/archive authentication and logical identity are summarized in
+[Cleaner.md](docs/Cleaner.md). Neither document is evidence of execution or
+authorization to install or activate a producer.
 
 ## Build and distribution
 
@@ -104,7 +149,7 @@ file-kind path uses the runtime's internal `FileStatus`/`SystemNative_LStat`
 interop; Unix filesystem behavior remains unqualified. Build with:
 
 ```text
-dotnet build workflow/Mcp.Workflow.fsproj -c Release
+dotnet build workflow/Workflow.fsproj -c Release
 ```
 
 The component-local release scripts build the framework-dependent archive and

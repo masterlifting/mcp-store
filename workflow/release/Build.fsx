@@ -20,7 +20,7 @@ let sourceRepository =
 let run () =
     DistributionBuild.build
         { Root = root
-          ProjectPath = "workflow/Mcp.Workflow.fsproj"
+          ProjectPath = "workflow/Workflow.fsproj"
           OutputRoot = Path.Combine(root, "workflow", "dist")
           ComponentId = config.ComponentId
           Version = config.Version

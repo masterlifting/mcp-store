@@ -10,6 +10,9 @@ open System.Security.Cryptography
 open System.Text.Json
 open System.Text.Json.Nodes
 open System.Text.RegularExpressions
+open System.Collections.Concurrent
+open System.Threading
+open System.Threading.Tasks
 open Common.CE
 open Workflow
 open WorkflowAdapter
@@ -676,9 +679,16 @@ let private requestId (request: JsonElement) : Result<string option, string> =
                   || value.ValueKind = JsonValueKind.Null -> Ok(Some(value.GetRawText()))
     | Some _ -> invalid "JSON-RPC request id must be a string, number, or null"
 
+let private isReservedServerId (rawId: string) =
+    try
+        use id = JsonDocument.Parse rawId
+        id.RootElement.ValueKind = JsonValueKind.String
+        && id.RootElement.GetString().StartsWith("workflow-server:", StringComparison.Ordinal)
+    with _ -> false
+
 // Inline schemas keep MCP clients aligned with the accepted tool argument grammar.
 let private tools =
-    """[{"name":"task_create","description":"Create a Workflow task using the strict schema-v2 DTO boundary.","inputSchema":{"type":"object","additionalProperties":false,"required":["projectRoot","taskId","title","kind","acceptanceCriteria","workItems"],"properties":{"projectRoot":{"type":"string","minLength":1},"taskId":{"type":"string","pattern":"^[A-Za-z]+-[0-9]+$"},"title":{"type":"string","minLength":1},"kind":{"type":"string","enum":["execution","research"]},"profile":{"type":"string","minLength":1},"acceptanceCriteria":{"type":"array","minItems":1,"items":{"type":"object","additionalProperties":false,"required":["id","text"],"properties":{"id":{"type":"string","pattern":"^AC[0-9]+$"},"text":{"type":"string","minLength":1}}}},"workItems":{"type":"array","minItems":1,"items":{"type":"object","additionalProperties":false,"required":["id","title","children"],"properties":{"id":{"type":"string","pattern":"^W[0-9]+(\\.[0-9]+)*$"},"title":{"type":"string","minLength":1},"dependsOn":{"type":"array","items":{"type":"string","pattern":"^W[0-9]+(\\.[0-9]+)*$"}},"children":{"type":"array","items":{"$ref":"#/$defs/workItem"}}}}}},"$defs":{"workItem":{"type":"object","additionalProperties":false,"required":["id","title","children"],"properties":{"id":{"type":"string","pattern":"^W[0-9]+(\\.[0-9]+)*$"},"title":{"type":"string","minLength":1},"dependsOn":{"type":"array","items":{"type":"string","pattern":"^W[0-9]+(\\.[0-9]+)*$"}},"children":{"type":"array","items":{"$ref":"#/$defs/workItem"}}}}}}},{"name":"task_status","description":"Read a compact lenient Workflow status projection without changing state.","inputSchema":{"type":"object","additionalProperties":false,"required":["projectRoot","taskId"],"properties":{"projectRoot":{"type":"string","minLength":1},"taskId":{"type":"string","pattern":"^[A-Za-z]+-[0-9]+$"}}}},{"name":"task_ready","description":"Read a compact registry-validated start-readiness projection without changing state.","inputSchema":{"type":"object","additionalProperties":false,"required":["projectRoot","taskId"],"properties":{"projectRoot":{"type":"string","minLength":1},"taskId":{"type":"string","pattern":"^[A-Za-z]+-[0-9]+$"},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":100}}}},{"name":"task_get","description":"Read a Workflow task without changing state.","inputSchema":{"type":"object","additionalProperties":false,"required":["projectRoot","taskId"],"properties":{"projectRoot":{"type":"string","minLength":1},"taskId":{"type":"string","pattern":"^[A-Za-z]+-[0-9]+$"}}}},{"name":"task_apply","description":"Apply one Workflow command with expectedStateRevision CAS. Operations requiring User authority fail closed with structured remediation data (requiredAuthority, decisionKind, target, decisionRefStatus) under the `error.authority` block. Ordinary Coordinator invocation cannot manufacture User authority.","inputSchema":{"type":"object","additionalProperties":false,"required":["projectRoot","taskId","expectedStateRevision","command"],"properties":{"projectRoot":{"type":"string","minLength":1},"taskId":{"type":"string","pattern":"^[A-Za-z]+-[0-9]+$"},"expectedStateRevision":{"type":"integer","minimum":0},"command":{"oneOf":[{"type":"object","additionalProperties":false,"required":["type","workItemId"],"properties":{"type":{"const":"start"},"workItemId":{"type":"string"}}},{"type":"object","additionalProperties":false,"required":["type","workItemId","result"],"properties":{"type":{"const":"complete-work"},"workItemId":{"type":"string"},"result":{"type":"string","minLength":1},"evidenceRefs":{"type":"array","items":{"type":"string"}}}},{"type":"object","additionalProperties":false,"required":["type","workItemId","resumeCondition"],"properties":{"type":{"const":"wait"},"workItemId":{"type":"string"},"resumeCondition":{"type":"string","minLength":1}}},{"type":"object","additionalProperties":false,"required":["type","workItemId","blocker"],"properties":{"type":{"const":"block"},"workItemId":{"type":"string"},"blocker":{"type":"string","minLength":1}}},{"type":"object","additionalProperties":false,"required":["type","workItemId"],"properties":{"type":{"const":"resume"},"workItemId":{"type":"string"},"observationRef":{"type":"string"}}},{"type":"object","additionalProperties":false,"required":["type","workItemId","role","reason"],"properties":{"type":{"const":"rebind-owner"},"workItemId":{"type":"string"},"role":{"type":"string","minLength":1},"agentId":{"type":"string"},"reason":{"type":"string","minLength":1}}},{"type":"object","additionalProperties":false,"required":["type","id","kind","source","summary"],"properties":{"type":{"const":"add-evidence"},"id":{"type":"string","pattern":"^E[0-9]+$"},"kind":{"type":"string","minLength":1,"maxLength":64,"pattern":"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?![\\s\\S])"},"source":{"type":"string","minLength":1},"summary":{"type":"string","minLength":1},"subject":{"type":"string"},"producerRole":{"type":"string"},"producerId":{"type":"string"},"reference":{"type":"string"}}},{"type":"object","additionalProperties":false,"required":["type","evidenceId","reason"],"properties":{"type":{"const":"supersede-evidence"},"evidenceId":{"type":"string","pattern":"^E[0-9]+$"},"reason":{"type":"string","minLength":1}}},{"type":"object","additionalProperties":false,"required":["type","acceptanceId","evidenceRefs"],"properties":{"type":{"const":"verify"},"acceptanceId":{"type":"string","pattern":"^AC[0-9]+$"},"evidenceRefs":{"type":"array","minItems":1,"items":{"type":"string","minLength":1}}}},{"type":"object","additionalProperties":false,"required":["type","id","target","checkpoint","kind"],"properties":{"type":{"const":"add-guard"},"id":{"type":"string","pattern":"^G[0-9]+$"},"target":{"oneOf":[{"const":"task"},{"type":"string","pattern":"^workItem:W[0-9]+(\\.[0-9]+)*$"}]},"checkpoint":{"type":"string","enum":["beforeStart","beforeComplete"]},"kind":{"type":"string","minLength":1,"maxLength":64,"pattern":"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?![\\s\\S])"},"minimumCount":{"type":"integer","minimum":1},"producerRole":{"type":"string"},"independent":{"type":"boolean"},"applicability":{"oneOf":[{"const":"always"},{"type":"string","pattern":"^explicitDecision:(coordinator|user)$"}]},"waiver":{"oneOf":[{"const":"notWaivable"},{"type":"string","pattern":"^waivableBy:(coordinator|user)$"}]}}},{"type":"object","additionalProperties":false,"required":["type","guardId"],"properties":{"type":{"const":"mark-not-applicable"},"guardId":{"type":"string","pattern":"^G[0-9]+$"},"decisionRef":{"type":"string","pattern":"^D[0-9]+$"}}},{"type":"object","additionalProperties":false,"required":["type","guardId"],"properties":{"type":{"const":"waive-guard"},"guardId":{"type":"string","pattern":"^G[0-9]+$"},"decisionRef":{"type":"string","pattern":"^D[0-9]+$"}}},{"type":"object","additionalProperties":false,"required":["type","kind","targets","rationale"],"properties":{"type":{"const":"add-decision"},"kind":{"type":"string","enum":["userDecision","designDecision","assumption","policyApplication","contractRevision","applicabilityDecision","waiverDecision"]},"targets":{"type":"array","minItems":1,"items":{"oneOf":[{"type":"string","pattern":"^waiveAcceptance:AC[0-9]+$"},{"type":"string","pattern":"^guardDisposition:G[0-9]+$"},{"type":"string","pattern":"^skipWorkItem:W[0-9]+(\\.[0-9]+)*$"},{"type":"string","pattern":"^requirementChange:W[0-9]+(\\.[0-9]+)*$"},{"type":"string","pattern":"^contractPatch:.+$"},{"type":"string","pattern":"^reopenTask:[A-Za-z]+-[0-9]+[|](task|(acceptance:AC[0-9]+|workItem:W[0-9]+(\\.[0-9]+)*|guard:G[0-9]+)(;(acceptance:AC[0-9]+|workItem:W[0-9]+(\\.[0-9]+)*|guard:G[0-9]+))*)$"},{"type":"string","pattern":"^questionResolution:Q[0-9]+$"},{"type":"string","pattern":"^reclassify:.+$"},{"type":"string","pattern":"^other:.+$"}]}},"rationale":{"type":"string","minLength":1}}},{"type":"object","additionalProperties":false,"required":["type","id","text","impact"],"properties":{"type":{"const":"add-question"},"id":{"type":"string","pattern":"^Q[0-9]+$"},"text":{"type":"string","minLength":1},"impact":{"oneOf":[{"const":"taskWide"},{"type":"string","pattern":"^workItems:W[0-9]+(\\.[0-9]+)*(,W[0-9]+(\\.[0-9]+)*)*$"}]}}},{"type":"object","additionalProperties":false,"required":["type","questionId","decisionRef"],"properties":{"type":{"const":"resolve-question"},"questionId":{"type":"string","pattern":"^Q[0-9]+$"},"decisionRef":{"type":"string","pattern":"^D[0-9]+$"}}},{"type":"object","additionalProperties":false,"required":["type","reason","targets"],"properties":{"type":{"const":"reopen"},"reason":{"type":"string","minLength":1},"targets":{"type":"array","minItems":1,"items":{"oneOf":[{"const":"task"},{"type":"string","pattern":"^acceptance:AC[0-9]+$"},{"type":"string","pattern":"^workItem:W[0-9]+(\\.[0-9]+)*$"},{"type":"string","pattern":"^guard:G[0-9]+$"}]}},"decisionRef":{"type":"string","pattern":"^D[0-9]+$"}}},{"type":"object","additionalProperties":false,"required":["type","patch"],"properties":{"type":{"const":"apply-contract-patch"},"patch":{"oneOf":[{"type":"object","additionalProperties":false,"required":["type","id","text"],"properties":{"type":{"const":"addAcceptanceCriterion"},"id":{"type":"string","pattern":"^AC[0-9]+$"},"text":{"type":"string","minLength":1}}},{"type":"object","additionalProperties":false,"required":["type","id","text"],"properties":{"type":{"const":"updateAcceptanceCriterion"},"id":{"type":"string","pattern":"^AC[0-9]+$"},"text":{"type":"string","minLength":1}}},{"type":"object","additionalProperties":false,"required":["type","id","target","checkpoint","kind"],"properties":{"type":{"const":"addGuard"},"id":{"type":"string","pattern":"^G[0-9]+$"},"target":{"oneOf":[{"const":"task"},{"type":"string","pattern":"^workItem:W[0-9]+(\\.[0-9]+)*$"}]},"checkpoint":{"type":"string","enum":["beforeStart","beforeComplete"]},"kind":{"type":"string","minLength":1,"maxLength":64,"pattern":"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?![\\s\\S])"},"minimumCount":{"type":"integer","minimum":1},"producerRole":{"type":"string"},"independent":{"type":"boolean"},"applicability":{"oneOf":[{"const":"always"},{"type":"string","pattern":"^explicitDecision:(coordinator|user)$"}]},"waiver":{"oneOf":[{"const":"notWaivable"},{"type":"string","pattern":"^waivableBy:(coordinator|user)$"}]}}},{"type":"object","additionalProperties":false,"required":["type","id"],"properties":{"type":{"const":"removeGuard"},"id":{"type":"string","pattern":"^G[0-9]+$"}}},{"type":"object","additionalProperties":false,"required":["type","id"],"properties":{"type":{"const":"removeAcceptanceCriterion"},"id":{"type":"string","pattern":"^AC[0-9]+$"}}},{"type":"object","additionalProperties":false,"required":["type","text"],"properties":{"type":{"const":"setObjective"},"text":{"type":"string","minLength":1}}},{"type":"object","additionalProperties":false,"required":["type","text"],"properties":{"type":{"const":"setScope"},"text":{"type":"string","minLength":1}}},{"type":"object","additionalProperties":false,"required":["type","text"],"properties":{"type":{"const":"setNonGoals"},"text":{"type":"string","minLength":1}}},{"type":"object","additionalProperties":false,"required":["type","id","title"],"properties":{"type":{"const":"addWorkItem"},"id":{"type":"string","pattern":"^W[0-9]+(\\.[0-9]+)*$"},"title":{"type":"string","minLength":1},"parentId":{"type":"string","pattern":"^W[0-9]+(\\.[0-9]+)*$"},"dependsOn":{"type":"array","items":{"type":"string","pattern":"^W[0-9]+(\\.[0-9]+)*$"}}}},{"type":"object","additionalProperties":false,"required":["type","id","title"],"properties":{"type":{"const":"updateWorkItem"},"id":{"type":"string","pattern":"^W[0-9]+(\\.[0-9]+)*$"},"title":{"type":"string","minLength":1}}},{"type":"object","additionalProperties":false,"required":["type","id"],"properties":{"type":{"const":"removeWorkItem"},"id":{"type":"string","pattern":"^W[0-9]+(\\.[0-9]+)*$"}}},{"type":"object","additionalProperties":false,"required":["type","id","dependsOn"],"properties":{"type":{"const":"setDependencies"},"id":{"type":"string","pattern":"^W[0-9]+(\\.[0-9]+)*$"},"dependsOn":{"type":"array","items":{"type":"string","pattern":"^W[0-9]+(\\.[0-9]+)*$"}}}}]},"decisionRef":{"type":"string","pattern":"^D[0-9]+$"}}},{"type":"object","additionalProperties":false,"required":["type","plan"],"properties":{"type":{"const":"reconcile-contract-drift"},"plan":{"oneOf":[{"type":"object","additionalProperties":false,"required":["type"],"properties":{"type":{"const":"acceptExternalContract"}}},{"type":"object","additionalProperties":false,"required":["type","objective","scope","nonGoals","acceptanceCriteria"],"properties":{"type":{"const":"restoreCanonicalContract"},"objective":{"type":"string"},"scope":{"type":"string"},"nonGoals":{"type":"string"},"acceptanceCriteria":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["id","text"],"properties":{"id":{"type":"string","pattern":"^AC[0-9]+$"},"text":{"type":"string","minLength":1}}}}}}]}}},{"type":"object","additionalProperties":false,"required":["type","reason"],"properties":{"type":{"const":"reclassify-task"},"kind":{"type":"string","enum":["execution","research"]},"profile":{"type":"string","minLength":1},"reason":{"type":"string","minLength":1}}},{"type":"object","additionalProperties":false,"required":["type"],"properties":{"type":{"const":"reconcile-profile-drift"}}},{"type":"object","additionalProperties":false,"required":["type","state","evidenceSummary","next"],"properties":{"type":{"const":"complete-task"},"state":{"type":"string","minLength":1},"evidenceSummary":{"type":"string","minLength":1},"next":{"type":"string","minLength":1}}}]}}}},{"name":"task_clean","description":"Remove disposable temp content or archive an eligible Workflow task without changing task state.","inputSchema":{"type":"object","additionalProperties":false,"required":["projectRoot","taskId","operation"],"properties":{"projectRoot":{"type":"string","minLength":1},"taskId":{"type":"string","pattern":"^[A-Za-z]+-[0-9]+$"},"operation":{"type":"string","enum":["cleanup","archive"]}}}},{"name":"task_validate","description":"Validate a persisted Workflow task and report contract/profile drift.","inputSchema":{"type":"object","additionalProperties":false,"required":["projectRoot","taskId"],"properties":{"projectRoot":{"type":"string","minLength":1},"taskId":{"type":"string","pattern":"^[A-Za-z]+-[0-9]+$"}}}}]"""
+    """[{"name":"task_create","description":"Create a Workflow task using the strict schema-v3 DTO boundary.","inputSchema":{"type":"object","additionalProperties":false,"required":["projectRoot","taskId","title","kind","acceptanceCriteria","workItems"],"properties":{"projectRoot":{"type":"string","minLength":1},"taskId":{"type":"string","pattern":"^[A-Za-z]+-[0-9]+$"},"title":{"type":"string","minLength":1},"kind":{"type":"string","enum":["execution","research"]},"profile":{"type":"string","minLength":1},"acceptanceCriteria":{"type":"array","minItems":1,"items":{"type":"object","additionalProperties":false,"required":["id","text"],"properties":{"id":{"type":"string","pattern":"^AC[0-9]+$"},"text":{"type":"string","minLength":1}}}},"workItems":{"type":"array","minItems":1,"items":{"type":"object","additionalProperties":false,"required":["id","title","children"],"properties":{"id":{"type":"string","pattern":"^W[0-9]+(\\.[0-9]+)*$"},"title":{"type":"string","minLength":1},"dependsOn":{"type":"array","items":{"type":"string","pattern":"^W[0-9]+(\\.[0-9]+)*$"}},"children":{"type":"array","items":{"$ref":"#/$defs/workItem"}}}}}},"$defs":{"workItem":{"type":"object","additionalProperties":false,"required":["id","title","children"],"properties":{"id":{"type":"string","pattern":"^W[0-9]+(\\.[0-9]+)*$"},"title":{"type":"string","minLength":1},"dependsOn":{"type":"array","items":{"type":"string","pattern":"^W[0-9]+(\\.[0-9]+)*$"}},"children":{"type":"array","items":{"$ref":"#/$defs/workItem"}}}}}}},{"name":"task_status","description":"Read a compact lenient Workflow status projection without changing state.","inputSchema":{"type":"object","additionalProperties":false,"required":["projectRoot","taskId"],"properties":{"projectRoot":{"type":"string","minLength":1},"taskId":{"type":"string","pattern":"^[A-Za-z]+-[0-9]+$"}}}},{"name":"task_ready","description":"Read a compact registry-validated start-readiness projection without changing state.","inputSchema":{"type":"object","additionalProperties":false,"required":["projectRoot","taskId"],"properties":{"projectRoot":{"type":"string","minLength":1},"taskId":{"type":"string","pattern":"^[A-Za-z]+-[0-9]+$"},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":100}}}},{"name":"task_get","description":"Read a Workflow task without changing state.","inputSchema":{"type":"object","additionalProperties":false,"required":["projectRoot","taskId"],"properties":{"projectRoot":{"type":"string","minLength":1},"taskId":{"type":"string","pattern":"^[A-Za-z]+-[0-9]+$"}}}},{"name":"task_apply","description":"Apply one Workflow command with expectedStateRevision CAS. Operations requiring User authority fail closed with structured remediation data (requiredAuthority, decisionKind, target, decisionRefStatus) under the `error.authority` block. Ordinary Coordinator invocation cannot manufacture User authority.","inputSchema":{"type":"object","additionalProperties":false,"required":["projectRoot","taskId","expectedStateRevision","command"],"properties":{"projectRoot":{"type":"string","minLength":1},"taskId":{"type":"string","pattern":"^[A-Za-z]+-[0-9]+$"},"expectedStateRevision":{"type":"integer","minimum":0},"command":{"oneOf":[{"type":"object","additionalProperties":false,"required":["type","workItemId"],"properties":{"type":{"const":"start"},"workItemId":{"type":"string"}}},{"type":"object","additionalProperties":false,"required":["type","workItemId","result"],"properties":{"type":{"const":"complete-work"},"workItemId":{"type":"string"},"result":{"type":"string","minLength":1},"evidenceRefs":{"type":"array","items":{"type":"string"}}}},{"type":"object","additionalProperties":false,"required":["type","workItemId","resumeCondition"],"properties":{"type":{"const":"wait"},"workItemId":{"type":"string"},"resumeCondition":{"type":"string","minLength":1}}},{"type":"object","additionalProperties":false,"required":["type","workItemId","blocker"],"properties":{"type":{"const":"block"},"workItemId":{"type":"string"},"blocker":{"type":"string","minLength":1}}},{"type":"object","additionalProperties":false,"required":["type","workItemId"],"properties":{"type":{"const":"resume"},"workItemId":{"type":"string"},"observationRef":{"type":"string"}}},{"type":"object","additionalProperties":false,"required":["type","workItemId","role","reason"],"properties":{"type":{"const":"rebind-owner"},"workItemId":{"type":"string"},"role":{"type":"string","minLength":1},"agentId":{"type":"string"},"reason":{"type":"string","minLength":1}}},{"type":"object","additionalProperties":false,"required":["type","id","kind","source","summary"],"properties":{"type":{"const":"add-evidence"},"id":{"type":"string","pattern":"^E[0-9]+$"},"kind":{"type":"string","minLength":1,"maxLength":64,"pattern":"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?![\\s\\S])"},"source":{"type":"string","minLength":1},"summary":{"type":"string","minLength":1},"subject":{"type":"string"},"producerRole":{"type":"string"},"producerId":{"type":"string"},"reference":{"type":"string"}}},{"type":"object","additionalProperties":false,"required":["type","evidenceId","reason"],"properties":{"type":{"const":"supersede-evidence"},"evidenceId":{"type":"string","pattern":"^E[0-9]+$"},"reason":{"type":"string","minLength":1}}},{"type":"object","additionalProperties":false,"required":["type","acceptanceId","evidenceRefs"],"properties":{"type":{"const":"verify"},"acceptanceId":{"type":"string","pattern":"^AC[0-9]+$"},"evidenceRefs":{"type":"array","minItems":1,"items":{"type":"string","minLength":1}}}},{"type":"object","additionalProperties":false,"required":["type","id","target","checkpoint","kind"],"properties":{"type":{"const":"add-guard"},"id":{"type":"string","pattern":"^G[0-9]+$"},"target":{"oneOf":[{"const":"task"},{"type":"string","pattern":"^workItem:W[0-9]+(\\.[0-9]+)*$"}]},"checkpoint":{"type":"string","enum":["beforeStart","beforeComplete"]},"kind":{"type":"string","minLength":1,"maxLength":64,"pattern":"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?![\\s\\S])"},"minimumCount":{"type":"integer","minimum":1},"producerRole":{"type":"string"},"independent":{"type":"boolean"},"applicability":{"oneOf":[{"const":"always"},{"type":"string","pattern":"^explicitDecision:(coordinator|user)$"}]},"waiver":{"oneOf":[{"const":"notWaivable"},{"type":"string","pattern":"^waivableBy:(coordinator|user)$"}]}}},{"type":"object","additionalProperties":false,"required":["type","guardId"],"properties":{"type":{"const":"mark-not-applicable"},"guardId":{"type":"string","pattern":"^G[0-9]+$"},"decisionRef":{"type":"string","pattern":"^D[0-9]+$"}}},{"type":"object","additionalProperties":false,"required":["type","guardId"],"properties":{"type":{"const":"waive-guard"},"guardId":{"type":"string","pattern":"^G[0-9]+$"},"decisionRef":{"type":"string","pattern":"^D[0-9]+$"}}},{"type":"object","additionalProperties":false,"required":["type","kind","targets","rationale"],"properties":{"type":{"const":"add-decision"},"kind":{"type":"string","enum":["userDecision","designDecision","assumption","policyApplication","contractRevision","applicabilityDecision","waiverDecision"]},"targets":{"type":"array","minItems":1,"items":{"oneOf":[{"type":"string","pattern":"^waiveAcceptance:AC[0-9]+$"},{"type":"string","pattern":"^guardDisposition:G[0-9]+$"},{"type":"string","pattern":"^skipWorkItem:W[0-9]+(\\.[0-9]+)*$"},{"type":"string","pattern":"^requirementChange:W[0-9]+(\\.[0-9]+)*$"},{"type":"string","pattern":"^contractPatch:.+$"},{"type":"string","pattern":"^reopenTask:[A-Za-z]+-[0-9]+[|](task|(acceptance:AC[0-9]+|workItem:W[0-9]+(\\.[0-9]+)*|guard:G[0-9]+)(;(acceptance:AC[0-9]+|workItem:W[0-9]+(\\.[0-9]+)*|guard:G[0-9]+))*)$"},{"type":"string","pattern":"^questionResolution:Q[0-9]+$"},{"type":"string","pattern":"^reclassify:.+$"},{"type":"string","pattern":"^other:.+$"}]}},"rationale":{"type":"string","minLength":1}}},{"type":"object","additionalProperties":false,"required":["type","id","text","impact"],"properties":{"type":{"const":"add-question"},"id":{"type":"string","pattern":"^Q[0-9]+$"},"text":{"type":"string","minLength":1},"impact":{"oneOf":[{"const":"taskWide"},{"type":"string","pattern":"^workItems:W[0-9]+(\\.[0-9]+)*(,W[0-9]+(\\.[0-9]+)*)*$"}]}}},{"type":"object","additionalProperties":false,"required":["type","questionId","decisionRef"],"properties":{"type":{"const":"resolve-question"},"questionId":{"type":"string","pattern":"^Q[0-9]+$"},"decisionRef":{"type":"string","pattern":"^D[0-9]+$"}}},{"type":"object","additionalProperties":false,"required":["type","reason","targets"],"properties":{"type":{"const":"reopen"},"reason":{"type":"string","minLength":1},"targets":{"type":"array","minItems":1,"items":{"oneOf":[{"const":"task"},{"type":"string","pattern":"^acceptance:AC[0-9]+$"},{"type":"string","pattern":"^workItem:W[0-9]+(\\.[0-9]+)*$"},{"type":"string","pattern":"^guard:G[0-9]+$"}]}},"decisionRef":{"type":"string","pattern":"^D[0-9]+$"}}},{"type":"object","additionalProperties":false,"required":["type","patch"],"properties":{"type":{"const":"apply-contract-patch"},"patch":{"oneOf":[{"type":"object","additionalProperties":false,"required":["type","id","text"],"properties":{"type":{"const":"addAcceptanceCriterion"},"id":{"type":"string","pattern":"^AC[0-9]+$"},"text":{"type":"string","minLength":1}}},{"type":"object","additionalProperties":false,"required":["type","id","text"],"properties":{"type":{"const":"updateAcceptanceCriterion"},"id":{"type":"string","pattern":"^AC[0-9]+$"},"text":{"type":"string","minLength":1}}},{"type":"object","additionalProperties":false,"required":["type","id","target","checkpoint","kind"],"properties":{"type":{"const":"addGuard"},"id":{"type":"string","pattern":"^G[0-9]+$"},"target":{"oneOf":[{"const":"task"},{"type":"string","pattern":"^workItem:W[0-9]+(\\.[0-9]+)*$"}]},"checkpoint":{"type":"string","enum":["beforeStart","beforeComplete"]},"kind":{"type":"string","minLength":1,"maxLength":64,"pattern":"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?![\\s\\S])"},"minimumCount":{"type":"integer","minimum":1},"producerRole":{"type":"string"},"independent":{"type":"boolean"},"applicability":{"oneOf":[{"const":"always"},{"type":"string","pattern":"^explicitDecision:(coordinator|user)$"}]},"waiver":{"oneOf":[{"const":"notWaivable"},{"type":"string","pattern":"^waivableBy:(coordinator|user)$"}]}}},{"type":"object","additionalProperties":false,"required":["type","id"],"properties":{"type":{"const":"removeGuard"},"id":{"type":"string","pattern":"^G[0-9]+$"}}},{"type":"object","additionalProperties":false,"required":["type","id"],"properties":{"type":{"const":"removeAcceptanceCriterion"},"id":{"type":"string","pattern":"^AC[0-9]+$"}}},{"type":"object","additionalProperties":false,"required":["type","text"],"properties":{"type":{"const":"setObjective"},"text":{"type":"string","minLength":1}}},{"type":"object","additionalProperties":false,"required":["type","text"],"properties":{"type":{"const":"setScope"},"text":{"type":"string","minLength":1}}},{"type":"object","additionalProperties":false,"required":["type","text"],"properties":{"type":{"const":"setNonGoals"},"text":{"type":"string","minLength":1}}},{"type":"object","additionalProperties":false,"required":["type","id","title"],"properties":{"type":{"const":"addWorkItem"},"id":{"type":"string","pattern":"^W[0-9]+(\\.[0-9]+)*$"},"title":{"type":"string","minLength":1},"parentId":{"type":"string","pattern":"^W[0-9]+(\\.[0-9]+)*$"},"dependsOn":{"type":"array","items":{"type":"string","pattern":"^W[0-9]+(\\.[0-9]+)*$"}}}},{"type":"object","additionalProperties":false,"required":["type","id","title"],"properties":{"type":{"const":"updateWorkItem"},"id":{"type":"string","pattern":"^W[0-9]+(\\.[0-9]+)*$"},"title":{"type":"string","minLength":1}}},{"type":"object","additionalProperties":false,"required":["type","id"],"properties":{"type":{"const":"removeWorkItem"},"id":{"type":"string","pattern":"^W[0-9]+(\\.[0-9]+)*$"}}},{"type":"object","additionalProperties":false,"required":["type","id","dependsOn"],"properties":{"type":{"const":"setDependencies"},"id":{"type":"string","pattern":"^W[0-9]+(\\.[0-9]+)*$"},"dependsOn":{"type":"array","items":{"type":"string","pattern":"^W[0-9]+(\\.[0-9]+)*$"}}}}]},"decisionRef":{"type":"string","pattern":"^D[0-9]+$"}}},{"type":"object","additionalProperties":false,"required":["type","plan"],"properties":{"type":{"const":"reconcile-contract-drift"},"plan":{"oneOf":[{"type":"object","additionalProperties":false,"required":["type"],"properties":{"type":{"const":"acceptExternalContract"}}},{"type":"object","additionalProperties":false,"required":["type","objective","scope","nonGoals","acceptanceCriteria"],"properties":{"type":{"const":"restoreCanonicalContract"},"objective":{"type":"string"},"scope":{"type":"string"},"nonGoals":{"type":"string"},"acceptanceCriteria":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["id","text"],"properties":{"id":{"type":"string","pattern":"^AC[0-9]+$"},"text":{"type":"string","minLength":1}}}}}}]}}},{"type":"object","additionalProperties":false,"required":["type","reason"],"properties":{"type":{"const":"reclassify-task"},"kind":{"type":"string","enum":["execution","research"]},"profile":{"type":"string","minLength":1},"reason":{"type":"string","minLength":1}}},{"type":"object","additionalProperties":false,"required":["type"],"properties":{"type":{"const":"reconcile-profile-drift"}}},{"type":"object","additionalProperties":false,"required":["type","state","evidenceSummary","next"],"properties":{"type":{"const":"complete-task"},"state":{"type":"string","minLength":1},"evidenceSummary":{"type":"string","minLength":1},"next":{"type":"string","minLength":1}}}]}}}},{"name":"task_clean","description":"Remove disposable temp content or archive an eligible Workflow task without changing task state.","inputSchema":{"type":"object","additionalProperties":false,"required":["projectRoot","taskId","operation"],"properties":{"projectRoot":{"type":"string","minLength":1},"taskId":{"type":"string","pattern":"^[A-Za-z]+-[0-9]+$"},"operation":{"type":"string","enum":["cleanup","archive"]}}}},{"name":"task_validate","description":"Validate a persisted Workflow task and report contract/profile drift.","inputSchema":{"type":"object","additionalProperties":false,"required":["projectRoot","taskId"],"properties":{"projectRoot":{"type":"string","minLength":1},"taskId":{"type":"string","pattern":"^[A-Za-z]+-[0-9]+$"}}}}]"""
 
 let private initializeResult protocolVersion =
     let result = JsonObject()
@@ -694,12 +704,97 @@ let private initializeResult protocolVersion =
     result["serverInfo"] <- serverInfo
     result
 
+type private ClientSession =
+    { ProtocolVersion: string
+      SupportsFormElicitation: bool }
+
+type private HostState() =
+    let pending = ConcurrentDictionary<string, TaskCompletionSource<JsonElement>>(StringComparer.Ordinal)
+    let mutable clientSession: ClientSession option = None
+    let writeLock = obj ()
+
+    member _.Pending = pending
+    member _.ClientSession with get () = clientSession and set value = clientSession <- value
+    member _.SupportsTrustedConfirmation =
+        match clientSession with
+        | Some client ->
+            client.ProtocolVersion = AcceptedClientProtocolVersion && client.SupportsFormElicitation
+        | None -> false
+    member _.WriteLine(value: string) = lock writeLock (fun () -> Console.Out.WriteLine(value))
+    member _.FailPending() =
+        for KeyValue(key, completion) in pending do
+            let mutable removed = Unchecked.defaultof<TaskCompletionSource<JsonElement>>
+            if pending.TryRemove(key, &removed) then completion.TrySetCanceled() |> ignore
+
 let private toolsResult () =
     let result = JsonObject()
     result["tools"] <- JsonNode.Parse tools
     result
 
-let private invokeTool name arguments : Async<JsonNode> =
+// Keeping this primitive private prevents model arguments from supplying confirmation.
+let private requestConfirmation (state: HostState) (message: string) : Async<string option> =
+    async {
+        match state.ClientSession with
+        | Some client when client.ProtocolVersion = AcceptedClientProtocolVersion && client.SupportsFormElicitation ->
+            let id = "workflow-server:" + Guid.NewGuid().ToString("N")
+            let idKey = JsonSerializer.Serialize id
+            let completion = TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously)
+            if not (state.Pending.TryAdd(idKey, completion)) then return None
+            else
+                try
+                    try
+                        let parameters = JsonObject()
+                        parameters["message"] <- node message
+                        let schema = JsonObject()
+                        schema["type"] <- node "object"
+                        schema["properties"] <- JsonNode.Parse("{\"confirm\":{\"type\":\"boolean\"}}")
+                        schema["required"] <- JsonNode.Parse("[\"confirm\"]")
+                        schema["additionalProperties"] <- node false
+                        parameters["requestedSchema"] <- schema
+                        let request = JsonObject()
+                        request["jsonrpc"] <- node "2.0"
+                        request["id"] <- node id
+                        request["method"] <- node "elicitation/create"
+                        request["params"] <- parameters
+                        state.WriteLine(request.ToJsonString())
+                        let! cancellationToken = Async.CancellationToken
+                        let! winner = Task.WhenAny(completion.Task, Task.Delay(TimeSpan.FromMinutes 2.0, cancellationToken)) |> Async.AwaitTask
+                        if not (obj.ReferenceEquals(winner, completion.Task)) then return None
+                        else
+                            let! result = completion.Task |> Async.AwaitTask
+                            if result.ValueKind <> JsonValueKind.Object then return None
+                            else
+                                match objectProperties "elicitation result" result [ "action"; "content"; "_meta" ] [ "action" ] with
+                                | Error _ -> return None
+                                | Ok response ->
+                                    match requiredString "elicitation result" "action" response with
+                                    | Error _ -> return None
+                                    | Ok "accept" ->
+                                        match property "content" response with
+                                        | Some content ->
+                                            match objectProperties "elicitation content" content [ "confirm" ] [ "confirm" ] with
+                                            | Ok body ->
+                                                match optionalBoolean "confirm" body false with
+                                                | Ok true -> return Some id
+                                                | _ -> return None
+                                            | Error _ -> return None
+                                        | None -> return None
+                                    | _ -> return None
+                    with
+                    | :? OperationCanceledException -> return None
+                    | _ -> return None
+                finally
+                    let mutable ignored = Unchecked.defaultof<TaskCompletionSource<JsonElement>>
+                    state.Pending.TryRemove(idKey, &ignored) |> ignore
+        | _ -> return None
+    }
+
+let private invokeTool
+    (nativeConfirmationSupported: bool)
+    (confirm: string -> Async<string option>)
+    name
+    arguments
+    : Async<JsonNode> =
     async {
         try
             // Cleanup returns CleanResult, so it cannot share TaskModel dispatch.
@@ -729,7 +824,35 @@ let private invokeTool name arguments : Async<JsonNode> =
                     let detail = InvalidInput message
                     return failure detail
                 | Ok operation ->
-                    let! result = execute operation
+                    let! result =
+                        match operation with
+                        | ApplyTask (request: ApplyOperation) ->
+                            let callback (trustedRequest: TrustedDecisionRequest) =
+                                async {
+                                    let commandJson =
+                                        match property "command" arguments with
+                                        | Some command -> command.GetRawText()
+                                        | None -> "{}"
+
+                                    let message =
+                                        String.concat
+                                            "\n"
+                                            [ "Confirm this exact Workflow task operation as the user."
+                                              $"Operation: {trustedRequest.Operation}"
+                                              $"Decision kind: {trustedRequest.Kind}"
+                                              $"Decision target: {trustedRequest.Target}"
+                                              $"Project root: {request.Root}"
+                                              $"Task: {request.TaskId}"
+                                              $"Expected state revision: {request.ExpectedStateRevision}"
+                                              "Validated task_apply command (complete):"
+                                              commandJson ]
+
+                                    let! confirmationRef = confirm message
+                                    return Ok confirmationRef
+                                }
+
+                            executeApplyWithTrustedConfirmation request nativeConfirmationSupported callback
+                        | _ -> execute operation
 
                     match result with
                     | Ok task -> return success (serialize task)
@@ -742,7 +865,7 @@ let private invokeTool name arguments : Async<JsonNode> =
             return failure (InternalFailure "runtime operation failed")
     }
 
-let private handle id methodName parameters : Async<string> =
+let private handle (state: HostState) id methodName parameters : Async<string> =
     async {
         match methodName with
         | "ping" -> return response id (JsonObject())
@@ -757,7 +880,28 @@ let private handle id methodName parameters : Async<string> =
                     | Error message -> return protocolError id -32602 message
                     | Ok version when version <> ProtocolVersion && version <> AcceptedClientProtocolVersion ->
                         return protocolError id -32602 $"unsupported protocol version '{version}'"
-                    | Ok _ -> return response id (initializeResult ProtocolVersion)
+                    | Ok version ->
+                        match property "capabilities" values with
+                        | None -> return protocolError id -32602 "initialize is missing property 'capabilities'"
+                        | Some capabilities when capabilities.ValueKind <> JsonValueKind.Object ->
+                            return protocolError id -32602 "initialize capabilities must be an object"
+                        | Some capabilities ->
+                            let elicitation = property "elicitation" capabilities
+                            let formSupport =
+                                match elicitation with
+                                | Some value when value.ValueKind = JsonValueKind.Object ->
+                                    if value.EnumerateObject() |> Seq.isEmpty then
+                                        true
+                                    else
+                                        match property "form" value with
+                                        | Some form when form.ValueKind = JsonValueKind.Object -> true
+                                        | _ -> false
+                                | _ -> false
+                            let negotiated =
+                                if version = AcceptedClientProtocolVersion then AcceptedClientProtocolVersion
+                                else ProtocolVersion
+                            state.ClientSession <- Some { ProtocolVersion = negotiated; SupportsFormElicitation = formSupport }
+                            return response id (initializeResult negotiated)
         | "tools/list" -> return response id (toolsResult ())
         | "tools/call" ->
             match parameters with
@@ -773,43 +917,80 @@ let private handle id methodName parameters : Async<string> =
                         | Some arguments when arguments.ValueKind <> JsonValueKind.Object ->
                             return protocolError id -32602 "tools/call arguments must be an object"
                         | Some arguments ->
-                            let! result = invokeTool name arguments
+                            let! result = invokeTool state.SupportsTrustedConfirmation (requestConfirmation state) name arguments
                             return response id result
                         | None ->
-                            let! result = invokeTool name (JsonDocument.Parse("{}").RootElement)
+                            let! result = invokeTool state.SupportsTrustedConfirmation (requestConfirmation state) name (JsonDocument.Parse("{}").RootElement)
                             return response id result
         | _ -> return protocolError id -32601 $"method '{methodName}' is not supported"
     }
 
-let private processLine (line: string) : Async<string> =
+let private parseServerResponse (request: JsonElement) =
+    result {
+        let! _ = objectProperties "JSON-RPC response" request [ "jsonrpc"; "id"; "result"; "error" ] [ "jsonrpc"; "id" ]
+        let! version = requiredString "JSON-RPC response" "jsonrpc" request
+        if version <> "2.0" then return! invalid "JSON-RPC response jsonrpc must be exactly '2.0'"
+        let! id =
+            match property "id" request with
+            | Some value when value.ValueKind = JsonValueKind.String || value.ValueKind = JsonValueKind.Number -> Ok(value.GetRawText())
+            | _ -> invalid "JSON-RPC response id must be a string or number"
+        let resultValue = property "result" request
+        let errorValue = property "error" request
+        match resultValue, errorValue with
+        | Some value, None -> return id, value.Clone()
+        | None, Some error ->
+            let! _ = objectProperties "JSON-RPC error" error [ "code"; "message"; "data" ] [ "code"; "message" ]
+            let! _ = requiredInteger "JSON-RPC error" "code" error
+            let! _ = requiredString "JSON-RPC error" "message" error
+            return id, error.Clone()
+        | _ -> return! invalid "JSON-RPC response must contain exactly one of result or error"
+    }
+
+let private completePending (state: HostState) (line: string) =
+    try
+        use document = JsonDocument.Parse(line, JsonDocumentOptions(CommentHandling = JsonCommentHandling.Disallow, AllowTrailingCommas = false))
+        match parseServerResponse document.RootElement with
+        | Ok(id, payload) ->
+            match state.Pending.TryRemove id with
+            | true, completion -> completion.TrySetResult payload |> ignore
+            | false, _ -> ()
+        | Error _ -> ()
+    with _ -> ()
+
+let private processLine (state: HostState) (line: string) : Async<string> =
     async {
         try
             use document = JsonDocument.Parse(line, JsonDocumentOptions(CommentHandling = JsonCommentHandling.Disallow, AllowTrailingCommas = false))
             let request = document.RootElement
 
-            match objectProperties "JSON-RPC request" request [ "jsonrpc"; "id"; "method"; "params" ] [ "jsonrpc"; "method" ] with
-            | Error message -> return protocolError "null" -32600 message
-            | Ok request ->
-                match requiredString "JSON-RPC request" "jsonrpc" request with
+            if request.ValueKind <> JsonValueKind.Object then
+                return protocolError "null" -32600 "JSON-RPC message must be an object"
+            elif property "method" request |> Option.isNone
+                 && (property "result" request |> Option.isSome || property "error" request |> Option.isSome) then
+                completePending state line
+                return ""
+            else
+                match objectProperties "JSON-RPC request" request [ "jsonrpc"; "id"; "method"; "params" ] [ "jsonrpc"; "method" ] with
                 | Error message -> return protocolError "null" -32600 message
-                | Ok version when version <> "2.0" -> return protocolError "null" -32600 "JSON-RPC request jsonrpc must be exactly '2.0'"
-                | Ok _ ->
-                    match requestId request with
+                | Ok request ->
+                    match requiredString "JSON-RPC request" "jsonrpc" request with
                     | Error message -> return protocolError "null" -32600 message
-                    | Ok id ->
-                        let methodName = requiredString "JSON-RPC request" "method" request
+                    | Ok version when version <> "2.0" -> return protocolError "null" -32600 "JSON-RPC request jsonrpc must be exactly '2.0'"
+                    | Ok _ ->
+                        match requestId request with
+                        | Error message -> return protocolError "null" -32600 message
+                        | Ok id ->
+                            let methodName = requiredString "JSON-RPC request" "method" request
 
-                        match methodName, id with
-                        | Error message, Some requestId -> return protocolError requestId -32600 message
-                        | Error _, None -> return ""
-                        | Ok _, None -> return ""
-                        | Ok methodName, Some requestId ->
-                            let parameters = property "params" request
-
-                            if methodName = "notifications/initialized" then
-                                return ""
-                            else
-                                return! handle requestId methodName parameters
+                            match methodName, id with
+                            | Error message, Some requestId -> return protocolError requestId -32600 message
+                            | Error _, None -> return ""
+                            | Ok _, None -> return ""
+                            | Ok methodName, Some requestId ->
+                                let parameters = property "params" request
+                                if isReservedServerId requestId || state.Pending.ContainsKey requestId then return ""
+                                elif methodName = "notifications/initialized" then return ""
+                                else return! handle state requestId methodName parameters
         with
         | :? OperationCanceledException as error -> return raise error
         | :? JsonException as error -> return protocolError "null" -32700 $"invalid JSON: {error.Message}"
@@ -843,7 +1024,9 @@ let main args =
     | Ok() ->
         let run () =
             async {
+                let state = HostState()
                 let mutable continueReading = true
+                let pendingDispatches = System.Collections.Generic.List<Task>()
 
                 while continueReading do
                     let! line = Console.In.ReadLineAsync() |> Async.AwaitTask
@@ -851,14 +1034,21 @@ let main args =
                     if isNull line then
                         continueReading <- false
                     elif not (String.IsNullOrWhiteSpace line) then
-                        let! output = processLine line
+                        pendingDispatches.RemoveAll(fun task -> task.IsCompleted) |> ignore
+                        let dispatch =
+                            async {
+                                let! output = processLine state line
+                                if output <> "" then state.WriteLine output
+                            }
+                        pendingDispatches.Add(Async.StartAsTask dispatch :> Task)
 
-                        if output <> "" then
-                            printfn "%s" output
+                state.FailPending()
+                try
+                    do! Task.WhenAll(pendingDispatches) |> Async.AwaitTask
+                with _ -> ()
 
                 return 0
             }
 
-        // Standalone entry bridge: the only synchronous wait in the Workflow MCP
-        // flow; all request handling above composes asynchronously.
+        // Standalone entry bridge
         run () |> Async.RunSynchronously

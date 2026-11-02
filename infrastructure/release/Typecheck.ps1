@@ -22,8 +22,8 @@ function Get-RosterTargets {
         $configDirectory = [System.IO.Path]::GetDirectoryName($entry.configPath).Replace('\', '/')
         $componentRoot = [System.IO.Path]::GetDirectoryName($configDirectory).Replace('\', '/')
         $derived.Add("$configDirectory/Build.fsx")
-        $derived.Add("$configDirectory/Pins.fsx")
-        $derived.Add("$componentRoot/tests/DistributionTests.fsx")
+        $derived.Add("$configDirectory/Pin.fsx")
+        $derived.Add("$componentRoot/tests/distribution/Run.fsx")
     }
 
     return $derived
@@ -32,7 +32,7 @@ function Get-RosterTargets {
 if (-not $Targets -or $Targets.Count -eq 0) {
     # The producer provenance contract is roster-independent and still needs the strict gate; the retired pre-SDK
     # `Bootstrap.fsx` is no longer a target because the canonical projection is plain PowerShell over the policy JSON.
-    $fixed = @("dotnet/tests/ProvenanceTests.fsx")
+    $fixed = @("dotnet/tests/provenance/Run.fsx")
     $Targets = @(@($fixed) + @(Get-RosterTargets) | Sort-Object -Unique)
 }
 

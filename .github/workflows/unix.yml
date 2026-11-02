@@ -98,7 +98,7 @@ jobs:
           foreach ($component in $components) {
             & dotnet fsi --nologo "$component/release/Build.fsx"
             if ($LASTEXITCODE -ne 0) { throw "$component distribution build failed (exit $LASTEXITCODE)" }
-            & dotnet fsi --nologo "$component/release/Pins.fsx"
+            & dotnet fsi --nologo "$component/release/Pin.fsx"
             if ($LASTEXITCODE -ne 0) { throw "$component consumer pin failed (exit $LASTEXITCODE)" }
           }
 
