@@ -25,31 +25,17 @@ let private componentIds = [ "dotnet"; "workflow" ]
 // The canonical root helper the coordination gate is routed through lives in the repository root.
 let private repoRoot = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "..", ".."))
 
-// The fixture child must resolve the same .NET SDK as the repository root, because the isolation
-// contract depends on the runtime's known-folder resolution: SDKs before .NET 10 ignore the
-// LOCALAPPDATA redirection the root helper performs, so an unpinned fixture would fail for a
-// reason that has nothing to do with the coordination gate.
+// WHY: the canonical SDK version is policy, not a discovered local value: each producer's
+//   Config.json is the only value source, so the fixture pin is read from the canonical policy
+//   instead of asking the host which SDK happens to be installed.
 let private repositorySdkVersion =
     lazy
-        (let info = ProcessStartInfo("dotnet")
-         info.WorkingDirectory <- repoRoot
-         info.UseShellExecute <- false
-         info.RedirectStandardOutput <- true
-         info.RedirectStandardError <- true
-         info.ArgumentList.Add("--version")
-         use child = new Process(StartInfo = info)
+        (let configPath = Path.Combine(repoRoot, "workflow", "release", "Config.json")
 
-         if not (child.Start()) then
-             failwith "the repository SDK version could not be resolved"
-
-         let output = child.StandardOutput.ReadToEnd()
-         child.WaitForExit()
-         let version = output.Trim()
-
-         if String.IsNullOrWhiteSpace version then
-             failwith "the repository SDK version could not be resolved"
-
-         version)
+         match ReleasePolicy.parse configPath with
+         | Ok policy when not (String.IsNullOrWhiteSpace policy.SdkVersion) -> policy.SdkVersion
+         | Ok _ -> failwithf "the canonical policy declares no SDK version: %s" configPath
+         | Error error -> failwithf "the canonical policy could not be read: %s" (SharedFailure.ReleaseError.message error))
 
 let private clearReadOnlyGitObjects (root: string) =
     let objectDirectory = Path.Combine(root, ".git", "objects")
@@ -474,6 +460,12 @@ let private prepareWritesPortableCandidateAndUsesExplicitProducerGates =
                         let outputPath = Path.Combine(root, "candidate-output")
                         let! exitCode, output = runPrepare root $"{componentId}/release/Config.json" outputPath
                         Expect.equal exitCode 0 $"{componentId} preparation succeeds: {output}"
+                        let fixturePin = JsonNode.Parse(File.ReadAllText(Path.Combine(root, "global.json"))).AsObject()
+                        let fixtureSdk = fixturePin["sdk"].AsObject()
+                        Expect.equal
+                            (fixtureSdk["version"].GetValue<string>())
+                            repositorySdkVersion.Value
+                            $"{componentId} fixture pins the canonical policy SDK version"
                         let summary = JsonNode.Parse(output.Trim()).AsObject()
                         Expect.equal (summary["status"].GetValue<string>()) "prepared" $"{componentId} reports preparation only"
                         Expect.isTrue (File.Exists(Path.Combine(outputPath, "distribution.json"))) $"{componentId} emits its standalone manifest"
