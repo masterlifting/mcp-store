@@ -5,15 +5,20 @@ disposable project root and candidate build. Do not use an active consumer
 runtime, production task root, release output, or live credentials.
 
 The schema-v3 authentication and protected native-confirmation qualification
-below is a separate, later operator gate. It does not authorize installation,
-cutover, or activation. Existing schema-v2 records and installed runtimes remain
+below is a separate operator gate. It does not authorize installation, cutover,
+or activation. Existing schema-v2 records and installed runtimes remain
 untouched; there is no migration, recovery, rebinding, or compatibility alias.
+See [the current threat model](../README.md#current-threat-model). This narrower
+workflow check does not require OS-level key isolation; producer and
+installed-runtime qualification remain unverified, and removing that gate does
+not qualify either one.
 
 ## Isolated setup and recovery
 
 Choose absolute paths for the repository, disposable root, candidate output,
-and backups. Before writing, identify the actual runtime/configuration paths and
-task-data paths involved. Back up the disposable root's `.tasks` and
+and backups, keeping disposable data separate from real account data. Before
+writing, identify the actual runtime/configuration paths and task-data paths
+involved. Back up the disposable root's `.tasks` and
 `.workflow` data using your protected backup procedure, with backups outside
 the root and candidate directory. Do not copy `.env`, credentials, sessions,
 or unrelated secrets; handle any necessary secret separately with your
@@ -185,22 +190,20 @@ or treat these instructions as executed verification evidence.
 ## Schema-v3 integrity and native User confirmation (disposable only)
 
 This section qualifies the candidate only. Do not use a real project, task,
-account data, or installed runtime. Before creating **any** directory or
-persisting a task, start an isolated OS account/process environment and set
-explicit, separate disposable paths for `LOCALAPPDATA`, `APPDATA`,
-`ProgramData`, `HOME`, `USERPROFILE`, `TEMP`, and `TMP`, plus the disposable
-workspace and profile-catalog location. Resolve the effective application-data
-directory without creating it; confirm it is exactly the intended disposable
-location and outside real account data. Stop before any create/persist call if
-that guard fails or is ambiguous. The key path name is
+account data, or installed runtime. Use separate disposable workspace,
+application-data, and profile-catalog paths outside real account data; OS-account
+isolation is not required for this narrower workflow check. Resolve the effective
+application-data directory without creating it; confirm it is exactly the
+intended disposable location. Stop before any create/persist call if that guard
+fails or is ambiguous. The key path name is
 `<resolved-LocalApplicationData>/mcp-store/workflow/integrity.key`; never open,
 print, copy, or otherwise inspect key bytes. Use the pinned profile catalog and
 digest, and attach only the isolated candidate server to the client.
 
-Before testing, separately establish that model-callable tools cannot read or
-write the account application-data key directory. This is a deployment
-prerequisite, not an ACL guarantee; record it as its own qualification gate.
-Do not treat application behavior as proof of tool exclusion.
+The narrower check does not require a separate key-exclusion gate. Harness
+permission activation and tests remain pending; do not treat application
+behavior as proof of tool exclusion or this procedure as evidence that those
+permissions are active.
 
 Using a newly created disposable schema-v3 task, verify routine Coordinator
 operations remain prompt-free and every persisted task operation
@@ -226,8 +229,11 @@ runtime bytes are
 byte-identical, with no Decision/revision/disposition change. Perform a second,
 distinct protected User operation on the same task, then restart and verify the
 resulting receipt/state again; this checks continuation rather than first-sign
-only behavior. Human approval/rejection and tool-exclusion results are later
-operator evidence, not established by these instructions.
+only behavior. Human approval/rejection is later operator evidence, not
+established by these instructions. Key-exclusion evidence pertains only to the
+stronger same-account claim and is not established here. Do not report OS-key
+isolation as passed or infer an automatic qualification waiver from this
+narrower procedure.
 
 On a disposable copy of a known schema-v2 fixture, invoke a read and verify the
 unsupported-schema diagnostic and byte-for-byte no-write rejection. Do not

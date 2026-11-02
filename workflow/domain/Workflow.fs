@@ -4746,66 +4746,60 @@ module private Domain =
         result {
             let! target = validateDecisionTarget task operationTarget
 
-            // Trusted authority must match the resolver's operation, kind, and exact target.
-            let trustedDecision =
-                match trustedContext with
-                | Some context when
-                    minimumAuthority = MinimumAuthority.UserAuthority
-                    && context.TaskId = task.Id
-                    && context.StateRevision = task.StateRevision
-                    && context.Operation = operation
-                    && context.Kind = decisionKind
-                    && context.Target = target
-                    && not (String.IsNullOrWhiteSpace context.ConfirmationRef) ->
-                    Some
-                        (NewDecision
-                            { Id = nextDecisionId task
-                              Authority = User
-                              Kind = decisionKind
-                              Targets = [ target ]
-                              Rationale = $"trusted User confirmation for {operation} on {decisionTargetToString target}"
-                              CreatedAt = now
-                              ConfirmationRef = Some context.ConfirmationRef })
-                | _ -> None
-
-            match trustedDecision with
-            | Some decision -> return decision
+            match decisionRef with
+            | Some (DecisionRef referenceId) ->
+                match findDecision referenceId task.Decisions with
+                | None -> return! Error(NotFound $"Decision '{referenceId}' was not found")
+                | Some decision when decision.Kind <> decisionKind ->
+                    return!
+                        Error(
+                            InvalidInput
+                                $"Decision '{referenceId}' has kind {decisionKindToString decision.Kind}; operation requires kind {decisionKindToString decisionKind}"
+                        )
+                | Some decision when not (decision.Targets |> List.contains target) ->
+                    return!
+                        Error(
+                            InvalidInput
+                                $"Decision '{referenceId}' does not authorize the exact operation {decisionTargetToString target}"
+                        )
+                | Some decision when decisionAuthorizes decision minimumAuthority target ->
+                    return ReuseDecision(DecisionRef referenceId)
+                | Some _ ->
+                    return!
+                        Error(
+                            AuthorityDenied(
+                                { RequiredAuthority = minimumAuthority
+                                  Operation = operation
+                                  DecisionKind = Some decisionKind
+                                  Target = Some target
+                                  DecisionRefStatus = DecisionRefStatus.Present },
+                                $"Decision '{referenceId}' matches the operation but does not provide {minimumAuthorityToString minimumAuthority} authority"
+                            )
+                        )
             | None ->
-                match decisionRef with
-                | Some (DecisionRef referenceId) ->
-                    match findDecision referenceId task.Decisions with
-                    | None when minimumAuthority <> MinimumAuthority.CoordinatorAuthority ->
-                        // A missing User-required reference is absent authority, not ordinary NotFound.
-                        return!
-                            Error(
-                                AuthorityDenied(
-                                    { RequiredAuthority = minimumAuthority
-                                      Operation = operation
-                                      DecisionKind = Some decisionKind
-                                      Target = Some target
-                                      DecisionRefStatus = DecisionRefStatus.Absent },
-                                    $"operation requires {minimumAuthorityToString minimumAuthority} authority and Decision '{referenceId}' was not found; ordinary Coordinator invocation cannot authorize it"
-                                )
-                            )
-                    | None -> return! Error(NotFound $"Decision '{referenceId}' was not found")
-                    | Some decision when
-                        decision.Kind = decisionKind
-                        && decisionAuthorizes decision minimumAuthority target
-                        ->
-                        return ReuseDecision(DecisionRef referenceId)
-                    | Some decision ->
-                        // Reuse requires the exact target and decision kind.
-                        return!
-                            Error(
-                                AuthorityDenied(
-                                    { RequiredAuthority = minimumAuthority
-                                      Operation = operation
-                                      DecisionKind = Some decisionKind
-                                      Target = Some target
-                                      DecisionRefStatus = DecisionRefStatus.Mismatched },
-                                    $"Decision '{referenceId}' has kind {decisionKindToString decision.Kind} and does not authorize the exact operation {decisionTargetToString target} as kind {decisionKindToString decisionKind} at {minimumAuthorityToString minimumAuthority} authority"
-                                )
-                            )
+                let trustedDecision =
+                    match trustedContext with
+                    | Some context when
+                        minimumAuthority = MinimumAuthority.UserAuthority
+                        && context.TaskId = task.Id
+                        && context.StateRevision = task.StateRevision
+                        && context.Operation = operation
+                        && context.Kind = decisionKind
+                        && context.Target = target
+                        && not (String.IsNullOrWhiteSpace context.ConfirmationRef) ->
+                        Some
+                            (NewDecision
+                                { Id = nextDecisionId task
+                                  Authority = User
+                                  Kind = decisionKind
+                                  Targets = [ target ]
+                                  Rationale = $"trusted User confirmation for {operation} on {decisionTargetToString target}"
+                                  CreatedAt = now
+                                  ConfirmationRef = Some context.ConfirmationRef })
+                    | _ -> None
+
+                match trustedDecision with
+                | Some decision -> return decision
                 | None ->
                     if minimumAuthority <> MinimumAuthority.CoordinatorAuthority then
                         return!
@@ -5523,47 +5517,14 @@ module private Domain =
                 | None -> Error [ NotFound $"Question '{id}' was not found" ]
                 | Some { State = Resolved _ } -> Error [ InvalidTransition $"Question '{id}' is already resolved" ]
                 | Some question ->
-                    let (DecisionRef referenceId) = reference
-
-                    // resolution requires an existing Decision whose typed
-                    // target exactly matches this question.
-                    match findDecision referenceId task.Decisions with
-                    | None -> Error [ NotFound $"Decision '{referenceId}' was not found" ]
-                    | Some decision when decision.Targets |> List.contains (QuestionResolutionTarget question.Id) ->
-                        Ok [ QuestionResolved(id, reference) ]
-                    | Some _ ->
-                        let target = QuestionResolutionTarget question.Id
-                        match trustedContext with
-                        | Some context when
-                            context.TaskId = task.Id
-                            && context.StateRevision = task.StateRevision
-                            && context.Command = command
-                            && context.Operation = "task_apply.resolve-question"
-                            && context.Kind = UserDecision
-                            && context.Target = target
-                            && not (String.IsNullOrWhiteSpace context.ConfirmationRef) ->
-                            let decision: Decision =
-                                { Id = nextDecisionId task
-                                  Authority = User
-                                  Kind = UserDecision
-                                  Targets = [ target ]
-                                  Rationale = $"trusted User confirmation for task_apply.resolve-question on {decisionTargetToString target}"
-                                  CreatedAt = now
-                                  ConfirmationRef = Some context.ConfirmationRef }
-                            Ok
-                                [ DecisionAdded decision
-                                  QuestionResolved(id, DecisionRef decision.Id) ]
-                        | _ ->
-                            // A mismatched reference cannot be reused as trusted authorization.
-                            Error
-                                [ AuthorityDenied(
-                                      { RequiredAuthority = MinimumAuthority.UserAuthority
-                                        Operation = "task_apply.resolve-question"
-                                        DecisionKind = Some UserDecision
-                                        Target = Some target
-                                        DecisionRefStatus = DecisionRefStatus.Mismatched },
-                                      $"Decision '{referenceId}' does not target Question '{id}'"
-                                  ) ]
+                    match reference with
+                    | DecisionRef referenceId ->
+                        match findDecision referenceId task.Decisions with
+                        | None -> Error [ NotFound $"Decision '{referenceId}' was not found" ]
+                        | Some decision when decision.Targets |> List.contains (QuestionResolutionTarget question.Id) ->
+                            Ok [ QuestionResolved(id, reference) ]
+                        | Some _ ->
+                            Error [ InvalidInput $"Decision '{referenceId}' does not target Question '{question.Id}'" ]
         | QuestionResolved _ ->
             Error [ InvalidInput "question resolution events are produced by decide and cannot be applied as commands" ]
         | ReclassifyTask _ ->
@@ -6065,6 +6026,7 @@ let internal prepareTrustedDecision
         match errors with
         | [ AuthorityDenied (metadata, _) ] when
             metadata.RequiredAuthority = MinimumAuthority.UserAuthority
+            && metadata.DecisionRefStatus = DecisionRefStatus.Absent
             && metadata.Target.IsSome
             && metadata.DecisionKind.IsSome ->
             match metadata.DecisionKind, metadata.Target with
@@ -7228,6 +7190,9 @@ let internal applyTrustedTask
                                 return Error(Conflict(expectedRevision, task.StateRevision))
                             | Ok task ->
                                 match prepareTrustedDecision profiles DateTimeOffset.UtcNow task command with
+                                | Error [ (AuthorityDenied(metadata, _) as error) ] when
+                                    metadata.DecisionRefStatus = DecisionRefStatus.Present ->
+                                    return Error error
                                 | Error _ ->
                                     return Error(InvalidTransition "the command does not require a new trusted User decision")
                                 | Ok request ->

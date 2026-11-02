@@ -71,10 +71,21 @@ Ordinary `add-decision` remains fail-closed; User-required task mutations procee
 only through the host's exact-context prepare/confirm/revalidate/apply seam. The
 seam is not a model-callable tool argument. Source changes do not install or
 activate the producer, and focused boundary testing remains a separate gate.
-Deployment must exclude model tools from the account's application-data key
-directory. This is an unqualified deployment prerequisite, not an enforced
-same-account ACL guarantee; the producer cannot isolate hostile same-account
-processes or prevent access to its memory/key material.
+
+### Current threat model
+
+The native operator confirmation path and destination-bound HMAC receipt provide
+approval guardrails and detection of unauthenticated persisted-byte tampering.
+The HMAC authenticates bytes only while its secret key remains inaccessible; it
+does not prove protected-UI provenance when a caller can access the key. Direct
+file-tool permissions are a harness guardrail for normal agent behavior, not
+producer enforcement, and their activation and testing remain pending. Shell,
+script, or MCP code execution under the same OS account may bypass those
+permissions and access the key; this design makes no forgery-protection guarantee
+against that actor. Excluding the key from model-callable tools is a prerequisite
+for any stronger same-account security claim, not a prerequisite for the narrower
+guardrail claim above. Source and installed-runtime qualification remain
+unverified.
 
 Before installing a producer update, obtain operator authorization and safely
 inventory the actual task data against the target producer's four-entry root

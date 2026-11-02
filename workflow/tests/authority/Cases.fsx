@@ -112,6 +112,7 @@ let checkAuthorityDenied
     (operation: string)
     (kind: DecisionKind)
     (target: DecisionTarget)
+    (status: DecisionRefStatus)
     (result: Async<Result<'a, RuntimeError>>)
     : Async<unit> =
     async {
@@ -131,13 +132,62 @@ let checkAuthorityDenied
                       if metadata.DecisionKind <> Some kind then
                           sprintf "decision kind is '%A'" metadata.DecisionKind
                       if metadata.Target <> Some target then
-                          sprintf "target is '%A'" metadata.Target ]
+                          sprintf "target is '%A'" metadata.Target
+                      if metadata.DecisionRefStatus <> status then
+                          sprintf "decision reference status is '%A'" metadata.DecisionRefStatus ]
 
                 if problems.IsEmpty then
                     check name true ""
                 else
                     check name false (String.concat "; " problems)
     }
+
+// The typed outcome an explicit decision reference must produce.
+let referenceOutcome (error: RuntimeError) =
+    match error with
+    | NotFound _ -> "not-found"
+    | InvalidInput _ -> "invalid-input"
+    | AuthorityDenied (metadata, _) when metadata.DecisionRefStatus = DecisionRefStatus.Present -> "authority-denied-present"
+    | _ -> "other"
+
+// Asserts the exact typed rejection, not only its text.
+let checkReferenceOutcome name (expected: string) (result: Async<Result<'a, RuntimeError>>) : Async<unit> =
+    async {
+        match! result with
+        | Ok _ ->
+            check name false "expected a rejection, got Ok"
+        | Error error ->
+            let actual = referenceOutcome error
+
+            if actual = expected then
+                check name true ""
+            else
+                check name false (sprintf "expected '%s', got '%s' (%s)" expected actual (renderError error))
+    }
+
+// Asserts the typed rejection of the decision-resolution boundary, which
+// reports the reference semantics as error cases.
+let checkDomainReferenceOutcome name (expected: string) (result: Result<'a, RuntimeError list>) : unit =
+    match result with
+    | Ok _ ->
+        check name false "expected a rejection, got Ok"
+    | Error errors ->
+        let actual =
+            match errors with
+            | [ error ] -> referenceOutcome error
+            | _ -> "other"
+
+        if actual = expected then
+            check name true ""
+        else
+            check
+                name
+                false
+                (sprintf
+                    "expected '%s', got '%s' (%s)"
+                    expected
+                    actual
+                    (errors |> List.map renderError |> String.concat "; "))
 
 
 let jsonOptions = JsonSerializerOptions(WriteIndented = true)
@@ -246,6 +296,15 @@ let dualProfileJson description =
 
 let dualProfilePath = Path.Combine(profileDirectory, "dual.json")
 File.WriteAllText(dualProfilePath, dualProfileJson "dual user-authority profile")
+
+// A second profile whose guard is waivable by the Coordinator, so a referenced
+// Coordinator decision carries sufficient authority for the waiver and is
+// reused instead of a replacement decision being minted.
+let coordProfileJson =
+    """{"schemaVersion":2,"id":"coord","description":"coordinator waiver profile","policy":{"guards":[{"key":"alpha","target":"task","checkpoint":"beforeComplete","evidenceKind":"test","minimumCount":1,"applicability":"explicitDecision:coordinator","waiver":"waivableBy:coordinator"}]}}"""
+
+let coordProfilePath = Path.Combine(profileDirectory, "coord.json")
+File.WriteAllText(coordProfilePath, coordProfileJson)
 
 let guardIdForKey key (task: TaskModel) =
     task.ProfileGuardKeys
@@ -489,6 +548,7 @@ try
                 "task_apply.waive-guard"
                 WaiverDecision
                 (GuardDispositionTarget protectedAlphaId)
+                DecisionRefStatus.Absent
                 (applyTask projectRoot protectedId 0 (WaiveGuard(protectedAlphaId, None)))
 
         check
@@ -920,21 +980,257 @@ try
              | Error _ -> false)
             "an ordinary add-decision minted User authority"
 
+        // The claimed decision carries the wrong kind for a waiver, so the
+        // reference is an explicit input error rather than an authority denial.
         do!
-            checkAuthorityDenied
+            checkReferenceOutcome
                 "authority.coordinatorDecisionCannotDispose"
-                "task_apply.waive-guard"
-                WaiverDecision
-                (GuardDispositionTarget modelGuard)
+                "invalid-input"
                 (applyTask projectRoot modelId 1 (WaiveGuard(modelGuard, Some(DecisionRef "D1"))))
 
+        // An unknown reference is a not-found decision at the resolution
+        // boundary; the apply envelope carries every non-authority rejection as
+        // invalid input, so the reference is rejected by its canonical reason.
+        do!
+            checkError
+                "authority.forgedDecisionRefRejected"
+                "Decision 'D9999' was not found"
+                (applyTask projectRoot modelId 1 (WaiveGuard(modelGuard, Some(DecisionRef "D9999"))))
+
+        // An explicit decision reference is resolved against the task before any
+        // confirmation is requested, so an unusable reference can neither reach
+        // the confirmation callback nor mint a replacement decision.
+        let referenceId = nextTaskId()
+
+        let! referenceFixture = createFixtureTask (Some "dual") referenceId "Decision reference fixture"
+
+        let referenceAlpha = guardIdForKey "alpha" referenceFixture
+        let referenceBeta = guardIdForKey "beta" referenceFixture
+
+        // D1 carries the wrong kind for a waiver, D2 the wrong target, and D3
+        // the right kind and target but only Coordinator authority.
+        let! claimedWrongKind =
+            applyTask
+                projectRoot
+                referenceId
+                0
+                (AddDecision
+                    { Kind = UserDecision
+                      Targets = [ GuardDispositionTarget referenceAlpha ]
+                      Rationale = "the model claims a User decision" })
+
+        let! claimedWrongTarget =
+            applyTask
+                projectRoot
+                referenceId
+                1
+                (AddDecision
+                    { Kind = WaiverDecision
+                      Targets = [ GuardDispositionTarget referenceBeta ]
+                      Rationale = "the model claims a waiver for another guard" })
+
+        let! claimedInsufficient =
+            applyTask
+                projectRoot
+                referenceId
+                2
+                (AddDecision
+                    { Kind = WaiverDecision
+                      Targets = [ GuardDispositionTarget referenceAlpha ]
+                      Rationale = "the model claims a waiver" })
+
+        check
+            "reference.claimsRecorded"
+            (match claimedWrongKind, claimedWrongTarget, claimedInsufficient with
+             | Ok first, Ok second, Ok third ->
+                 first.StateRevision = 1
+                 && second.StateRevision = 2
+                 && third.StateRevision = 3
+                 && third.Decisions.Length = 3
+                 && third.Decisions |> List.forall (fun decision -> decision.Authority = Coordinator)
+             | _ -> false)
+            "the reference fixture did not record the three claimed decisions"
+
+        let referenceRevision = 3
+
+        // The decision-resolution boundary reports the reference semantics as
+        // typed errors: an unknown reference is not found, a wrong kind and a
+        // wrong target are invalid input, and a matching reference with
+        // insufficient authority is denied with the reference present.
+        let referenceCases =
+            [ ("unknown", DecisionRef "D9999", "not-found", "Decision 'D9999' was not found")
+              ("wrongKind", DecisionRef "D1", "invalid-input", "has kind userDecision; operation requires kind waiverDecision")
+              ("wrongTarget", DecisionRef "D2", "invalid-input", "does not authorize the exact operation")
+              ("insufficient", DecisionRef "D3", "authority-denied-present", "matches the operation but does not provide") ]
+
+        let! referenceTask = getTask projectRoot referenceId
+
+        match referenceTask with
+        | Ok task ->
+            for label, decisionRef, expectedOutcome, _ in referenceCases do
+                checkDomainReferenceOutcome
+                    (sprintf "reference.%s.domain" label)
+                    expectedOutcome
+                    (decideAt profiles DateTimeOffset.UtcNow task (WaiveGuard(referenceAlpha, Some decisionRef)))
+        | Error error ->
+            for label, _, _, _ in referenceCases do
+                check
+                    (sprintf "reference.%s.domain" label)
+                    false
+                    (sprintf "could not read the reference fixture: %s" (renderError error))
+
+        for label, decisionRef, _, expectedFragment in referenceCases do
+            let before = bytesOf (sidecar projectRoot referenceId)
+
+            let! beforeTask = getTask projectRoot referenceId
+
+            let beforeRevision, beforeDecisionCount =
+                match beforeTask with
+                | Ok task -> task.StateRevision, task.Decisions.Length
+                | Error error -> failwithf "could not read the reference fixture: %s" (renderError error)
+
+            do!
+                checkError
+                    (sprintf "reference.%s.ordinary" label)
+                    expectedFragment
+                    (applyTask projectRoot referenceId referenceRevision (WaiveGuard(referenceAlpha, Some decisionRef)))
+
+            let mutable callbackCalls = 0
+
+            let countingCallback (_: TrustedDecisionRequest) =
+                async {
+                    callbackCalls <- callbackCalls + 1
+                    return Ok(Some "confirmation-ref-reference")
+                }
+
+            do!
+                checkError
+                    (sprintf "reference.%s.trusted" label)
+                    expectedFragment
+                    (executeApplyWithTrustedConfirmation
+                        { Root = projectRoot
+                          TaskId = referenceId
+                          ExpectedStateRevision = referenceRevision
+                          Command = WaiveGuard(referenceAlpha, Some decisionRef) }
+                        true
+                        countingCallback)
+
+            check
+                (sprintf "reference.%s.noConfirmation" label)
+                (callbackCalls = 0)
+                (sprintf "the trusted apply requested confirmation %d time(s)" callbackCalls)
+
+            let after = bytesOf (sidecar projectRoot referenceId)
+
+            check
+                (sprintf "reference.%s.preservesBytes" label)
+                (sameBytes before after)
+                "the rejected reference changed the persisted bytes"
+
+            let! afterTask = getTask projectRoot referenceId
+
+            check
+                (sprintf "reference.%s.preservesState" label)
+                (match afterTask with
+                 | Ok task ->
+                     task.StateRevision = beforeRevision
+                     && task.Decisions.Length = beforeDecisionCount
+                 | Error _ -> false)
+                "the rejected reference changed the persisted revision or decision count"
+
+        // A matching reference with insufficient authority is denied with the
+        // structured remediation, and the reference is reported as present.
         do!
             checkAuthorityDenied
-                "authority.forgedDecisionRefRejected"
+                "reference.insufficient.structured"
                 "task_apply.waive-guard"
                 WaiverDecision
-                (GuardDispositionTarget modelGuard)
-                (applyTask projectRoot modelId 1 (WaiveGuard(modelGuard, Some(DecisionRef "D9999"))))
+                (GuardDispositionTarget referenceAlpha)
+                DecisionRefStatus.Present
+                (applyTask projectRoot referenceId referenceRevision (WaiveGuard(referenceAlpha, Some(DecisionRef "D3"))))
+
+        // A referenced decision with sufficient authority is reused: the
+        // disposition points at the existing decision and no replacement is
+        // minted, so no confirmation is requested either.
+        let createReuseFixture () =
+            async {
+                let id = nextTaskId()
+
+                let! fixture = createFixtureTask (Some "coord") id "Reuse fixture"
+
+                let guard = guardIdForKey "alpha" fixture
+
+                let! claim =
+                    applyTask
+                        projectRoot
+                        id
+                        0
+                        (AddDecision
+                            { Kind = WaiverDecision
+                              Targets = [ GuardDispositionTarget guard ]
+                              Rationale = "the model claims a coordinator waiver" })
+
+                return id, guard, claim
+            }
+
+        let! reuseId, reuseGuard, reuseClaim = createReuseFixture ()
+
+        check
+            "reuse.claimRecorded"
+            (match reuseClaim with
+             | Ok task ->
+                 task.StateRevision = 1
+                 && task.Decisions.Length = 1
+                 && task.Decisions.Head.Authority = Coordinator
+             | Error _ -> false)
+            "the reuse fixture did not record the claimed coordinator decision"
+
+        let! reused =
+            applyTask projectRoot reuseId 1 (WaiveGuard(reuseGuard, Some(DecisionRef "D1")))
+
+        check
+            "reuse.reusesReferencedDecision"
+            (match reused with
+             | Ok task ->
+                 task.StateRevision = 2
+                 && task.Decisions.Length = 1
+                 && task.Decisions.Head.Id = "D1"
+                 && (task.Guards |> List.find (fun guard -> guard.Id = reuseGuard)).Disposition = GuardDisposition.Waived "D1"
+             | Error _ -> false)
+            "the referenced coordinator decision was not reused"
+
+        let! reuseTrustedId, reuseTrustedGuard, _ = createReuseFixture ()
+
+        let mutable reuseCallbackCalls = 0
+
+        let reuseCallback (_: TrustedDecisionRequest) =
+            async {
+                reuseCallbackCalls <- reuseCallbackCalls + 1
+                return Ok(Some "confirmation-ref-reuse")
+            }
+
+        do!
+            checkOk
+                "reuse.trustedReusesReferencedDecision"
+                (executeApplyWithTrustedConfirmation
+                    { Root = projectRoot
+                      TaskId = reuseTrustedId
+                      ExpectedStateRevision = 1
+                      Command = WaiveGuard(reuseTrustedGuard, Some(DecisionRef "D1")) }
+                    true
+                    reuseCallback)
+                (fun task ->
+                    task.StateRevision = 2
+                    && task.Decisions.Length = 1
+                    && task.Decisions.Head.Id = "D1"
+                    && (task.Guards
+                        |> List.find (fun guard -> guard.Id = reuseTrustedGuard)).Disposition = GuardDisposition.Waived "D1")
+                (fun task -> sprintf "expected one reused decision, got %d" task.Decisions.Length)
+
+        check
+            "reuse.noConfirmation"
+            (reuseCallbackCalls = 0)
+            (sprintf "the reused decision requested confirmation %d time(s)" reuseCallbackCalls)
 
         // A historical User decision never authorizes a fresh unrelated target.
         let historyId = nextTaskId()
@@ -976,6 +1272,7 @@ try
                 "task_apply.mark-not-applicable"
                 ApplicabilityDecision
                 (GuardDispositionTarget historyBeta)
+                DecisionRefStatus.Absent
                 (applyTask projectRoot historyId 1 (MarkGuardNotApplicable(historyBeta, None)))
 
         let historyAfter = bytesOf (sidecar projectRoot historyId)

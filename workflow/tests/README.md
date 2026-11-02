@@ -24,7 +24,7 @@
 
 ## Trusted ingress suites
 
-`authority/Run.fsx` covers the trusted User-ingress boundary in a fresh isolated child process whose application-data and home directories are redirected to a unique directory under the approved temporary base, and it reports 104 current cases. The parent asserts that the child resolved the isolated key directory inside its own run root and not the real per-account key directory (`<LocalAppData>\mcp-store\workflow`), and it removes the run root it created after the run, including after a rejected guard; a failed child case keeps the run root for diagnosis.
+`authority/Run.fsx` covers the trusted User-ingress boundary in a fresh isolated child process whose application-data and home directories are redirected to a unique directory under the approved temporary base, and it reports 135 current cases. The parent asserts that the child resolved the isolated key directory inside its own run root and not the real per-account key directory (`<LocalAppData>\mcp-store\workflow`), and it removes the run root it created after the run, including after a rejected guard; a failed child case keeps the run root for diagnosis.
 
 `authority/Cases.fsx` is the child-process half of that suite. It refuses to start unless its resolved per-account application-data directory is exactly the isolated directory it was given, so it can never read, create, or rotate the real per-account key. It is a helper script for `authority/Run.fsx`, not a standalone suite. Every confirmation it exercises is a deterministic test double standing in for the native host form, so no case in it is evidence that a human approved any operation. Its history fixture mints the User decision through the canonical trusted apply against one of the profile's two User-authority targets, so a historical User decision never authorizes the other target.
 
@@ -54,7 +54,9 @@ The `timeout` scenario withholds the answer of a received form past the producer
 
 The `emptyElicitation` and `explicitForm` scenarios negotiate the accepted protocol version with two different client capability shapes, each against its own producer process, and then run a protected `task_apply`: an empty `elicitation` capability object and an explicit `elicitation.form` capability object. Both assert that the protected operation reaches the native `elicitation/create` request, that the requested schema still asks for a boolean `confirm`, and that the accepted answer applies the operation and persists exactly one User decision for the waived guard.
 
-The `unsupportedUrlOnly`, `unsupportedMalformedForm`, `unsupportedUnknownOnly`, and `unsupportedNonObjectElicitation` scenarios negotiate the same protocol version with capability shapes that offer no usable form, and each asserts the same fail-closed and unchanged-state expectations as the existing unsupported-client scenarios. The suite reports 299 current cases.
+The `unsupportedUrlOnly`, `unsupportedMalformedForm`, `unsupportedUnknownOnly`, and `unsupportedNonObjectElicitation` scenarios negotiate the same protocol version with capability shapes that offer no usable form, and each asserts the same fail-closed and unchanged-state expectations as the existing unsupported-client scenarios. The suite reports 353 current cases.
+
+The `reference` scenario rejects explicit unknown, wrong-kind, wrong-target, and insufficient-authority Decision references without elicitation or persistence. Authority cases also check ordinary and trusted entry paths, unchanged bytes/revision/Decision count, and reuse of a sufficient existing Decision. Existing domain cases preserve question resolution using matching Coordinator `DesignDecision` references. These are functional regressions, not evidence that model-controlled tools are isolated from the signing key.
 
 ## Regression suites and the isolation guard
 

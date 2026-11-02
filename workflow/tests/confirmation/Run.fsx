@@ -1034,6 +1034,212 @@ let duplicateScenario (host: McpHost) (projectRoot: string) : Async<unit> =
                     check "duplicate.singleUserDecision" ((persistedUserDecisions appliedState).Length = 1) "the second task did not persist exactly one User decision"
     }
 
+// A waiver that names a decision reference is authorized only by that exact decision, so an unknown, wrong-kind, or wrong-target reference is rejected without touching the task.
+let decisionReferenceScenario (host: McpHost) (projectRoot: string) : Async<unit> =
+    async {
+        let taskId = "MCP-360"
+        let! fixture = createFixture host projectRoot taskId "harness"
+        let guardId = pickUserWaivableGuard fixture
+        let otherGuardId = pickDistinctUserWaivableGuard fixture guardId
+        let mutable revision = intField fixture "stateRevision"
+
+        let child (node: JsonNode) (name: string) =
+            if isNull node then
+                null
+            else
+                node.[name]
+
+        let safeStr (node: JsonNode) (name: string) =
+            if isNull node then
+                ""
+            else
+                strField node name
+
+        // The published native schema must declare the decision reference that the command accepts.
+        let listId = freshRequestId ()
+
+        do!
+            send
+                host
+                ((jobj
+                    [ "jsonrpc", jstr "2.0"
+                      "id", jint listId
+                      "method", jstr "tools/list" ]).ToJsonString())
+
+        let! listResponse = awaitResponse host listId 60000
+
+        match listResponse with
+        | None -> check "reference.schemaPublished" false "the tools/list request did not complete"
+        | Some message ->
+            let tools = child (child message "result") "tools"
+
+            if isNull tools then
+                check "reference.schemaPublished" false "the tools/list response carried no tools"
+            else
+                let taskApply =
+                    tools.AsArray()
+                    |> Seq.tryFind (fun tool -> safeStr tool "name" = "task_apply")
+
+                match taskApply with
+                | None -> check "reference.schemaPublished" false "the published tools carry no task_apply tool"
+                | Some tool ->
+                    check "reference.schemaPublished" true ""
+                    let variants = child (child (child (child tool "inputSchema") "properties") "command") "oneOf"
+
+                    if isNull variants then
+                        check "reference.schemaWaiveVariant" false "the published task_apply schema carries no command variants"
+                    else
+                        let waiveVariant =
+                            variants.AsArray()
+                            |> Seq.tryFind (fun variant ->
+                                safeStr (child (child variant "properties") "type") "const" = "waive-guard")
+
+                        match waiveVariant with
+                        | None -> check "reference.schemaWaiveVariant" false "the published task_apply schema carries no waive-guard variant"
+                        | Some variant ->
+                            check "reference.schemaWaiveVariant" true ""
+                            let decisionRef = child (child variant "properties") "decisionRef"
+                            check "reference.schemaDecisionRefDeclared" (not (isNull decisionRef)) "the published waive-guard schema declares no decisionRef property"
+                            check
+                                "reference.schemaDecisionRefPattern"
+                                (safeStr decisionRef "pattern" = "^D[0-9]+$")
+                                (sprintf "the published decisionRef pattern is '%s'" (safeStr decisionRef "pattern"))
+
+        // The referenced decisions are minted through the native apply path, so every id, kind, target, and authority in the fixture is the producer's own.
+        let addDecision (kind: string) (target: string) =
+            jobj
+                [ "projectRoot", jstr projectRoot
+                  "taskId", jstr taskId
+                  "expectedStateRevision", jint revision
+                  "command",
+                  jobj
+                      [ "type", jstr "add-decision"
+                        "kind", jstr kind
+                        "targets", jarr [ jstr target ]
+                        "rationale", jstr "decision reference fixture" ] ]
+
+        let applyDecision (label: string) (kind: string) (target: string) : Async<unit> =
+            async {
+                let requestId = freshRequestId ()
+                do! sendToolCall host requestId "task_apply" (addDecision kind target)
+                let! response = awaitResponse host requestId 60000
+
+                match response with
+                | None -> check ("reference." + label + ".applied") false "the add-decision apply did not complete"
+                | Some message ->
+                    let payload = toolPayload message
+                    check ("reference." + label + ".applied") true ""
+                    check ("reference." + label + ".succeeded") (boolField payload "ok") (sprintf "the add-decision apply failed: %s" (payload.ToJsonString()))
+                    revision <- intField (payload.["task"]) "stateRevision"
+            }
+
+        do! applyDecision "wrongKindDecision" "userDecision" (sprintf "guardDisposition:%s" guardId)
+        do! applyDecision "otherTargetDecision" "waiverDecision" (sprintf "guardDisposition:%s" otherGuardId)
+        do! applyDecision "matchingDecision" "waiverDecision" (sprintf "guardDisposition:%s" guardId)
+
+        let persistedDecisions (persisted: JsonNode) =
+            let decisions = persisted.["decisions"]
+
+            if isNull decisions then
+                []
+            else
+                decisions.AsArray() |> Seq.toList
+
+        let decisions = persistedDecisions (readPersisted projectRoot taskId)
+        check "reference.threeDecisions" (decisions.Length = 3) (sprintf "the persisted task carries %d decisions" decisions.Length)
+
+        let expectedDecisions =
+            [ "D1", "userDecision", sprintf "guardDisposition:%s" guardId
+              "D2", "waiverDecision", sprintf "guardDisposition:%s" otherGuardId
+              "D3", "waiverDecision", sprintf "guardDisposition:%s" guardId ]
+
+        for (id, kind, target) in expectedDecisions do
+            match decisions |> List.tryFind (fun decision -> strField decision "id" = id) with
+            | None -> check ("reference.decision" + id + ".present") false (sprintf "the persisted task carries no decision '%s'" id)
+            | Some decision ->
+                check ("reference.decision" + id + ".present") true ""
+                check ("reference.decision" + id + ".kind") (strField decision "kind" = kind) (sprintf "the persisted decision kind is '%s'" (strField decision "kind"))
+                check ("reference.decision" + id + ".authority") (strField decision "authority" = "coordinator") (sprintf "the persisted decision authority is '%s'" (strField decision "authority"))
+
+                let targets =
+                    decision.["targets"].AsArray()
+                    |> Seq.map (fun value -> value.GetValue<string>())
+                    |> Seq.toList
+
+                check ("reference.decision" + id + ".target") (List.contains target targets) (sprintf "the persisted decision does not target '%s'" target)
+
+        let signedBefore = signedState projectRoot taskId
+
+        let attempt
+            (label: string)
+            (reference: string)
+            (expectedCode: string)
+            (expectedMessage: string)
+            (expectAuthorityBlock: bool)
+            : Async<unit> =
+            async {
+                let requestId = freshRequestId ()
+                let command =
+                    jobj
+                        [ "type", jstr "waive-guard"
+                          "guardId", jstr guardId
+                          "decisionRef", jstr reference ]
+
+                do!
+                    sendToolCall
+                        host
+                        requestId
+                        "task_apply"
+                        (jobj
+                            [ "projectRoot", jstr projectRoot
+                              "taskId", jstr taskId
+                              "expectedStateRevision", jint revision
+                              "command", command ])
+
+                let! response = awaitResponse host requestId 30000
+
+                match response with
+                | None -> check ("reference." + label + ".bounded") false "the referenced waiver did not complete"
+                | Some message ->
+                    let payload = toolPayload message
+                    check ("reference." + label + ".bounded") true ""
+                    check ("reference." + label + ".rejected") (not (boolField payload "ok")) "the referenced waiver reported success"
+
+                    let (code, detail) = toolError payload
+                    check ("reference." + label + ".code") (code = expectedCode) (sprintf "the failure code is '%s'" code)
+                    check ("reference." + label + ".message") (detail = expectedMessage) (sprintf "the failure message is '%s'" detail)
+
+                    let errorBlock = payload.["error"]
+
+                    if expectAuthorityBlock then
+                        check ("reference." + label + ".errorBlock") (not (isNull errorBlock)) "the failure carried no error block"
+
+                        if not (isNull errorBlock) then
+                            let authority = errorBlock.["authority"]
+                            check ("reference." + label + ".authorityBlock") (not (isNull authority)) "the failure carried no authority block"
+
+                            if not (isNull authority) then
+                                check ("reference." + label + ".decisionRefStatus") (strField authority "decisionRefStatus" = "present") (sprintf "the decision reference status is '%s'" (strField authority "decisionRefStatus"))
+                                check ("reference." + label + ".requiredAuthority") (strField authority "required" = "user") (sprintf "the required authority is '%s'" (strField authority "required"))
+
+                let! emitted = awaitServerRequest host "elicitation/create" 1500
+                check ("reference." + label + ".noElicitation") emitted.IsNone "the referenced waiver emitted an elicitation request"
+            }
+
+        do! attempt "unknownReference" "D9999" "INVALID_INPUT" "Decision 'D9999' was not found" false
+        do! attempt "wrongKindReference" "D1" "INVALID_INPUT" "Decision 'D1' has kind userDecision; operation requires kind waiverDecision" false
+        do! attempt "wrongTargetReference" "D2" "INVALID_INPUT" (sprintf "Decision 'D2' does not authorize the exact operation guardDisposition:%s" guardId) false
+        do! attempt "coordinatorReference" "D3" "AUTHORITY_DENIED" "Decision 'D3' matches the operation but does not provide user authority" true
+
+        let persisted = readPersisted projectRoot taskId
+        check "reference.revisionUnchanged" (intField persisted "stateRevision" = revision) "a referenced waiver advanced the state revision"
+        check "reference.noUserDecision" (persistedUserDecisions persisted).IsEmpty "a referenced waiver persisted a User decision"
+        check "reference.decisionsUnchanged" ((persistedDecisions persisted).Length = 3) "the referenced waivers changed the persisted decisions"
+        checkSignedStateUnchanged "reference" signedBefore (signedState projectRoot taskId)
+        let guard = persistedGuard persisted guardId
+        check "reference.guardStillApplicable" (strField guard "disposition" = "applicable") (sprintf "the guard disposition is '%s'" (strField guard "disposition"))
+    }
+
 // A pending form must not keep the producer alive past stdin EOF.
 let eofScenario
     (dllPath: string)
@@ -1641,6 +1847,7 @@ let runSuite () : Async<unit> =
             do! runCase "pending" (pendingTrafficScenario host projectRoot)
             do! runCase "stale" (staleTaskScenario host projectRoot)
             do! runCase "duplicate" (duplicateScenario host projectRoot)
+            do! runCase "reference" (decisionReferenceScenario host projectRoot)
             do! runCase "eof" (eofScenario releaseEntryDll catalogPath catalogHash workspace projectRoot environment)
 
             // The remaining scenarios own their own producer processes, so they never disturb the shared host.
