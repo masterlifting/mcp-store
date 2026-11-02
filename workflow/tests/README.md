@@ -50,6 +50,12 @@ The `unsupportedNoForm` and `unsupportedOldProtocol` scenarios initialize a clie
 
 The `timeout` scenario withholds the answer of a received form past the producer's own two-minute confirmation deadline and asserts that the call ends with a bounded failure, that the persisted bytes, receipt, revision, decisions, and guard disposition are unchanged, that the late answer of the timed-out form cannot mutate the state or complete the call a second time, and that the transport stays usable: the ping still completes and a new protected operation receives its own form and applies after its own answer. The deadline is the production one; the suite only bounds how long it waits for it, and it prints the measured elapsed time of the timed case.
 
+### Native handshake capability shapes
+
+The `emptyElicitation` and `explicitForm` scenarios negotiate the accepted protocol version with two different client capability shapes, each against its own producer process, and then run a protected `task_apply`: an empty `elicitation` capability object and an explicit `elicitation.form` capability object. Both assert that the protected operation reaches the native `elicitation/create` request, that the requested schema still asks for a boolean `confirm`, and that the accepted answer applies the operation and persists exactly one User decision for the waived guard.
+
+The `unsupportedUrlOnly`, `unsupportedMalformedForm`, `unsupportedUnknownOnly`, and `unsupportedNonObjectElicitation` scenarios negotiate the same protocol version with capability shapes that offer no usable form, and each asserts the same fail-closed and unchanged-state expectations as the existing unsupported-client scenarios. The suite reports 299 current cases.
+
 ## Regression suites and the isolation guard
 
 The mandatory authenticated boundary signs every persisted task with the producer-owned per-account integrity key, and that key path is resolved from the per-account `LocalApplicationData` directory. Routine persistence reaches the key too, so a plain task creation is no longer a key-free operation.

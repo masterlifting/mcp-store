@@ -890,9 +890,12 @@ let private handle (state: HostState) id methodName parameters : Async<string> =
                             let formSupport =
                                 match elicitation with
                                 | Some value when value.ValueKind = JsonValueKind.Object ->
-                                    match property "form" value with
-                                    | Some form when form.ValueKind = JsonValueKind.Object -> true
-                                    | _ -> false
+                                    if value.EnumerateObject() |> Seq.isEmpty then
+                                        true
+                                    else
+                                        match property "form" value with
+                                        | Some form when form.ValueKind = JsonValueKind.Object -> true
+                                        | _ -> false
                                 | _ -> false
                             let negotiated =
                                 if version = AcceptedClientProtocolVersion then AcceptedClientProtocolVersion

@@ -325,16 +325,10 @@ let awaitServerRequest (host: McpHost) (methodName: string) (timeoutMs: int) : A
         return! takeMatching host.ServerRequests (fun message -> strField message "method" = methodName) timeoutMs
     }
 
-// The unsupported-client cases need a client that negotiates the accepted protocol version without the form capability, and one that negotiates the separately accepted older protocol version.
-let initializeHostWith (host: McpHost) (protocolVersion: string) (supportsForm: bool) : Async<JsonNode> =
+// The client capabilities are sent verbatim, so a handshake case can state exactly which elicitation shape it declares.
+let initializeHostWithCapabilities (host: McpHost) (protocolVersion: string) (capabilities: JsonNode) : Async<JsonNode> =
     async {
         let requestId = freshRequestId ()
-
-        let capabilities =
-            if supportsForm then
-                jobj [ "elicitation", jobj [ "form", jobj [] ] ]
-            else
-                jobj []
 
         let request =
             jobj
@@ -365,6 +359,16 @@ let initializeHostWith (host: McpHost) (protocolVersion: string) (supportsForm: 
 
         return result
     }
+
+// The unsupported-client cases need a client that negotiates the accepted protocol version without the form capability, and one that negotiates the separately accepted older protocol version.
+let initializeHostWith (host: McpHost) (protocolVersion: string) (supportsForm: bool) : Async<JsonNode> =
+    let capabilities =
+        if supportsForm then
+            jobj [ "elicitation", jobj [ "form", jobj [] ] ]
+        else
+            jobj []
+
+    initializeHostWithCapabilities host protocolVersion capabilities
 
 let initializeHost (host: McpHost) : Async<JsonNode> =
     initializeHostWith host "2025-11-25" true
@@ -1221,24 +1225,120 @@ let secondProtectedOperationScenario
     }
 
 
+// A client that declares the elicitation capability must reach the native form, so the capability shapes that name no excluded mode are covered against their own producer process.
+type SupportedClientVariant =
+    { Name: string
+      Capabilities: JsonNode }
+
+let supportedClientVariants: SupportedClientVariant list =
+    // The empty elicitation capability object: it names no mode at all, so it excludes none.
+    [ { Name = "emptyElicitation"
+        Capabilities = jobj [ "elicitation", jobj [] ] }
+      // The explicit form capability object: the mode the producer emits is named directly.
+      { Name = "explicitForm"
+        Capabilities = jobj [ "elicitation", jobj [ "form", jobj [] ] ] } ]
+
+let supportedClientScenario
+    (dllPath: string)
+    (catalogPath: string)
+    (catalogHash: string)
+    (workspace: string)
+    (projectRoot: string)
+    (environment: (string * string) list)
+    (variant: SupportedClientVariant)
+    (taskId: string)
+    : Async<unit> =
+    async {
+        let host = startHost dllPath catalogPath catalogHash workspace environment
+
+        try
+            let! result = initializeHostWithCapabilities host "2025-11-25" variant.Capabilities
+
+            check
+                (variant.Name + ".negotiatedProtocolVersion")
+                (strField result "protocolVersion" = "2025-11-25")
+                (sprintf "the negotiated protocol version is '%s'" (strField result "protocolVersion"))
+
+            let! fixture = createFixture host projectRoot taskId "harness"
+            let guardId = pickUserWaivableGuard fixture
+            let revision = intField fixture "stateRevision"
+
+            let requestId = freshRequestId ()
+            do! sendToolCall host requestId "task_apply" (waiveArguments projectRoot taskId revision guardId)
+            let! elicitation = awaitServerRequest host "elicitation/create" 30000
+
+            match elicitation with
+            | None -> check (variant.Name + ".elicitationEmitted") false "no elicitation was emitted for the protected operation"
+            | Some request ->
+                check (variant.Name + ".elicitationEmitted") true ""
+                let elicitationId = strField request "id"
+                check (variant.Name + ".reservedId") (elicitationId.StartsWith("workflow-server:", StringComparison.Ordinal)) (sprintf "the elicitation id is '%s'" elicitationId)
+
+                let parameters = request.["params"]
+                let schema = parameters.["requestedSchema"]
+                let properties = if isNull schema then null else schema.["properties"]
+                let confirm = if isNull properties then null else properties.["confirm"]
+                check (variant.Name + ".schemaConfirmBoolean") (not (isNull confirm) && strField confirm "type" = "boolean") "the requested schema does not require a boolean confirm"
+
+                do! send host (acceptAnswer elicitationId)
+                let! applied = awaitResponse host requestId 60000
+
+                match applied with
+                | None -> check (variant.Name + ".acceptApplies") false "the protected call did not complete after the answer"
+                | Some message ->
+                    let payload = toolPayload message
+                    check (variant.Name + ".acceptApplies") true ""
+                    check (variant.Name + ".acceptSucceeds") (boolField payload "ok") (sprintf "the protected apply failed: %s" (payload.ToJsonString()))
+                    let task = payload.["task"]
+                    check (variant.Name + ".oneRevision") (intField task "stateRevision" = revision + 1) "the protected apply did not advance exactly one revision"
+
+                    let persisted = readPersisted projectRoot taskId
+                    check (variant.Name + ".singleUserDecision") ((persistedUserDecisions persisted).Length = 1) "the protected apply did not persist exactly one User decision"
+                    let guard = persistedGuard persisted guardId
+                    check (variant.Name + ".guardWaived") ((strField guard "disposition").StartsWith("waived:", StringComparison.Ordinal)) (sprintf "the persisted guard disposition is '%s'" (strField guard "disposition"))
+        finally
+            kill host
+    }
+
+
 // A native client that cannot answer the elicitation form must fail closed on a protected operation without changing any state, and its failure must be distinguishable from a human decline.
 type UnsupportedClientVariant =
     { Name: string
       ProtocolVersion: string
-      SupportsForm: bool
+      Capabilities: JsonNode
       ExpectedNegotiatedVersion: string }
 
 let unsupportedClientVariants: UnsupportedClientVariant list =
     // The accepted protocol version without the elicitation form capability: the client cannot answer the form at all.
     [ { Name = "unsupportedNoForm"
         ProtocolVersion = "2025-11-25"
-        SupportsForm = false
+        Capabilities = jobj []
         ExpectedNegotiatedVersion = "2025-11-25" }
       // The separately accepted older protocol version, which declares the form capability, so only the negotiated version can disable the protected path.
       { Name = "unsupportedOldProtocol"
         ProtocolVersion = "2024-11-05"
-        SupportsForm = true
-        ExpectedNegotiatedVersion = "2024-11-05" } ]
+        Capabilities = jobj [ "elicitation", jobj [ "form", jobj [] ] ]
+        ExpectedNegotiatedVersion = "2024-11-05" }
+      // The url-mode elicitation capability without the form capability: the client declares a mode the producer cannot use.
+      { Name = "unsupportedUrlOnly"
+        ProtocolVersion = "2025-11-25"
+        Capabilities = jobj [ "elicitation", jobj [ "url", jobj [ "mode", jstr "browser" ] ] ]
+        ExpectedNegotiatedVersion = "2025-11-25" }
+      // A malformed form capability: the form is named, but its value is not an object.
+      { Name = "unsupportedMalformedForm"
+        ProtocolVersion = "2025-11-25"
+        Capabilities = jobj [ "elicitation", jobj [ "form", jstr "not-an-object" ] ]
+        ExpectedNegotiatedVersion = "2025-11-25" }
+      // An elicitation capability that names no mode the producer knows.
+      { Name = "unsupportedUnknownOnly"
+        ProtocolVersion = "2025-11-25"
+        Capabilities = jobj [ "elicitation", jobj [ "unknown", jobj [] ] ]
+        ExpectedNegotiatedVersion = "2025-11-25" }
+      // An elicitation capability that is not an object at all.
+      { Name = "unsupportedNonObjectElicitation"
+        ProtocolVersion = "2025-11-25"
+        Capabilities = jobj [ "elicitation", jstr "form" ]
+        ExpectedNegotiatedVersion = "2025-11-25" } ]
 
 let unsupportedClientScenario
     (dllPath: string)
@@ -1254,7 +1354,7 @@ let unsupportedClientScenario
         let host = startHost dllPath catalogPath catalogHash workspace environment
 
         try
-            let! result = initializeHostWith host variant.ProtocolVersion variant.SupportsForm
+            let! result = initializeHostWithCapabilities host variant.ProtocolVersion variant.Capabilities
 
             check
                 (variant.Name + ".negotiatedProtocolVersion")
@@ -1545,6 +1645,14 @@ let runSuite () : Async<unit> =
 
             // The remaining scenarios own their own producer processes, so they never disturb the shared host.
             do! runCase "second" (secondProtectedOperationScenario releaseEntryDll catalogPath catalogHash workspace projectRoot environment)
+
+            // The handshake scenarios need their own producer process, because the negotiated capability belongs to the initialize request of that process.
+            let mutable supportedIndex = 630
+
+            for variant in supportedClientVariants do
+                supportedIndex <- supportedIndex + 1
+                let taskId = sprintf "MCP-%d" supportedIndex
+                do! runCase variant.Name (supportedClientScenario releaseEntryDll catalogPath catalogHash workspace projectRoot environment variant taskId)
 
             let mutable unsupportedIndex = 610
 
