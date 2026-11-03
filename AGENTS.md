@@ -11,9 +11,9 @@ The official GitHub MCP is an external dependency and is not produced or install
 ## Boundaries
 
 - Producer code, package metadata, manifests, release tooling, producer tests, and producer documentation live here.
-- OpenCode agents, orchestration, capability selection, consumer launchers, and the installed runtime layout do not live here.
+- Consumer agents, orchestration, capability selection, launchers, and installed runtime layouts do not live here.
 - No migration/backward-compatibility aliases are maintained for retired Dotnet/Workflow product identities or persisted schemas.
-- This repository does not modify `masterlifting/opencode`; that integration is owned by `masterlifting/opencode#27` and consumes the producer releases described in `dotnet/dist/consumer-pins.json` and `workflow/dist/consumer-pins.json`.
+- Consumers own their integrations and consume published releases through `dotnet/dist/consumer-pins.json` and `workflow/dist/consumer-pins.json`.
 
 ## Validation
 
