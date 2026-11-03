@@ -146,14 +146,6 @@ repository root:
 dotnet fsi infrastructure/scripts/tests/Regression.fsx
 ```
 
-## #27 boundary
-
-`masterlifting/opencode#27` consumes the producer releases described in
-`dotnet/dist/consumer-pins.json` and `workflow/dist/consumer-pins.json`
-and owns the Workflow MCP's coordination tests. This analyzer does not
-modify `#27` implementation, automation, or workflow domain/protocol
-ordering, and does not pin or alter producer consumer-pins.
-
 ## Audit snapshot
 
 There is no authoritative file inventory maintained by this project. The
