@@ -2,7 +2,11 @@
 
 ## Decision
 
-**Simplify the current ZIP/manifest/Resolver path; do not authorize replacement yet.**
+**Retain the existing ZIP/manifest/Resolver mechanism pending the #46 decision
+and, if needed, its targeted prototype.** No worthwhile Store-side refactor or
+net maintenance saving has been demonstrated. The local factoring ideas below
+are hypotheses, not a selected simplification plan; the concrete consumer schema
+overlap is Harness-owned and does not establish a Store-side saving.
 The custom lifecycle has substantial maintenance cost, but replacing it with tools
 does not automatically preserve consumer-pinned content, filesystem admission,
 or the existing release no-op policy. Conversely, standard tools do support exact
@@ -29,9 +33,9 @@ the coordinator read #47/#46 and Harness #117/#116, plus the open-issue listing
 bodies used for the related ownership notes. This is not acceptance of
 the wider Harness #117 orchestration audit.
 
-## Prioritized findings and smallest changes
+## Prioritized findings and conditional opportunities
 
-### 1. Disposable SDK homes need explicit persistent-PATH suppression
+### 1. Confirmed: current runner mutates persistent User PATH in Windows Sandbox
 
 **Verified static fact:** Store `Run.ps1:9-13,36-45` and
 `.github/workflows/release.yml:263-301` redirect homes but do not set
@@ -45,7 +49,7 @@ Corresponding Harness sites include
 `tests/integrations/opencode/Delivery.fsx:322` and
 `tests/integrations/opencode/plugins/session-runtime.test.ts:87`.
 
-**Observed, limited verification:** a tester ran a fresh-home
+**Earlier protected probe (not current-runner evidence):** a tester ran a fresh-home
 `dotnet fsi --exec --quiet <temporary probe>` with suppression, telemetry opt-out
 and offline controls. SDK 11.0.100-rc.1.26425.128 executed first-run initialization;
 first-use sentinels appeared, a toolpath sentinel did not. Persistent User PATH
@@ -57,12 +61,46 @@ before/after. No raw PATH is published. Temporary artifacts were removed.
 The tester exceeded the one-probe bound with diagnostics and a second SDK/cwd
 probe (9.0.320). An initial attempt triggered a workload download before offline
 controls; a parent `dotnet --version` wrote SDK telemetry spool files, left
-untouched. No unprotected counterfactual was run. Thus actual test-origin PATH
-pollution, its exact entry path and its occurrence on hosted CI remain
-**unproven**, not confirmed defects. `--info`/`--version` alone did not exercise
-first-run and would be vacuous regression probes.
+untouched. That probe did not establish current-runner behavior. `--info`/`--version`
+alone did not exercise first-run and would be vacuous regression probes.
 
-**Proposal:** add the suppression to the existing child environment setup in
+**Observed current-runner verification, 2026-11-04:** the operator ran the offline
+kit in fresh Windows Sandbox. The exported result identifies kit
+`1e3aae22c5ea484d813acbd8309fa4ec`, verifies the frozen 2396-byte `Run.ps1`
+(SHA-256 `a6e95b0bbcbeb2bc4b76f03757277562f4886bed5a078d9eb08c916fc92e0e73`),
+and records exactly one invocation with a minimal F# input: exit `0`, 3,630 ms,
+no timeout or reported cleanup failure. SDK `11.0.100-rc.1.26425.128`, runtime
+`11.0.0-rc.1.26425.128`, PowerShell `7.6.9`; child CLI-home first-use sentinel
+count `1`. PATH suppression, first-time-experience suppression and NOLOGO were
+absent in both the effective environment and the child-observed controls.
+
+Both persistent registry snapshots were readable, of kind `ExpandString`:
+
+| Measurement | Before | After |
+| --- | --- | --- |
+| User PATH characters / entries | 50 / 1 | 133 / 2 |
+| SHA-256 | `bfcc1653e87b87d8c00a125b3f8cd09f1b7674848e4aa7dab83a1ca1d1e0c6b8` | `d0fcd1d0df6eb2183233faaaa26af9a09fbb4027530693313c77732e6c9a4618` |
+
+The result is `path-changed`: one added entry, none removed, with added-entry
+booleans matching `.dotnet\tools` and the runner's temporary run root. The
+parent process PATH hash stayed unchanged, distinguishing persistent registry
+mutation from changes to the already-running shell. No raw PATH is exported.
+
+Evidence: task-local `temp/1e3aae22c5ea484d813acbd8309fa4ec/results/`
+`GHI47-ac5-20261104T133657Z-ebe1b21f.json` under `.tasks/GHI-47/`, file SHA-256
+`d343efc5c5ae56a419c5f400e78b8d7b00d226aa59e43293de44406fceec77b8`.
+This sanitized guest result is operator-run evidence, not independently signed
+attestation. Earlier kit attempts failed in preparation/guest guards before any
+measured SDK invocation; those failures are not counted as successful checks.
+
+**Acceptance status:** current-runner occurrence is **verified for this
+Sandbox/SDK**, not a passing isolation invariant. `release.yml` and the complete
+test suites were not executed. No paired protected-current-runner experiment was
+performed, so this does not prove a fix or universal flag causality. Do not run
+an unsuppressed probe against the operator's persistent profile or clean its PATH.
+
+**Conditional proposal after explicit file-plan approval:** add
+the suppression to the existing child environment setup in
 `Run.ps1` and the release suite runner; preserve/restore any enclosing environment
 where the runner changes it. Coordinate the same invariant, not a shared
 framework, with Harness #117. Do not alter production shim registration in
@@ -77,12 +115,16 @@ Both consumer callsites discard the parsed value:
 `integrations/opencode/infrastructure/Validator.fsx:503-505`.
 Resolver `infrastructure/resolver/Run.fs:12-16` parses again at actual use.
 
-**Opportunity:** retire the duplicated full-schema consumer parser module
-(`core/mcp/Pin.fsx`, 84 lines)
-and its two semantic-validation callsites **only after** preserving the actual
-consumer-specific descriptor/component binding and deciding whether early lint
-is useful. Missing/wrong-component pins must fail before an unintended producer
-can launch. Do not import producer checkout code or invent a shared parser SDK.
+**Conditional Harness #117/follow-up candidate:** investigate whether any of the
+84-line `core/mcp/Pin.fsx` module and its two callsites can be removed without
+losing useful source/install-time checks. Discarding a parsed value does not mean
+its validation has no purpose. Preserve descriptor/component binding, rejection
+timing and pre-execution validation semantics; the Resolver's later parse is not
+automatically a substitute. Removal requires an independently demonstrated need
+and an approved file-specific plan. Harness #116 owns changes only when required
+by the approved Store #46 distribution decision; otherwise verify and close
+#116 without rewriting. Do not import producer checkout code or invent a shared
+parser SDK.
 
 Harness `core/workflow/pin.json` and `domains/software/dotnet/pin.json` are
 legitimate independently owned exact selections, not proof of conflicting
@@ -106,11 +148,12 @@ same version must fail. Published hashes/revision remain authoritative
 does not establish cross-revision equivalence. A digest short-circuit already
 exists (`Compare.fs:450-451`). This is required behavior, not redundant validation.
 
-**Small local candidate:** factor duplicated projection construction/writing in
+**Unproven local factoring hypothesis:** duplicated projection construction/writing in
 `infrastructure/release/Transaction.fs:25-41,207-234`, and common raw-entry
-comparison fields in `Compare.fs:297-326,346-371`, if the resulting code is
-smaller and equally explicit. Preserve their different allowed-field semantics;
-no estimated deletion count or safety claim is established without a patch.
+comparison fields in `Compare.fs:297-326,346-371`, might admit smaller code.
+Any evaluation must preserve their different allowed-field semantics.
+Neither worthwhile net saving nor a removable responsibility has been established;
+do not treat this as justification for selecting simplify or commissioning a patch.
 
 ### 4. Resolver cost is concrete; boundary checks are not interchangeable
 
@@ -150,17 +193,23 @@ route. Unix PR CI builds/tests three RIDs but does not publish those distributio
 | Build/publication | Publish + custom manifest, ZIP, comparison and GitHub transaction | PackAsTool + immutable package publication; feed ownership/auth/signing and release policy still needed | Publish apphost or self-contained RID payload; preserve immutable asset publication |
 | Identity/pins | Consumer selects archive/manifest hashes, revision and launch identity | Exact `--version` supported; version alone is not an independently pinned digest; trusted source/signature policy and cache assumptions need decisions | Exact artifact digest/source pin still needed; executable format provides neither |
 | Provenance/integrity | Trusted pin origin + allowed source, archive/per-file hashes and identity checks; hashes alone do not authenticate author | Source mapping, package hashes and optional trusted signatures; default signature mode is accept, not require | Authenticode/signing optional; otherwise retain trusted-source/digest handling |
-| Bootstrap/install | Runtime + separately trusted Resolver artifact; custom safe staging/rename | SDK for install/restore, runtime for framework-dependent execution; `--tool-path` avoids PATH enrollment | Framework-dependent apphost still needs runtime; self-contained removes runtime bootstrap but adds size/RID servicing |
+| Bootstrap/install | Runtime + separately trusted Resolver artifact; custom safe staging/rename. Checkout-independent bootstrap is unfinished: Store #49 publication and Harness #120 installation/pinning (or a verified equivalent) are required if retained | SDK for install/restore, runtime for framework-dependent execution; `--tool-path` avoids PATH enrollment | Framework-dependent apphost still needs runtime; self-contained removes runtime bootstrap but adds size/RID servicing |
 | Cache/concurrency | Content-keyed installs, explicit locks, re-verification, no automatic repair/GC | Standard NuGet/tool stores remove much custom code; isolated tool-path concurrency, cache contamination and recovery must be checked, not assumed equivalent | Download/staging/locks and cache still consumer or producer work unless another installer owns them |
 | Stdio/processes | Explicit workspace/host/typed inputs, inherited stdio, typed failures | Absolute shim invocation avoids command shadowing; prove clean stdio, cancellation, exit propagation and working directory | Direct process is simpler to invoke; same MCP lifetime/stdio requirements remain |
 | Updates/failure/cleanup | New pin/install; never mutate old release; corrupt install stops for operator | Exact version update or fresh tool path; uninstall/cache APIs exist but are not a guarantee of safe concurrent custom cleanup | New immutable directory + cutover; old-process and retained-version cleanup still needed |
-| Net cost | Largest custom release/resolver surface; known operational limitations | Largest potential deletion, but new SDK/feed/trust configuration and migration work | Removes launch/runtime dependencies only when self-contained; does not remove the distribution lifecycle |
+| Net cost | Largest custom release/resolver surface, known operational limitations, plus unfinished trusted Resolver bootstrap publication and consumer enrollment | Largest potential deletion, but new SDK/feed/trust configuration and migration work | Removes launch/runtime dependencies only when self-contained; does not remove the distribution lifecycle |
 
 **Measured maintenance surface:** the three immediate source directories contain
 3 distribution, 18 resolver and 11 release `.fs` modules (32 total), with 1,084,
 1,981 and 3,369 nonblank lines respectively (6,434 total). This excludes tests,
 scripts, CI, projects and consumer code; it is inventory, not a predicted saving.
 The consumer pin module is another 84 physical lines at two callsites.
+Retaining Resolver additionally leaves two concrete delivery obligations beyond
+this inventory: Store #49 must publish the actual immutable trusted Resolver
+artifact, then Harness #120 must pin/install it without manual compilation or
+DLL path setup. A verified equivalent can discharge them; no equivalent was
+verified in this audit. These are required clean-install costs, not optional
+future polish. If replacement is approved first, skip this superseded work.
 
 For comparison, a tool replacement introduces at least five concrete integration
 obligations: two producer tool packages, one feed/publication arrangement, one
@@ -195,8 +244,10 @@ Official guidance consulted:
 **Unresolved:** acceptable feed and certificate ownership; preservation of exact
 content pins versus a differently trusted package selection; revision-only no-op
 policy; install-time SDK acceptability; actual concurrent install/cleanup and
-stdio behavior. These prevent an unconditional replacement recommendation, not
-the bounded simplifications above. No standard-tool or standalone prototype,
+stdio behavior. These prevent an unconditional replacement recommendation; the
+current evidence also does not select a worthwhile Store-side simplification.
+Retain pending #46, without claiming the missing bootstrap is solved.
+No standard-tool or standalone prototype,
 build, complete test suite, release or live runtime cutover was executed here.
 
 **At most one targeted prototype, only if replacement remains attractive:**
@@ -211,28 +262,37 @@ second supported distribution path.
 
 ## Ownership and safe execution order
 
-1. **#47 + Harness #117:** review this evidence together. Approve any PATH fix as
-   an exact file plan for existing child environment sites; one bounded offline
-   first-run regression must compare persistent User PATH without printing it.
-   No cleanup of historical user entries. Harness owns its corresponding sites.
-2. **Store #46:** accept/reject each simplification and settle the distribution
+1. **#47 + Harness #117:** review the confirmed Sandbox current-runner mutation
+   together. Only after an exact file plan is approved may a fix proceed; verify
+   the corrected existing runner in a fresh disposable environment before claiming
+   the isolation invariant. CI behavior remains unexecuted. No unsafe operator-profile
+   probe or cleanup. Harness independently owns and verifies its corresponding sites.
+2. **Store #46:** assess conditional opportunities and settle the distribution
    trust/feed/no-op decisions. Retain current policy unless explicitly changed.
    If needed, approve the single prototype above before a replacement plan.
-3. **Store #46:** implement only the approved producer/contract/release changes;
-   publish and verify immutable artifacts before consumer selection. Existing
-   runtime must remain usable until separately authorized cutover.
-4. **Harness #116:** remove justified schema duplication while preserving
-   component binding and pre-execution safety; consume actual released artifacts
-   using one independent pin per producer. Prove clean install, exact update,
-   stdio/tool operation and failure handling without a Store checkout.
+3. **Decision-dependent producer work:** if retaining Resolver, Store #49 must
+   publish a real immutable trusted bootstrap artifact before Harness #120 pins
+   and installs it (or verify an equivalent first). These are prerequisites to
+   checkout-independent clean-install acceptance in #46/#116. If replacement is
+   approved first, skip #49/#120 and let #46 publish the approved replacement.
+   Implement only approved changes; preserve the existing runtime until separately
+   authorized cutover. Do not add a second long-lived bootstrap or delivery path.
+4. **Harness #116:** change only what the approved #46 decision requires, consume
+   released artifacts with independent exact selections, and prove clean install,
+   exact update, stdio/tool operation and failure handling without a Store checkout.
+   If the existing integration satisfies the decision, verify and close without
+   rewriting. Separate source-validation simplifications remain conditional
+   #117/follow-up work with binding and pre-execution semantics preserved.
 5. **Operator-authorized consumer cutover, then retirement:** protect user data,
    verify current processes and recovery, activate once, and only then remove
    obsolete source paths. No compatibility reader, parallel delivery path or
-   speculative installer framework. If retain/simplify wins, no distribution
-   cutover or new pin schema is required.
+   speculative installer framework. Retaining the mechanism does not require a
+   new pin schema, but still requires verified bootstrap enrollment; any active
+   runtime installation needs its own authorization.
 
-Related issue boundaries: Store #49 / Harness #120 own an interim trusted Resolver
-bootstrap only if still needed; do not build that path if superseded. Store #52
+Related issue boundaries: Store #49 → Harness #120 are required while the retained
+Resolver lacks verified checkout-independent bootstrap, and may be skipped if
+replacement is approved first. Store #52
 owns toolchain-version deduplication; #33 and Harness #91 own optional evidence
 visibility, not another audit ledger. Harness #49 capability adoption and #111
 cleanup do not justify a consumer-owned resolver. This report does not authorize
