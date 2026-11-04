@@ -6,11 +6,15 @@ Status: W5 narrow pass-1 regression appended; columns distinguish **local**
 seam), **actual remote read** (none in this slice), and **unverified hosted**
 (GitHub Actions queue, real `api.github.com` uploads, immutable-release
 detection). The matrix is not retroactive; rows not touched remain
-`unverified`. Authority: the original issue body is preserved verbatim at
-`.tasks/GHI-24/docs/original.md`. Requirement numbering below is the 1–72
-extraction of that body (`.tasks/GHI-24/docs/research.md` records the baseline and
-open gaps). If this file and the issue conflict, the issue wins. Full
-evidence narrative at `.tasks/GHI-24/docs/tests.md`.
+`unverified`. Authority: [issue #24](https://github.com/masterlifting/mcp-store/issues/24)
+is the available live source; it is not an immutable snapshot of the original body.
+Requirement numbering below retains the historical 1–72 extraction. The original
+issue snapshot (`.tasks/GHI-24/docs/original.md`), baseline and gap analysis
+(`.tasks/GHI-24/docs/research.md`), and full evidence narrative
+(`.tasks/GHI-24/docs/tests.md`) were removed from the current repository tree when
+`.tasks/` was untracked. They are no longer available at those paths; no replacement
+evidence location is asserted. If this file and the live issue conflict, the issue
+wins. Retained matrix entries are historical claims, not fresh verification.
 
 Evidence IDs: `EV-BUILD` producer build/package validation; `EV-TEST`
 deterministic tests; `EV-WF` static/config validation of the root workflow;
