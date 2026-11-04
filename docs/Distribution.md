@@ -1,10 +1,12 @@
 # Distribution decision — GHI-46
 
-**Decision status: not ready for architecture approval.** Keep the existing
-ZIP/manifest/Resolver working while completing the comparison below. Retention
-has lower demonstrated migration exposure, not a demonstrated steady-state
-maintenance advantage. Keeping today's runtime unchanged is not approval to
-complete or extend its distribution architecture.
+**Recommendation after the approved experiment: retain ZIP/manifest/Resolver,
+with architecture approval still pending.** Standard tools successfully packaged,
+installed and launched Dotnet MCP, but did not supply the existing producer
+installed-content revalidation guarantee. No positive net simplification under
+the unchanged contract was demonstrated. This is a conservative recommendation,
+not a measured claim that retention has the lowest long-term maintenance cost.
+Retention still requires the substantial bootstrap work priced below.
 
 This documentation-only proposal implements the research deliverable of
 [Store #46](https://github.com/masterlifting/mcp-store/issues/46). It authorizes
@@ -111,6 +113,115 @@ Resolver publish verified this four-file closure. The present README's three-fil
 bootstrap list is therefore insufficient evidence. The absolute .NET host/runtime
 is another prerequisite, not part of this closure.
 
+## Approved Windows experiment — measured results
+
+The user subsequently approved one local, nonpublished Mcp.Dotnet experiment.
+One package was created; interrupted test-client work resumed against that same
+package, not additional producer prototypes. Source baseline was PR commit
+`0f86909b79838602c79a3bdb95f15f4f71d77137`. Apart from this document, only disposable
+producer/project copies and task evidence were changed; production projects and active installations
+were not modified.
+
+### Setup, identity and actual commands
+
+- Windows x64; SDK `11.0.100-rc.1.26425.128`; matching local runtime
+  `Microsoft.NETCore.App 11.0.0-rc.1.26425.128`.
+- Package `Mcp.Dotnet` version `1.0.6-ghi46.1`, command `mcp-dotnet`;
+  1,515,467 bytes, 23 ZIP entries; SHA-256
+  `5913c0001a7a1d64000478b88e895ad8143616ef6710a808a29364811896379d`.
+- `net11.0` payload includes the app/deps/runtimeconfig, FSharp.Core
+  `11.0.101-rc1.26425.128`, XML documentation, generated tool settings and 13
+  FSharp.Core satellite assemblies. Nuspec has no external package dependencies:
+  FSharp.Core is bundled, not eliminated.
+- Packing reused existing compiled producer output with **unestablished source
+  provenance**, using `--no-build`. It proves packaging/runtime feasibility of
+  those exact bytes, not a fresh build, reproducibility or current-source parity.
+- Disposable root `R = .tasks/GHI-46/temp/prototype-ghi46-20261104-01`;
+  test root `T = R/test-owned`. CLI home, HOME/USERPROFILE/APPDATA, NuGet package,
+  HTTP, scratch/fallback caches and TEMP/TMP were isolated. Explicit NuGet
+  configurations cleared sources and used only the copied local package feeds.
+  SDK processes set `DOTNET_ADD_GLOBAL_TOOLS_TO_PATH=false`, telemetry opt-out,
+  first-use/no-logo and workload notification suppression before execution.
+  Tests also disabled MSBuild server reuse. No default user NuGet credential
+  config was inspected and no external feed/download was used. SDK source-list
+  enumeration was confined to the isolated effective configuration/sentinel;
+  it is not stronger egress evidence than the explicit local source configs.
+
+The following commands were executed, with symbolic paths replacing the owned
+machine-local prefixes. All SDK/shim children inherited the controls above:
+
+```powershell
+$dotnet = '<absolute installed dotnet.exe>'
+& $dotnet --version
+& $dotnet restore "$R/src/Dotnet.fsproj" --configfile "$R/isolated/nuget/NuGet.Config" `
+  -p:RestorePackagesPath="$R/isolated/packages" -v:minimal
+& $dotnet pack "$R/src/Dotnet.fsproj" -c Release --no-build --no-restore `
+  -p:PackageId=Mcp.Dotnet -p:PackageVersion=1.0.6-ghi46.1 `
+  -p:PackAsTool=true -p:ToolCommandName=mcp-dotnet `
+  -p:PackageOutputPath="$R/package" `
+  -p:RestoreConfigFile="$R/isolated/nuget/NuGet.Config" -v:minimal
+& $dotnet tool install Mcp.Dotnet --version 1.0.6-ghi46.1 `
+  --tool-path "$T/tools/main" --configfile "$T/nuget/NuGet.Tool.Config" --no-http-cache
+& "$T/tools/main/mcp-dotnet.exe" --dotnet-host $dotnet --artifact-root "$T/artifacts"
+# The test client sets CWD to T/workspace and exchanges actual MCP JSON-RPC.
+```
+
+The exact package digest was checked **outside NuGet** before installation.
+The test scripts also executed offline fixture restores, SDK/runtime probes,
+missing-version `tool install`, installs to `tools/concurrent` and `tools/corrupt`,
+and `tool uninstall`/reinstall for the corrupt owned copy. No fresh producer build
+or raw CLI build/test fallback was run; fixture builds were real calls to the
+experimental MCP's `build` tool.
+
+The isolated test launcher first ran the complete scenario selection, then
+`Run.ps1 -Scenarios 'cancellation,eof,concurrent-install-use'` resumed only the
+three cases interrupted by a client-scaffolding defect. Earlier successful
+scenarios were not repeated. Compilation-only retries are failures of the
+research client, not additional producer experiments.
+
+### Observations and failures
+
+| Scenario | Observed result | Boundary of the evidence |
+| --- | --- | --- |
+| Package/restore | Initial pack failed `NETSDK1004` for missing assets; a restore from copied local FSharp.Core followed by `pack --no-build --no-restore` succeeded | No producer compilation/provenance/reproducibility proof |
+| Exact install | Exit 0, absolute shim created; all 19 package payload files compared by relative path matched installed hashes | Independent hash comparison was experiment code, not an automatic trusted-content pin supplied by `--version` |
+| Actual MCP use | Initialize negotiated `2024-11-05`; tools `build/test/details`; real relative-target build succeeded, exit 0, 6,213 ms; `details` returned errors/output evidence | One locally available Dotnet payload and fixture, not Workflow or live Harness qualification |
+| CWD and inputs | Absolute shim launched with explicit workspace CWD, host and outside-workspace artifact root; relative fixture resolved/built there; missing/absolute targets refused `UNAUTHORIZED_PATH` | Confirms this launch path's workspace behavior, not every SDK/global.json environment |
+| Startup arguments | No arguments, relative host, and inside-workspace artifact root each refused, exit 1, empty stdout | Existing producer validation supplies these checks, not NuGet |
+| Stdout | Later cancellation sequence captured four stdout transcript lines, all JSON; stderr empty | Earlier MCP-session record has no transcript field and its queue was already consumed (`stdoutLineCount=0`); its purity label alone is not full-stream proof |
+| Cancellation/timeout/exit | A slow fixture actually ran for 24,016 ms; MCP cancellation returned `cancelled` after 1,547 ms with server alive; producer timeout returned `timeout` after 146 ms; exit notification and stdin EOF each exited 0 | Cancelled child-process release was not independently captured; no arbitrary signal/exit-code matrix |
+| Install during use | Different-path install succeeded while MCP ran; same-path exact-version install returned exit 0, “already installed”; live instance still answered ping; app hashes remained original | Not two simultaneous fresh same-path writers, forced in-place update, uninstall-during-use or lease-equivalence proof |
+| Missing package | Version `9.9.9.9` failed, exit 1, against the sole local tool feed | Does not exercise an unavailable hosted feed or authenticated publisher |
+| Altered runtimeconfig | Requiring unavailable framework `0.0.0.0` failed with host framework-resolution exit `-2147450730` | Loader compatibility failure, not prior package-integrity validation |
+| Altered assembly | Appending 16 harmless bytes changed the installed DLL hash but it still launched/exited 0 | Direct evidence that this standard shim-start path did not revalidate exact installed producer bytes |
+| Recovery | Standard uninstall then reinstall restored the original DLL hash; nupkg unchanged | Explicit owned repair, not automatic safe repair of an in-use install |
+
+The test client itself needed several F# syntax/type fixes and a shared-JsonNode
+`DeepClone()` fix. The three interrupted scenario failure records were retained
+alongside subsequent results; the latest aggregate summary replaced the earlier
+summary, but individual scenario records remain. An initial worker incorrectly
+reported the SDK missing; a coordinator directory check disproved that report
+before execution. None of these is evidence against the producer or NuGet.
+
+Source isolation was configuration-level, **not an OS firewall/egress proof**.
+The PATH-suppression control was explicitly set; no persistent-registry before/
+after assertion or unsuppressed #60 probe was performed. Final path-filtered
+process snapshots reported zero owned processes; unrelated build servers were
+left untouched. This is not independent proof of cancellation-time child release.
+
+Evidence retained locally under `.tasks/GHI-46/docs/experiment/` includes
+`prototype.md`, `tester-report.md`, reproducible client/launcher scripts, the
+per-scenario JSON and process snapshots. The exact nupkg was copied byte-for-byte
+to `artifacts/` with its SHA-256 rechecked for independent review; it is an inert
+research artifact, not a supported installation path. These ignored local task
+artifacts are not part of this documentation-only PR publication.
+At evidence review, disposable scratch was retained: the dedicated Workflow
+cleanup operation refused the open task (“cleanup requires a complete or aborted
+task”). No shell deletion bypass was attempted. Authorized research closeout must
+remove only this inventoried owned tree through that tool and record its result
+in Task Runtime; architecture implementation remains a separate approval
+regardless of research completion.
+
 ## Alternatives: complete lifecycle
 
 The standard-tool capabilities below are documented in the accepted audits and
@@ -162,7 +273,7 @@ an implemented or measured deletion estimate**:
 
 ### Recommendation and net cost
 
-**Withhold final retain/simplify/replace approval.** The first draft recommended
+The first draft recommended
 retention as the lowest demonstrated “maintenance/transition” cost. PR #61 review
 correctly challenged that combined claim: source inspection supports continuity
 and less migration exposure, but does not establish lower long-term complexity.
@@ -181,8 +292,9 @@ Separate the two cost horizons:
   package construction, acquisition, extraction, ordinary package-cache handling
   and shim generation to maintained standard tooling. The retained exact-content,
   installed-tree, release-no-op and consumer safety duties must be mapped to real
-  owners before counting net deletion. No prototype or equivalent replacement
-  implementation establishes that net cost yet. Raw existing LOC is exposure,
+  owners before counting net deletion. The prototype measured standard packaging
+  and launch, but did not implement an equivalent production safety wrapper or
+  publisher. Raw existing LOC is exposure,
   not a prediction of replacement LOC or ongoing engineering hours.
 
 No worthwhile Store-side “simplify” deletion has been demonstrated. Executable
@@ -191,14 +303,46 @@ the strongest replacement candidate, not a selected replacement. Continue the
 existing mechanism operationally while resolving this evidence gap; do not treat
 that safety default as the final simplest-architecture verdict.
 
-The source investigation now establishes a technically plausible retention path,
-but also expands its known transition surface to shared schema/CI and producer
-version changes. It does not settle which option has lower steady-state cost.
-**Recommended next decision: approve only the single offline tool experiment
-specified below, not retention implementation.** Use its actual wrapper/packaging
-inventory to decide retain or replace; choose simplify only if it demonstrates a
-worthwhile removable responsibility within the existing mechanism. No experiment
-has been approved or performed.
+The experiment changes the comparison: standard tool packaging, installation and
+absolute-shim MCP operation are now measured successes, not hypothetical blockers.
+It also demonstrates that install/version selection plus ordinary shim launch
+does not preserve exact installed-content revalidation. A replacement still needs
+an independently trusted package pin and a pre-execution installed-file inventory/
+hash/path policy, plus defined update/coordination/recovery behavior. The manual
+hash comparison in the experiment is not that production implementation.
+
+**Net-cost estimate (qualitative; no fictitious deletion count):** six existing
+Resolver transport/payload/install/disk/storage/lock modules contain 1,135
+nonblank lines; `distribution/Archive.fs` and `Distribution.fsx` add 507. These
+1,642 lines are an inspected *candidate surface*, not removable code: they mix
+ordinary mechanics with the safety obligations the prototype did not replace.
+No production lines were deleted. Added production wrapper LOC and maintenance
+are unmeasured, so no positive numeric net reduction is established. The four
+tool-pack properties and ordinary install/uninstall commands are small, observed
+integration points; the research-client code is test scaffolding, not a package
+manager or estimate of replacement production code.
+
+Dependency/operational trade-off: tool packaging bundles FSharp.Core rather than
+removing it; framework-dependent launch still needs .NET 11 and Dotnet's explicit
+build host. Tool installation requires an SDK (already needed by Dotnet build
+users, but not necessarily Workflow-only consumers). Full replacement could avoid
+the separate Resolver artifact and its delivery, but adds selected-source/feed,
+SDK installation and trust/repair operations. Hosted publication, signatures and
+revision-only no-op adaptation were not exercised. Retention incurs the concrete
+schema/CI/version/bootstrap changes below and retains current custom maintenance;
+that cost is not waived by the experiment.
+
+**Recommend retain under the unchanged guarantees.** Migration is not justified
+by the observed simplification alone: the production safety/release equivalence
+and positive net saving remain unestablished, while the existing Resolver already
+owns producer revalidation and lifetime rules. This is a risk/contract-preserving
+engineering judgement, not proof of lower steady-state cost. Its own trusted
+bootstrap remains unfinished and must be completed, not assumed secure because
+producer revalidation exists. Do not select “simplify” without a worthwhile
+demonstrated deletion, or “replace” merely because the successful standard-tool
+launch makes wholesale deletion look plausible. No further experiment is
+authorized here; a different trust contract or equivalent implementation would
+require a new explicit decision, not silent relaxation of guarantees.
 
 Future non-.NET producers need trusted immutable artifacts, exact selection and
 reliable processes, not necessarily this .NET launch descriptor. Telegram already
@@ -207,15 +351,16 @@ generic language adapters. Revisit delivery only for an actual producer need.
 
 ## Ordered implementation plan — approval required
 
-The next action is the separately approved experiment below. Steps 2–6 are a
-**conditional retention plan**, not instructions to implement before the decision.
+The next action is independent review and the user's architecture decision.
+Steps 2–6 are a **conditional retention plan**, not instructions to implement
+before the decision.
 No row has been implemented. Exact artifact bytes, checksums and versions must
 come from an actual verified release, never invented in this document.
 
-1. **Finish the selection gate (Store #46).** Review the bootstrap findings and
-   approve/reject the one experiment. Compare observed added wrapper/packaging
-   work against the conditional deletion inventory. Then select retain, simplify
-   or replace explicitly; do not equate migration risk with maintenance cost.
+1. **Finish the selection gate (Store #46).** Review the measured successes,
+   installed-content gap, unresolved guarantees and bootstrap findings. Approve
+   or reject retention and its explicit cost; do not equate migration risk with
+   maintenance cost or treat the experiment as production implementation approval.
    Preserve content pins, source trust, no-op policy, fail-closed admission and
    one delivery path unless an explicit contract amendment is authorized. This
    documentation PR does not close #46 or the dependent issues.
@@ -298,8 +443,10 @@ inspection of producer format, release policy, pins, bootstrap, admission,
 concurrency and stdio; targeted F# architect follow-up of actual Resolver release
 admission, policy, CLI, preparation and CI assumptions and existing dependency
 metadata. Its output identifies required responsibility changes, not an exhaustive
-compile-verified patch. No build, test suite, prototype, package publication,
-artifact download, clean installation, MCP call or runtime cutover was performed.
+compile-verified patch. The subsequently approved local experiment above adds
+actual pack/install/MCP/fixture-build/cancel/concurrency/corruption evidence.
+No fresh producer build, full test suite, package publication, external artifact
+download, production clean-install qualification or runtime cutover was performed.
 Prior Sandbox PATH observations belong to the accepted audits and #60, not proof
 of any distribution property tested here.
 
@@ -320,45 +467,19 @@ consumer run rather than a speculative matrix:
   preserve running versions and user configuration. Record actual commands,
   release/pin identities and results, distinguishing static checks from execution.
 
-### One proposed experiment — separate approval required
+### Limits and approval gates
 
-**Question:** for one actual producer (Dotnet), does standard tool installation
-remove enough custom install/launch work after preserving exact-content and
-installed-tree verification, or does the required wrapper recreate that work?
+The one approved experiment is finished; no second experiment is implied. It does
+not prove public-feed provenance/signatures, immutable hosted publication,
+same-version/cross-revision no-op equivalence, exact newer-version update,
+Workflow behavior, filesystem-link/TOCTOU equivalence or safe in-use replacement.
+SDK source configuration is not OS egress enforcement, cancellation status is
+not independent child-release proof, and appended-byte acceptance is not a claim
+that arbitrary malicious code was run. No equivalent production verification
+wrapper was built. A successful tool install is not permission to delete the
+release policy or `Compare.fs`.
 
-Use a disposable copy and one local-only, nonpublished tool package, isolated SDK
-home, tool path and package cache, with an explicit local-only NuGet config and a
-reviewed package digest/version. Do not contact a feed, obtain credentials,
-publish packages, edit the production projects or install into an active runtime.
-If required SDK/package inputs are unavailable locally, stop and request exact
-download approval; do not silently expand this experiment. Suppress first-run
-PATH registration in the disposable process; this is not a #60 fix or PATH probe.
-
-Acceptance/evidence, bounded to this one producer and path:
-
-1. Record the actual packaging changes, tool/SDK/runtime prerequisite and complete
-   package identity. Install the exact verified package into a clean isolated
-   tool path. Invoke its absolute shim with the real workspace/typed inputs;
-   observe MCP initialization, one representative tool call and cancellation/exit
-   behavior without stdout pollution.
-2. Exercise one concurrent install/use and one corrupted installed-payload
-   refusal/recovery scenario. Record any bespoke verification, locking, lifetime
-   or launch wrapper actually needed. Missing package must fail without network
-   or alternate-source fallback. No destructive cleanup outside owned scratch.
-3. Deliver a file/responsibility deletion-versus-addition inventory for full
-   producer replacement, separating runtime plumbing from release policy. Map
-   every retained trust/content/no-op obligation to its concrete owner; an
-   unmapped obligation fails equivalence rather than becoming an assumed saving.
-   Compare that actual wrapper/packaging work to the conditional retention plan.
-
-This experiment does not prove public-feed provenance, immutable hosted package
-publication, Workflow behavior or a production cutover. Retain the no-op release
-owner unless an equivalent is separately demonstrated; a successful tool install
-is not permission to delete `Compare.fs`. Stop after the evidence report, remove
-only authorized owned scratch, and make the architectural decision before any
-production implementation. No permanent second distribution path is created.
-
-Outstanding decisions: experiment approval; final retain/simplify/replace choice;
+Outstanding decisions: independent review and final retain/simplify/replace choice;
 if retaining, CLI descriptor/schema and third-participant approval plus bootstrap
 trust/placement and coordinated producer version changes; if replacing, equivalent
 release/trust ownership and producer-first plan. Documentation publication and
