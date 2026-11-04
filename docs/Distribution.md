@@ -1,16 +1,17 @@
 # Distribution decision — GHI-46
 
-**Recommendation after the approved experiment: retain ZIP/manifest/Resolver,
-with architecture approval still pending.** Standard tools successfully packaged,
-installed and launched Dotnet MCP, but did not supply the existing producer
-installed-content revalidation guarantee. No positive net simplification under
-the unchanged contract was demonstrated. This is a conservative recommendation,
-not a measured claim that retention has the lowest long-term maintenance cost.
-Retention still requires the substantial bootstrap work priced below.
+**Approved architecture decision (2026-11-04): retain ZIP/manifest/Resolver for Workflow and Dotnet MCP.**
+The approved choice preserves the existing producer trust, exact content-pinning,
+installed-tree validation and stdio launch guarantees. The tested .NET Tool alternative
+worked for packaging and MCP launch but did not establish equivalent integrity or
+positive net simplification. Retention is a risk-preserving engineering decision,
+not a measurement of lower long-term maintenance cost. Publishing and installing
+a trusted Resolver bootstrap remain required; the publication format is not yet selected.
 
-This documentation-only proposal implements the research deliverable of
-[Store #46](https://github.com/masterlifting/mcp-store/issues/46). It authorizes
-no production change, publication, active-runtime configuration or cutover.
+This document records the approved selection under
+[Store #46](https://github.com/masterlifting/mcp-store/issues/46) and the research
+supporting it. Approval does **not** authorize production code changes, artifact
+publication, active-runtime configuration or cutover.
 Keep exactly one supported distribution path. Store #60 (Windows test PATH
 isolation) is separate and does not select the distribution format.
 
@@ -87,22 +88,25 @@ path. The earlier proposal to add a Resolver config/roster entry is insufficient
   and output/guard counts (`.github/workflows/release.yml:383-478,521-569,642-662`;
   `infrastructure/release/Check.ps1:130,239-248`).
 
-**Smallest defensible path identified, not a proved minimal patch:** publish a
-CLI artifact through the existing ZIP/manifest transaction, with one explicit
-CLI-only descriptor, for example `dotnet-cli`. It identifies the verified DLL and
+**Candidate A, not selected — extend the existing ZIP/manifest transaction:** publish a
+CLI artifact with one explicit CLI-only descriptor, for example `dotnet-cli`. It identifies the verified DLL and
 runtime prerequisite, not MCP startup arguments. The trusted Harness bootstrap
 verifies its complete closure before invoking its documented CLI directly.
 Resolver must reject CLI-only artifacts as MCP `run` targets. Do not add literal,
 optional or repeated argument templates, arbitrary passthrough, a generic command
 engine, a root-level producer facade, or recursive Resolver self-installation.
 
-This proposal changes the distribution schema, canonical policy readers, both
+Candidate A would change the distribution schema, canonical policy readers, both
 manifest projections, participant enrollment, nested-source-root handling and CI
-transfers. The file-specific conditional plan below prices those changes rather
-than hiding them behind #49. It is one mechanism with a concrete additional
-artifact type, not a second publisher. Replacing only Resolver packaging with a
-tool would leave the producer ZIP stack intact and is not the replacement option
-being evaluated.
+transfers. The file-specific conditional plan below makes that cost visible.
+**Candidate B, also not selected — publish one trusted immutable Resolver asset in
+an existing GitHub Release workflow, pinning its digest and source in Harness:**
+this may avoid MCP-manifest/schema and producer-version changes, but its publication
+integrity, no-clobber/retry policy, provenance and pre-execution verification must
+be established. Store #49 owns a bounded A-versus-B comparison and selection before
+any implementation; do not add a second general publisher or downgrade guarantees.
+Using a tool only to package Resolver would leave the producer ZIP stack intact and
+is not the replacement tested in this research.
 
 The candidate Resolver runtime closure is `Resolver.dll`, `Resolver.deps.json`,
 `Resolver.runtimeconfig.json`, and `FSharp.Core.dll`; the shared builder adds
@@ -336,11 +340,11 @@ build host. Tool installation requires an SDK (already needed by Dotnet build
 users, but not necessarily Workflow-only consumers). Full replacement could avoid
 the separate Resolver artifact and its delivery, but adds selected-source/feed,
 SDK installation and trust/repair operations. Hosted publication, signatures and
-revision-only no-op adaptation were not exercised. Retention incurs the concrete
-schema/CI/version/bootstrap changes below and retains current custom maintenance;
-that cost is not waived by the experiment.
+revision-only no-op adaptation were not exercised. Retention incurs bootstrap work and retains current custom maintenance.
+The schema/CI/version changes below apply only to Candidate A; Candidate B must
+be assessed in Store #49 before any of those changes are authorized.
 
-**Recommend retain under the unchanged guarantees.** Migration is not justified
+**Approved: retain under the unchanged guarantees.** Migration is not justified
 by the observed simplification alone: the production safety/release equivalence
 and positive net saving remain unestablished, while the existing Resolver already
 owns producer revalidation and lifetime rules. This is a risk/contract-preserving
@@ -359,23 +363,27 @@ generic language adapters. Revisit delivery only for an actual producer need.
 
 ## Ordered implementation plan — approval required
 
-The next action is independent review and the user's architecture decision.
-Steps 2–6 are a **conditional retention plan**, not instructions to implement
-before the decision.
+The architecture selection is approved. The next action is choosing the least
+complex trusted Resolver publication route in Store #49 and approving its bounded
+file-specific implementation plan. Steps below are not production authorization.
 No row has been implemented. Exact artifact bytes, checksums and versions must
 come from an actual verified release, never invented in this document.
 
-1. **Finish the selection gate (Store #46).** Review the measured successes,
-   installed-content gap, unresolved guarantees and bootstrap findings. Approve
-   or reject retention and its explicit cost; do not equate migration risk with
-   maintenance cost or treat the experiment as production implementation approval.
-   Preserve content pins, source trust, no-op policy, fail-closed admission and
-   one delivery path unless an explicit contract amendment is authorized. This
-   documentation PR does not close #46 or the dependent issues.
-2. **If retention is selected, publish Resolver (Store #49).** Approve the
-   following coordinated change surface before implementation. All paths in this
-   table are Store-relative; parenthesized directory prefixes apply to every file
-   in that cell.
+1. **Record the selection (Store #46).** Retain ZIP/manifest/Resolver for the two
+   MCP producers. Preserve content pins, source trust, release no-op policy,
+   fail-closed admission and one producer distribution path. Research approval is
+   distinct from checkout-independent delivery acceptance, which remains pending
+   Store #49 → Harness #120 → Harness #116. No production work is approved here.
+2. **Publish trusted Resolver (Store #49).** First compare Candidate A (adding a
+   CLI-only artifact to the MCP ZIP/manifest release transaction) with Candidate B
+   (one immutable, independently digest-pinned GitHub Release bootstrap asset in the
+   existing CI). Preserve trusted provenance, source revision, complete executable
+   closure, immutability/no-clobber, deterministic version/digest, authorized
+   publication and fail-closed pre-execution admission in both cases. Select the
+   least complex valid owner and obtain a file-specific implementation approval.
+   **The following change surface applies only to Candidate A, not to retention
+   unconditionally.** Paths are Store-relative; parenthesized prefixes apply to
+   each listed file.
 
    | Files | Required responsibility/change |
    | --- | --- |
@@ -390,16 +398,15 @@ come from an actual verified release, never invented in this document.
    | (`infrastructure/release/tests/`) `Policy.fs`, `Enrollment.fs`, `Coherence.fs`, `Contract.fs` and affected fixture/preparation/handoff helpers | Cover CLI/MCP distinction, nested roots, candidate transfers, immutable publish/no-op/bump-fail and invalid/missing packaged closure. Complete a call-site audit; this table is a mandatory responsibility inventory, not an exhaustive compiled patch. |
    | `AGENTS.md`, root README, three infrastructure READMEs, `docs/release/Requirements.md` | Reconcile release-artifact versus MCP ownership, dependency closure, trusted bootstrap contract and evidence/acceptance matrix. |
 
-   The pin schema is not shown to need a change merely for another component:
-   existing archive/manifest digests and revision can identify it. The manifest
-   schema **does** change: current `Contract.fs:14,262-263` accepts schema 2 only.
-   Newly released producer payloads, the new Resolver and consumer selections
-   therefore need coordinated cutover; old assets remain immutable and the old
-   complete runtime stays usable until separately authorized activation. No
-   schema-2 compatibility reader or dual supported distribution is proposed.
-   Verify the new producer releases before selecting them with the new Resolver.
-   Store supplies the artifact and published trust contract; Harness verifies it
-   before first execution. Do not execute Resolver to establish its own trust.
+   Under Candidate A, the pin schema need not change solely for a new component,
+   but the shared manifest schema would change (current `Contract.fs:14,262-263`
+   accepts schema 2 only). That requires coordinated producer versions and consumer
+   activation while preserving immutable old assets. Under Candidate B, do not
+   change the MCP manifest or producer versions merely to publish Resolver; define
+   a minimal distinct, trusted bootstrap selection in Harness instead. In either
+   case, Store supplies the immutable artifact identity and Harness verifies its
+   full executable closure **before** first execution. Resolver must never
+   establish its own trust by running unverified code.
 3. **Consume one trusted selection (Harness #120, after #49).** Review/update
    `core/mcp/` with one proposed `pin.json` for Resolver, distinct from producer
    release metadata and the existing producer pins. Integrate acquisition and
@@ -437,13 +444,12 @@ come from an actual verified release, never invented in this document.
    remove obsolete manual bootstrap instructions after verified enrollment, not
    user files or retained payloads. No compatibility mode or parallel delivery.
 
-If replacement is approved instead, stop before step 2, skip #49/#120, and replace
-this plan with a verified producer-first package/publication → consumer #116 →
-authorized cutover → old-mechanism retirement plan. Do not publish a Resolver
-bootstrap for an already rejected architecture. Independent pin-parser factoring
-requires its own value demonstration and descriptor-binding/rejection-timing plan.
+Any later proposal to replace the producer distribution requires a separate
+explicit architecture decision supported by new evidence. Do not create a parallel
+producer delivery mechanism during Store #49 or Harness #120. Independent
+pin-parser factoring requires its own demonstrated value and rejection-timing plan.
 
-## Verification and remaining decisions
+## Verification and remaining implementation choices
 
 Performed for this proposal: GitHub issue/main identity reads; initial local Store
 Git state check; accepted-report reconciliation; independent targeted source
@@ -487,8 +493,9 @@ that arbitrary malicious code was run. No equivalent production verification
 wrapper was built. A successful tool install is not permission to delete the
 release policy or `Compare.fs`.
 
-Outstanding decisions: independent review and final retain/simplify/replace choice;
-if retaining, CLI descriptor/schema and third-participant approval plus bootstrap
-trust/placement and coordinated producer version changes; if replacing, equivalent
-release/trust ownership and producer-first plan. Documentation publication and
-runtime activation each retain their separate consent gates.
+Remaining choices: Store #49 must select Candidate A or B and specify the trusted
+bootstrap publication and dependency closure; Harness #120 must define trusted
+selection, acquisition, repair and pre-execution verification; Harness #116 must
+prove checkout-independent delivery. Any production implementation, artifact
+publication and runtime activation require their own explicit approvals. The
+approved architecture decision alone is not end-to-end acceptance.
