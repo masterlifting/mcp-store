@@ -1,9 +1,10 @@
 # Distribution decision — GHI-46
 
-**Proposed decision: retain ZIP/manifest/Resolver. Approval pending.** Complete its
-missing trusted Resolver delivery, rather than replacing the producer distribution
-or selecting an unproven refactor. Retention is not a zero-change option and is
-not end-to-end delivery acceptance.
+**Decision status: not ready for architecture approval.** Keep the existing
+ZIP/manifest/Resolver working while completing the comparison below. Retention
+has lower demonstrated migration exposure, not a demonstrated steady-state
+maintenance advantage. Keeping today's runtime unchanged is not approval to
+complete or extend its distribution architecture.
 
 This documentation-only proposal implements the research deliverable of
 [Store #46](https://github.com/masterlifting/mcp-store/issues/46). It authorizes
@@ -18,8 +19,10 @@ On 2026-11-04, GitHub `main` resolved to:
 - Store: `c9d7d5f8f9b55b058b41a4deda1cd18f09426c08`.
 - Harness: `f4bc4e770f7ea42e2e846890d2bb9b65fbac2cb7`.
 
-Both local checkouts have those HEADs. The coordinator checked the Store worktree
-was clean before creating this task. A separate read-only auditor inspected the
+The original research used local checkouts at those HEADs. The documentation PR
+is on `ghi-46`; both GitHub `main` tips were rechecked unchanged during the review
+follow-up. The coordinator checked the Store worktree was clean before creating
+this task. A separate read-only auditor inspected the
 current source, not just the earlier conclusions. Evidence below is static unless
 explicitly stated otherwise. Paths are relative to the named repository at these
 commits; line ranges are current-main anchors.
@@ -58,6 +61,56 @@ nonblank lines overall; the Resolver/release nonblank subtotals were not
 independently recounted here. None of these inventories estimates removable code
 or equivalent maintenance effort.
 
+### Review follow-up: Resolver publication is a contract change
+
+PR #61's [cost comment](https://github.com/masterlifting/mcp-store/pull/61#discussion_r4470117414)
+and [bootstrap comment](https://github.com/masterlifting/mcp-store/pull/61#discussion_r4470117421)
+are accepted. A separate read-only F# architect traced the actual publication
+path. The earlier proposal to add a Resolver config/roster entry is insufficient:
+
+- `infrastructure/release/Enrollment.fs:35-37,176-206` and
+  `Roster.ps1:5,59-69` under the same directory require exactly Dotnet and Workflow.
+- `infrastructure/release/Policy.fs:116-178`, its pre-SDK mirror
+  `Update.ps1:65-94`, and `infrastructure/distribution/Contract.fs:282-301`
+  require typed flag/value arguments. `Compare.fs:53-71` under release and
+  `infrastructure/Distribution.fsx:191-209` independently fix `dotnet-exec`.
+- Resolver requires positional `resolve` or `run`
+  (`infrastructure/resolver/Cli.fs:83-122`); current launch composition emits only
+  declared flag/value pairs (`Launch.fs:36-73`). Fake arguments or just allowing
+  an empty list do not express a usable Resolver launch contract. The issue is
+  the descriptor semantics, not inability to execute Resolver with `dotnet exec`.
+- Release preparation assumes `<componentId>/release/...` and
+  `<componentId>/dist` (`Orchestration.fs:236-264,289-329` under release).
+  Resolver lives under infrastructure. CI also has component-specific transfers
+  and output/guard counts (`.github/workflows/release.yml:383-478,521-569,642-662`;
+  `infrastructure/release/Check.ps1:130,239-248`).
+
+**Smallest defensible path identified, not a proved minimal patch:** publish a
+CLI artifact through the existing ZIP/manifest transaction, with one explicit
+CLI-only descriptor, for example `dotnet-cli`. It identifies the verified DLL and
+runtime prerequisite, not MCP startup arguments. The trusted Harness bootstrap
+verifies its complete closure before invoking its documented CLI directly.
+Resolver must reject CLI-only artifacts as MCP `run` targets. Do not add literal,
+optional or repeated argument templates, arbitrary passthrough, a generic command
+engine, a root-level producer facade, or recursive Resolver self-installation.
+
+This proposal changes the distribution schema, canonical policy readers, both
+manifest projections, participant enrollment, nested-source-root handling and CI
+transfers. The file-specific conditional plan below prices those changes rather
+than hiding them behind #49. It is one mechanism with a concrete additional
+artifact type, not a second publisher. Replacing only Resolver packaging with a
+tool would leave the producer ZIP stack intact and is not the replacement option
+being evaluated.
+
+The candidate Resolver runtime closure is `Resolver.dll`, `Resolver.deps.json`,
+`Resolver.runtimeconfig.json`, and `FSharp.Core.dll`; the shared builder adds
+`NOTICE.txt` and `distribution.json`. The project and existing local deps output
+show the implicit FSharp.Core dependency. That local output is **not release
+provenance**. The shared publish recipe suppresses satellites/apphost, but no fresh
+Resolver publish verified this four-file closure. The present README's three-file
+bootstrap list is therefore insufficient evidence. The absolute .NET host/runtime
+is another prerequisite, not part of this closure.
+
 ## Alternatives: complete lifecycle
 
 The standard-tool capabilities below are documented in the accepted audits and
@@ -69,13 +122,13 @@ controls, not evidence of automatic equivalence to the present contract.
 
 | Responsibility | Retain | Simplify existing | Replace: .NET tool / NuGet | Replace: executable |
 | --- | --- | --- | --- | --- |
-| Build and publication | Existing prepare/publish transaction, immutable assets and no-op policy; add Resolver artifact | Same, unless a specific responsibility can safely disappear | Two tool packages, feed ownership/configuration, package publish and release-policy integration | Per-RID apphost or self-contained publish; immutable artifact publication still needed |
+| Build and publication | Existing transaction/no-op policy; Resolver adds CLI descriptor/schema, roster, source-root, CI transfer and package work | Same bootstrap obligations unless a specific responsibility can safely disappear | Two tool packages, feed ownership/configuration, package publish and release-policy integration | Per-RID apphost or self-contained publish; immutable artifact publication still needed |
 | Provenance, integrity, immutable versions, exact pins | Reviewed independent pins plus trusted origin and archive/member verification | Preserve these; no demonstrated field can be removed | Exact version and standard package integrity/signing available; still decide publisher trust, feed exclusivity, independently pinned digest and cache validation | Signing optional; source/digest pins and immutable selection still custom |
 | Bootstrap | Trusted .NET host/runtime plus published Resolver; #49 → #120 missing | Same unresolved bootstrap | SDK for install/restore plus runtime for framework-dependent tools; SDK/feed/certificate provisioning replaces Resolver bootstrap, not all bootstrap | Self-contained removes shared runtime prerequisite but adds payload size, RID and runtime servicing; framework-dependent executable does not |
 | Installation, cache, concurrency | Existing staging, canonical cache, locks, leases, revalidation | Small local factoring does not eliminate owners | Standard restore/extraction/tool stores can replace download/extract/cache plumbing; exact isolated tool-path writer behavior, installed-tree trust and in-use cleanup equivalence remain unverified | Executable format provides none of acquisition/staging/cache/coordination; must retain or acquire an installer owner |
 | MCP stdio and failure | Existing absolute launch; diagnostics on stderr, corrupt install refusal | Preserve rejection timing and pre-execution checks | Absolute shim can launch; prove clean stdout, workspace/inputs, cancellation, exit propagation and missing/corrupt failure | Direct launch removes Resolver hop only; same MCP/process/input obligations |
 | Updates and cleanup | New exact pin, immutable side-by-side install, no automatic repair/GC; documented operator recovery | Do not add GC or repair merely as cleanup | Exact update/uninstall commands exist; preserve active processes, user files and rollback/recovery boundaries; shared cache deletion is not safe owned cleanup by definition | Same side-by-side/cutover/owned-cleanup duties unless an external installer supplies them |
-| Net transition cost | Two required bootstrap deliveries plus focused end-to-end verification; keep substantial existing maintenance | No material Store-side deletion demonstrated; bootstrap cost unchanged | Potentially largest removal, but new SDK/feed/trust integration, release-policy adaptation, both producer packages, consumer transition and retirement | New publish/launch integration and servicing; much of current lifecycle survives |
+| Transition / ongoing exposure | Shared contract/CI changes plus producer-version and bootstrap/consumer delivery; retain substantial custom maintenance | No material Store-side deletion demonstrated; bootstrap cost unchanged | Potentially largest removal, but new SDK/feed/trust integration, release-policy adaptation, both producer packages, consumer transition and retirement | New publish/launch integration and servicing; much of current lifecycle survives |
 
 ### What standard tooling actually removes
 
@@ -95,26 +148,57 @@ controls, not evidence of automatic equivalence to the present contract.
   remain. Standard tools do not eliminate these responsibilities merely by
   moving them into feed or host configuration.
 
+For a full producer-tool replacement, the concrete Store deletion/adaptation
+candidates are as follows. These are conditional responsibility mappings, **not
+an implemented or measured deletion estimate**:
+
+| Current files under `infrastructure/` | Standard-tool opportunity | Duties not discharged by tool packaging alone |
+| --- | --- | --- |
+| `resolver/Transport.fs`, `Payload.fs`, `Install.fs`, `Disk.fs`, `Storage.fs`, `Lock.fs` | Transfer ordinary package acquisition/extraction/cache mechanics to NuGet/tool stores | Trusted exact bytes before execution, installed-tree tamper handling, safe paths, concurrent writers and running-version preservation; assess any required wrapper before counting deletion |
+| `resolver/Launch.fs`, `Child.fs`, `Run.fs`, CLI/report modules | Absolute tool shim may replace Resolver invocation/launch composition | Workspace/host/typed inputs, stdio, process lifetime and failures; no proof the whole directory can disappear |
+| `Distribution.fsx`, `distribution/Archive.fs`, producer `release/Build.fsx` and `Pin.fsx` | Tool packing replaces ZIP layout/normalization and current pin projection | Exact independently reviewed package identity, dependency closure and trusted provenance still need an owner |
+| `distribution/Contract.fs`, `Pin.fs`, release `Compare.fs`, `Handoff.fs`, `Evaluate.fs`, `Transaction.fs`, `Publish.fs` | ZIP-specific parser/comparison/forms could retire or change | Immutable publication, trusted candidate validation, cross-revision no-op, same-version rejection, publication ambiguity/recovery do not disappear |
+| release enrollment, toolchain/CI controls and associated tests | Adapt to the one selected packaging mechanism | Credential separation, trusted source/event revision, package tests, corruption/failure coverage and consumer activation remain |
+
 ### Recommendation and net cost
 
-**Retain**, including completion of trusted bootstrap. This is a decision
-recommendation for approval, not merely a repetition of “retain pending #46.”
-The current system already implements the unusual required content/no-op/safety
-contract. No worthwhile responsibility deletion has been demonstrated for
-“simplify.” Executable delivery retains most infrastructure while adding RID
-servicing. Tools offer credible larger long-term deletion, but satisfying the
-unchanged trust/content/no-op contract and replacing both consumer integrations
-has not been demonstrated to cost less than completing #49/#120.
+**Withhold final retain/simplify/replace approval.** The first draft recommended
+retention as the lowest demonstrated “maintenance/transition” cost. PR #61 review
+correctly challenged that combined claim: source inspection supports continuity
+and less migration exposure, but does not establish lower long-term complexity.
+Absence of a verified replacement saving is not proof that retention is cheaper.
 
-The comparison includes retention's extra release participant/artifact and
-consumer acquisition/repair integration. Those are bounded additions to existing
-owners, not free work. Replacement would add two package definitions, feed and
-trust operations, SDK installation dependency, release-policy adaptation,
-consumer migration and old-path retirement. These work units are not equal-effort
-estimates; no measured implementation-hours or replacement LOC are available.
-Given the invariant-preserving requirement, the lowest demonstrated incremental
-maintenance/transition cost is retention. This does **not** establish it as a
-universal optimum or prove the missing bootstrap cheaper empirically.
+Separate the two cost horizons:
+
+- **Transition:** retention keeps the existing producer/consumer launch contract,
+  but still needs a valid trusted Resolver publication path and Harness acquisition,
+  verification, repair and materialization. Replacement needs package definitions,
+  feed/trust configuration, release-policy adaptation, consumer migration and
+  retirement. No equivalent-effort or implementation-hours estimate exists;
+  #49 cannot be priced as just a config/roster addition.
+- **Steady state:** retention continues the measured custom distribution,
+  Resolver and release surface, plus bootstrap maintenance. Tools could transfer
+  package construction, acquisition, extraction, ordinary package-cache handling
+  and shim generation to maintained standard tooling. The retained exact-content,
+  installed-tree, release-no-op and consumer safety duties must be mapped to real
+  owners before counting net deletion. No prototype or equivalent replacement
+  implementation establishes that net cost yet. Raw existing LOC is exposure,
+  not a prediction of replacement LOC or ongoing engineering hours.
+
+No worthwhile Store-side “simplify” deletion has been demonstrated. Executable
+format alone leaves the installation lifecycle substantially intact. Tools remain
+the strongest replacement candidate, not a selected replacement. Continue the
+existing mechanism operationally while resolving this evidence gap; do not treat
+that safety default as the final simplest-architecture verdict.
+
+The source investigation now establishes a technically plausible retention path,
+but also expands its known transition surface to shared schema/CI and producer
+version changes. It does not settle which option has lower steady-state cost.
+**Recommended next decision: approve only the single offline tool experiment
+specified below, not retention implementation.** Use its actual wrapper/packaging
+inventory to decide retain or replace; choose simplify only if it demonstrates a
+worthwhile removable responsibility within the existing mechanism. No experiment
+has been approved or performed.
 
 Future non-.NET producers need trusted immutable artifacts, exact selection and
 reliable processes, not necessarily this .NET launch descriptor. Telegram already
@@ -123,29 +207,46 @@ generic language adapters. Revisit delivery only for an actual producer need.
 
 ## Ordered implementation plan — approval required
 
-Each row names the intended owner and bounded file scope. No row below has been
-implemented. Exact artifact bytes, checksums and versions must come from an actual
-verified release, never invented in this document.
+The next action is the separately approved experiment below. Steps 2–6 are a
+**conditional retention plan**, not instructions to implement before the decision.
+No row has been implemented. Exact artifact bytes, checksums and versions must
+come from an actual verified release, never invented in this document.
 
-1. **Approve the selection and contract (Store #46).** Approve retention with
-   archive/member content pins, trusted source, revision-only no-op behavior,
-   fail-closed admission, one delivery path and no automatic producer-cache GC
-   unchanged. Accept that delivery remains incomplete until steps 2–5. This PR
-   changes only `docs/Distribution.md`; it does not close the dependent issues.
-2. **Publish the actual Resolver (Store #49).** Extend the existing release owner:
-   `infrastructure/resolver/Resolver.fsproj`, proposed
-   `infrastructure/resolver/release/Config.json`,
-   `infrastructure/release/Participants.json`, `.github/workflows/release.yml`,
-   `infrastructure/resolver/README.md`, and `docs/release/Requirements.md`.
-   Use existing release policy/transaction/verification rather than a second
-   publisher. Before implementation, confirm the roster can admit this executable
-   without pretending it is an MCP producer; review `Policy.fs`, `Compare.fs` and
-   `Evaluate.fs` under `infrastructure/release/` and request an amended file plan
-   if their contract needs changing. Publish the complete runnable dependency
-   closure (including FSharp.Core when required), source revision and immutable
-   digest identity. Extend focused release/resolver tests only for the added
-   participant and invalid/missing closure. Do not make Resolver install itself
-   or bootstrap recursively through an untrusted Resolver.
+1. **Finish the selection gate (Store #46).** Review the bootstrap findings and
+   approve/reject the one experiment. Compare observed added wrapper/packaging
+   work against the conditional deletion inventory. Then select retain, simplify
+   or replace explicitly; do not equate migration risk with maintenance cost.
+   Preserve content pins, source trust, no-op policy, fail-closed admission and
+   one delivery path unless an explicit contract amendment is authorized. This
+   documentation PR does not close #46 or the dependent issues.
+2. **If retention is selected, publish Resolver (Store #49).** Approve the
+   following coordinated change surface before implementation. All paths in this
+   table are Store-relative; parenthesized directory prefixes apply to every file
+   in that cell.
+
+   | Files | Required responsibility/change |
+   | --- | --- |
+   | `infrastructure/distribution/Contract.fs`, its README and contract tests | Advance the strict manifest schema for an explicit CLI-only publication descriptor; retain typed MCP descriptors and integrity/path constraints. No legacy reader or generic command grammar. |
+   | (`infrastructure/release/`) `Policy.fs`, `Update.ps1`, `Compare.fs`; `infrastructure/Distribution.fsx` | Add policy-owned kind and distinct argument validation in both readers; derive both trusted comparison and emitted manifest from it. Preserve strict fields and the release no-op policy. |
+   | `dotnet/release/Config.json`, `workflow/release/Config.json` and their `Build.fsx` entrypoints | Declare unchanged MCP launch semantics under the new policy/schema. Bump producer release versions for changed manifest bytes; do not overwrite old assets or label schema changes revision-only no-ops. |
+   | (`infrastructure/release/`) `Participants.json`, `Enrollment.fs`, `Roster.ps1` | Explicitly admit Resolver as a third release artifact, not as an MCP server; replace the exact-two participant restriction without introducing open-ended enrollment. |
+   | (`infrastructure/release/`) `Orchestration.fs`, `Update.ps1`; `.github/workflows/release.yml`, `.github/workflows/unix.yml` | Derive source roots from canonical config paths, as `Typecheck.ps1` already does; keep identity separate from nested filesystem location. Wire the actual Resolver candidate outputs/transfers and tests. |
+   | `infrastructure/release/Check.ps1` and release workflow | Extend pinned transfers, artifact-ID guards and graph/coherence checks together; preserve credential separation and data-only trusted publication. |
+   | Proposed `infrastructure/resolver/release/{Config.json,Build.fsx,Pin.fsx}`; `Resolver.fsproj` under resolver if needed; proposed `infrastructure/resolver/tests/distribution/Run.fsx` | Produce deterministic ZIP/metadata through the shared builder and publish transaction, verify exact dependency closure and exercise the packaged CLI. Generated output stays under Resolver's `dist/`, not a new root-level producer facade. |
+   | `infrastructure/resolver/Run.fs`, applicable `Report.fs` handling and resolver tests | Refuse CLI-only publications as MCP `run` targets before child execution, releasing leases on failure. Define any `resolve` snapshot effect explicitly rather than silently changing its contract. |
+   | (`infrastructure/release/tests/`) `Policy.fs`, `Enrollment.fs`, `Coherence.fs`, `Contract.fs` and affected fixture/preparation/handoff helpers | Cover CLI/MCP distinction, nested roots, candidate transfers, immutable publish/no-op/bump-fail and invalid/missing packaged closure. Complete a call-site audit; this table is a mandatory responsibility inventory, not an exhaustive compiled patch. |
+   | `AGENTS.md`, root README, three infrastructure READMEs, `docs/release/Requirements.md` | Reconcile release-artifact versus MCP ownership, dependency closure, trusted bootstrap contract and evidence/acceptance matrix. |
+
+   The pin schema is not shown to need a change merely for another component:
+   existing archive/manifest digests and revision can identify it. The manifest
+   schema **does** change: current `Contract.fs:14,262-263` accepts schema 2 only.
+   Newly released producer payloads, the new Resolver and consumer selections
+   therefore need coordinated cutover; old assets remain immutable and the old
+   complete runtime stays usable until separately authorized activation. No
+   schema-2 compatibility reader or dual supported distribution is proposed.
+   Verify the new producer releases before selecting them with the new Resolver.
+   Store supplies the artifact and published trust contract; Harness verifies it
+   before first execution. Do not execute Resolver to establish its own trust.
 3. **Consume one trusted selection (Harness #120, after #49).** Review/update
    `core/mcp/` with one proposed `pin.json` for Resolver, distinct from producer
    release metadata and the existing producer pins. Integrate acquisition and
@@ -153,9 +254,10 @@ verified release, never invented in this document.
    `bootstrap/Bootstrap.ps1`, `agents/Installer.fsx`,
    `infrastructure/Update.fsx`, `infrastructure/Validator.fsx`, and `Assets.fsx`
    under `integrations/opencode/` as required by their existing ownership.
-   Reuse their install/update/receipt/recovery transaction; specify the minimal
-   trusted pre-execution verifier and owned artifact destination in #120's exact
-   approval plan. Do not copy Store code, add a second package resolver, or defer
+   Reuse their install/update/receipt/recovery transaction; acquisition and the
+   pre-execution closure verifier are still new obligations, not guarantees of
+   that transaction. Specify them and the owned artifact destination in #120's
+   exact approval plan. Do not copy Store code, add a second package resolver, or defer
    verification until after running downloaded code. Keep producer payload cache
    ownership in Resolver. Extend `tests/integrations/opencode/bootstrap/BootstrapTests.fsx`
    and `tests/integrations/opencode/Delivery.fsx` only for enrollment, rejection
@@ -193,7 +295,10 @@ requires its own value demonstration and descriptor-binding/rejection-timing pla
 Performed for this proposal: GitHub issue/main identity reads; initial local Store
 Git state check; accepted-report reconciliation; independent targeted source
 inspection of producer format, release policy, pins, bootstrap, admission,
-concurrency and stdio. No build, test suite, prototype, package publication,
+concurrency and stdio; targeted F# architect follow-up of actual Resolver release
+admission, policy, CLI, preparation and CI assumptions and existing dependency
+metadata. Its output identifies required responsibility changes, not an exhaustive
+compile-verified patch. No build, test suite, prototype, package publication,
 artifact download, clean installation, MCP call or runtime cutover was performed.
 Prior Sandbox PATH observations belong to the accepted audits and #60, not proof
 of any distribution property tested here.
@@ -215,13 +320,46 @@ consumer run rather than a speculative matrix:
   preserve running versions and user configuration. Record actual commands,
   release/pin identities and results, distinguishing static checks from execution.
 
-Outstanding approval: retain versus a different selection; the bounded #49/#120
-file plans and bootstrap trust/placement details; separate publication and runtime
-activation consent. No prototype is necessary to recommend retention. If the owner
-wants empirical evidence before rejecting tools, first approve **one isolated,
-nonpublished, one-producer tool-path experiment**: controlled source/config and
-exact digest/version, clean cache, concurrent install, absolute-shim MCP initialize
-and tool call, cancellation, corrupt/missing failure and owned-temp cleanup. Its
-acceptance is unchanged trust/content/no-op guarantees plus a concrete inventory
-of code deleted versus SDK/feed/trust/wrapper work added. No production second path
-or broad experiment suite is authorized by this proposal.
+### One proposed experiment — separate approval required
+
+**Question:** for one actual producer (Dotnet), does standard tool installation
+remove enough custom install/launch work after preserving exact-content and
+installed-tree verification, or does the required wrapper recreate that work?
+
+Use a disposable copy and one local-only, nonpublished tool package, isolated SDK
+home, tool path and package cache, with an explicit local-only NuGet config and a
+reviewed package digest/version. Do not contact a feed, obtain credentials,
+publish packages, edit the production projects or install into an active runtime.
+If required SDK/package inputs are unavailable locally, stop and request exact
+download approval; do not silently expand this experiment. Suppress first-run
+PATH registration in the disposable process; this is not a #60 fix or PATH probe.
+
+Acceptance/evidence, bounded to this one producer and path:
+
+1. Record the actual packaging changes, tool/SDK/runtime prerequisite and complete
+   package identity. Install the exact verified package into a clean isolated
+   tool path. Invoke its absolute shim with the real workspace/typed inputs;
+   observe MCP initialization, one representative tool call and cancellation/exit
+   behavior without stdout pollution.
+2. Exercise one concurrent install/use and one corrupted installed-payload
+   refusal/recovery scenario. Record any bespoke verification, locking, lifetime
+   or launch wrapper actually needed. Missing package must fail without network
+   or alternate-source fallback. No destructive cleanup outside owned scratch.
+3. Deliver a file/responsibility deletion-versus-addition inventory for full
+   producer replacement, separating runtime plumbing from release policy. Map
+   every retained trust/content/no-op obligation to its concrete owner; an
+   unmapped obligation fails equivalence rather than becoming an assumed saving.
+   Compare that actual wrapper/packaging work to the conditional retention plan.
+
+This experiment does not prove public-feed provenance, immutable hosted package
+publication, Workflow behavior or a production cutover. Retain the no-op release
+owner unless an equivalent is separately demonstrated; a successful tool install
+is not permission to delete `Compare.fs`. Stop after the evidence report, remove
+only authorized owned scratch, and make the architectural decision before any
+production implementation. No permanent second distribution path is created.
+
+Outstanding decisions: experiment approval; final retain/simplify/replace choice;
+if retaining, CLI descriptor/schema and third-participant approval plus bootstrap
+trust/placement and coordinated producer version changes; if replacing, equivalent
+release/trust ownership and producer-first plan. Documentation publication and
+runtime activation each retain their separate consent gates.
