@@ -115,6 +115,12 @@ is another prerequisite, not part of this closure.
 
 ## Approved Windows experiment — measured results
 
+**Evidence status:** agent-executed and agent-reported, with local record checking
+by another agent, not independently reproduced execution. The committed
+[sanitized evidence appendix](evidence/Tool.md) exposes representative primary-result
+excerpts, commands, hashes/exit statuses and their limitations for PR review;
+the ignored private artifacts alone are not review-accessible evidence.
+
 The user subsequently approved one local, nonpublished Mcp.Dotnet experiment.
 One package was created; interrupted test-client work resumed against that same
 package, not additional producer prototypes. Source baseline was PR commit
@@ -137,8 +143,9 @@ were not modified.
   provenance**, using `--no-build`. It proves packaging/runtime feasibility of
   those exact bytes, not a fresh build, reproducibility or current-source parity.
 - Disposable root `R = .tasks/GHI-46/temp/prototype-ghi46-20261104-01`;
-  test root `T = R/test-owned`. CLI home, HOME/USERPROFILE/APPDATA, NuGet package,
-  HTTP, scratch/fallback caches and TEMP/TMP were isolated. Explicit NuGet
+  test root `T = R/test-owned`. Packaging recorded isolated CLI home, NuGet
+  packages/HTTP cache and TEMP/TMP. The test launcher additionally isolated
+  HOME/USERPROFILE/APPDATA/LOCALAPPDATA and scratch/fallback/plugin paths. Explicit NuGet
   configurations cleared sources and used only the copied local package feeds.
   SDK processes set `DOTNET_ADD_GLOBAL_TOOLS_TO_PATH=false`, telemetry opt-out,
   first-use/no-logo and workload notification suppression before execution.
@@ -209,18 +216,19 @@ after assertion or unsuppressed #60 probe was performed. Final path-filtered
 process snapshots reported zero owned processes; unrelated build servers were
 left untouched. This is not independent proof of cancellation-time child release.
 
-Evidence retained locally under `.tasks/GHI-46/docs/experiment/` includes
+The public [evidence appendix](evidence/Tool.md) is the review-accessible record.
+Additional evidence retained locally under `.tasks/GHI-46/docs/experiment/` includes
 `prototype.md`, `tester-report.md`, reproducible client/launcher scripts, the
 per-scenario JSON and process snapshots. The exact nupkg was copied byte-for-byte
 to `artifacts/` with its SHA-256 rechecked for independent review; it is an inert
 research artifact, not a supported installation path. These ignored local task
 artifacts are not part of this documentation-only PR publication.
-At evidence review, disposable scratch was retained: the dedicated Workflow
-cleanup operation refused the open task (“cleanup requires a complete or aborted
-task”). No shell deletion bypass was attempted. Authorized research closeout must
-remove only this inventoried owned tree through that tool and record its result
-in Task Runtime; architecture implementation remains a separate approval
-regardless of research completion.
+Dedicated Workflow cleanup initially refused the open research task. After
+authorized research closure it removed the inventoried disposable tree; a later
+existence check confirmed that tree absent, and the result was recorded in Task
+Runtime (E15). No shell-deletion bypass was used. Only the private evidence and
+inert research package were retained. This documentation follow-up uses those
+records, not a rerun; architecture implementation remains separately gated.
 
 ## Alternatives: complete lifecycle
 
