@@ -1,2 +1,0 @@
-compile: pending
-test: pending
