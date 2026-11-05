@@ -4,13 +4,13 @@
 **Scope:** requirements and decision method only; no product or technology selection.  
 **Repository snapshot:** [`masterlifting/mcp-store` at `3c71c37ec611032752455dc974d94560badb172a`](https://github.com/masterlifting/mcp-store/tree/3c71c37ec611032752455dc974d94560badb172a).  
 **Public baseline:** [`../requirements/Overview.md`](../requirements/Overview.md).  
-**Completion status:** **provisional**. Public issue and repository requirements were reconciled; the private 50-question interview and its subsequent private decisions were **not accessible** for independent verification. Therefore the baseline cannot truthfully be called owner-confirmed or the full R-01 acceptance satisfied without that separate private review.
+**Completion status:** supplied private requirements v1.1 reconciled against the public issue/repository baseline. The interview contains 50/50 numbered answers and post-interview clarifications; no private source content has been committed. **Owner confirmation that v1.1 is the latest approved revision and review of remaining open policies are still pending.**
 
 ## 1. Research question and result
 
 **Question:** Which constraints are binding for the first version, which are hypotheses, and what evidence permits a defensible technology recommendation?
 
-**Result:** Separate (a) binding research-process invariants, (b) **candidate** first-version gates, (c) measurable evaluation criteria, and (d) open decisions. This avoids treating a research issue or an agent's interpretation as proof of a product requirement.
+**Result:** Separate (a) binding research-process invariants, (b) first-version gates **documented by the supplied private v1.1 record**, (c) measurable evaluation criteria, and (d) open decisions. This avoids treating an issue alone or a researcher's interpretation as proof of a product requirement.
 
 The accompanying public [requirements register](../requirements/Overview.md#requirements-register) introduces K-IDs to make downstream conclusions traceable. It defines the testable meanings of deterministic, offline, delete and open source, the assumed local trust group, and the external-model disclosure boundary.
 
@@ -26,7 +26,7 @@ The accompanying public [requirements register](../requirements/Overview.md#requ
 | E-04 | The [Open Source Definition](https://opensource.org/osd) requires freedoms beyond mere source visibility; [OSI's approved license register](https://opensource.org/licenses) provides a reviewable license criterion; the [SPDX license list](https://spdx.org/licenses/) records identifiers and OSI status. | Primary standards/project documentation, checked 2026-11-05. Actual transitive licensing requires candidate-specific investigation. |
 | E-05 | [OWASP LLM01:2025](https://genai.owasp.org/llmrisk/llm01-prompt-injection/) identifies indirect prompt-injection risk in retrieved content and tools; [OWASP LLM02:2025](https://genai.owasp.org/llmrisk/llm022025-sensitive-information-disclosure/) identifies disclosure through model context/outputs. | Published OWASP risk taxonomy consulted on 2026-11-05; it is risk guidance, **not** a validation of this system's security controls. |
 | E-06 | [UK ICO erasure guidance](https://ico.org.uk/for-organisations/uk-gdpr-guidance-and-resources/individual-rights/individual-rights/right-to-erasure/) distinguishes live-system removal from backup persistence and describes `beyond use` during scheduled replacement. | A practical reference illustrating backup-erasure tension, **not** a jurisdictional/legal conclusion for this private project. |
-| E-07 | No original 50-question interview or authoritative private reconciliation was available in accessible public repo material or provided project files. | **Evidence gap.** Do not invent answers, derive them from user biography or publish private source excerpts. |
+| E-07 | The operator supplied a private requirements record marked **v1.1 / 2026-11-05**, including all 50 numbered answers, amendments and subsequent clarified decisions; the companion private brief states the same effective revision. | Reviewed locally as private inputs in this research session. **Neither raw document nor personal source excerpts are included in this public PR.** Owner confirmation that no later revision exists remains open. |
 
 No synthetic runtime experiment was necessary to classify requirements; **none was performed**. Consequently there are no measured search, privacy, sync, latency, disk or integration results in R-01. Later issues must not attribute such measurements to this report.
 
@@ -41,26 +41,28 @@ No synthetic runtime experiment was necessary to classify requirements; **none w
 
 These are **currently applicable to the research work**, even before private product-requirement reconciliation.
 
-### 3.2 Candidate first-version gates
+### 3.2 Documented first-version gates (supplied v1.1)
 
-The public issue network strongly suggests the following gates but does **not** establish the complete original private approval record. They remain explicitly **pending owner confirmation** (K-04–K-11):
+The supplied private revision explicitly supports these gates (K-04–K-12, K-16, K-20–K-23). They are not derived solely from the issue network. The owner must still confirm that this is the most recent effective revision:
 
-1. Local single-operator use with a specified trusted local agent group; no mandatory multi-tenant or adversarial per-agent isolation.
-2. Core knowledge access and search with the network disconnected after provisioning.
+1. Single-instance operation for one trusted local agent group, without guaranteed per-agent isolation or identity checks.
+2. Core local knowledge access, search and changes with the network disconnected after provisioning; no embeddings/vector search or LLM inference inside the knowledge engine.
 3. Deterministic knowledge admission, state changes and retrieval for a fixed, versioned snapshot; an LLM may propose but cannot unilaterally establish authoritative truth or permissions.
 4. Read-only **external** source integration, with separate controlled mutation of **local** accepted knowledge.
-5. Provenance, revision and conflict semantics that can explain why a claim appears.
+5. Provenance, full fact revision history, source-loss status and conflict semantics that can explain why a claim appears, without full computational replay auditing.
 6. Defined user deletion and backup limitations; do not promise impossible retroactive erasure from already disclosed context.
 7. OSS core/essential runtime components with no mandatory proprietary online processing for offline knowledge operations.
-8. Explicit local-to-remote context disclosure boundaries with minimal authorized outbound context.
+8. No unapproved outbound disclosure of raw sensitive values; explicit local-to-remote context boundary and research into minimal useful masking/projection/approval.
+9. Working first-version agent integration, multiple useful read-only sources, deterministic quality-tested multilingual search and paginated context.
+10. Portable single-instance core, Docker Compose target, local automatic backups, open-format export and user-triggered software updates/maintenance (independent of automated source synchronization).
 
-**Do not use these as silent hard rejection rules for vendor candidates until owner review.** For interim research, mark violations as `candidate-gate blocker` and record the evidence rather than burying the conflict.
+Treat these as **supplied-source v1 gates**, and record violations as `v1-gate conflict` with supporting evidence; do not invent exemptions. Remaining ambiguity or unverified latest-version status must be raised for owner resolution, not silently converted to vendor acceptance.
 
 ### 3.3 Evaluation criteria, not hidden mandates
 
 - Search quality and explainability for Russian and English, entities, relations, time, aliases and conflicting claims ([#70](https://github.com/masterlifting/mcp-store/issues/70), [#71](https://github.com/masterlifting/mcp-store/issues/71)).
-- Connector availability, incremental-sync semantics, recovery and initial 2–3 high-value sources ([#66](https://github.com/masterlifting/mcp-store/issues/66), [#67](https://github.com/masterlifting/mcp-store/issues/67)).
-- Local operational burden, exportability, safe backup/restore, portability and maintainability ([#64](https://github.com/masterlifting/mcp-store/issues/64), [#69](https://github.com/masterlifting/mcp-store/issues/69), [#74](https://github.com/masterlifting/mcp-store/issues/74)).
+- Connector availability, incremental-sync semantics, recovery and *which* several high-value sources form the first release ([#66](https://github.com/masterlifting/mcp-store/issues/66), [#67](https://github.com/masterlifting/mcp-store/issues/67)).
+- Local operational burden, safe backup/restore, portability and maintainability within the documented single-instance, exportable and Docker Compose-capable boundary ([#64](https://github.com/masterlifting/mcp-store/issues/64), [#69](https://github.com/masterlifting/mcp-store/issues/69), [#74](https://github.com/masterlifting/mcp-store/issues/74)).
 - Preference for F# in **new owned code** and C# for justified integrations; existing OSS language does not determine its fitness. Z#/Rust is a feasibility question, not a prerequisite ([#74](https://github.com/masterlifting/mcp-store/issues/74)).
 - Context-size control, pagination and source-grounded result contracts. Protocol remains open ([#72](https://github.com/masterlifting/mcp-store/issues/72), [#73](https://github.com/masterlifting/mcp-store/issues/73)).
 
@@ -105,7 +107,7 @@ Every later research PR should use this order.
 1. **Map requirement and authority.** Name K-IDs and classify as confirmed invariant, candidate gate, criterion or open decision. Note any conflict with a current user decision; do not suppress uncertainty.
 2. **Define the compared capability.** Product vs reusable library vs adapter vs architectural reference is not an interchangeable unit of comparison. Include no-change/reuse and at least one plausible alternative.
 3. **Collect direct primary evidence.** Official documentation/specification, upstream source at immutable revision, release date/version, license/maintainer status and actual runtime requirements. Verify product edition and optional/mandatory cloud services. For a negative claim, identify the missing contract in the checked version, not just the absence of a marketing feature.
-4. **Evaluate gates separately from trade-offs.** A **confirmed** gate violation is non-compensable by speed, stars or convenience. A **candidate** gate violation is recorded for owner decision, not silently converted into a rejection. Unknowns are not passes.
+4. **Evaluate gates separately from trade-offs.** A violation of a **documented v1 gate** is non-compensable by speed, stars or convenience; record it and obtain owner resolution before excluding an approach by policy exception. An open decision remains open; unknowns are not passes.
 5. **Compare on equivalent synthetic cases.** Use the same fixed corpus, exact queries, source permissions, failure injection and benchmark definitions where applicable. Report the host, versions, sample size, measurement procedure and limitations. Do not invent thresholds or infer p95 from a single query.
 6. **Compare marginal costs.** Assess operational processes, necessary adapters, source sync/restore, licensing, implementation/maintenance, migration/exit and the code that can actually be **removed** by reuse. Prefer an existing solution when it satisfies the required behavior with lower total ownership cost; a custom core needs an evidenced gap, not language preference.
 7. **Record outcome.** Choose `suitable`, `conditionally suitable`, `unsuitable` or `undetermined`; state sources, date, why alternatives were not preferred, assumptions, residual risks and a reproducible test or unanswered question that could change the outcome. **Only R-14 plus explicit owner approval** can authorize a final architectural direction.
@@ -139,7 +141,7 @@ Attach candidate versions and evidence dates to every claim likely to change wit
 
 | ID | Unresolved matter | Why it matters | Routed research |
 | --- | --- | --- | --- |
-| U-01 | Private interview and subsequent decisions could revise candidate gates; current source was inaccessible. | **Blocks owner-confirmed requirements baseline**; no public reconstruction is acceptable. | Owner-private reconciliation before R-01 acceptance. |
+| U-01 | Private revision v1.1 was supplied and reconciled. A later effective amendment, if any, has not been ruled out by the owner. | **Blocks declaring this the final owner-confirmed current baseline.** No private source text may be published. | Owner confirmation of currency and review of any later private changes. |
 | U-02 | Exact membership/authority of local agent group and whether remote clients count as trusted. | Determines whether extra process/user isolation is required. | [R-07](https://github.com/masterlifting/mcp-store/issues/68), [R-12](https://github.com/masterlifting/mcp-store/issues/73) |
 | U-03 | User approval and data class policy for sending retrieved facts to remote models. | Defines where enforceable minimization ends. | [R-07](https://github.com/masterlifting/mcp-store/issues/68) |
 | U-04 | Required v1 source types and their authorization/sync mechanics. | Defines integration viability, not just connector availability. | [R-05](https://github.com/masterlifting/mcp-store/issues/66), [R-06](https://github.com/masterlifting/mcp-store/issues/67) |
@@ -164,14 +166,14 @@ The numbering R-15/R-14 is historical issue naming, **not** permission to synthe
 
 ## 9. Recommendation and exit criteria
 
-**Recommendation:** use [`Overview.md`](../requirements/Overview.md) as a **provisional public comparison contract**, not as a secretly ratified user interview. Perform the private interview reconciliation outside GitHub; publish only revised K-ID classifications and sanitized wording, and obtain owner review. Then conduct product-first and component-first research in parallel under the non-compensable gate/evidence rules above.
+**Recommendation:** use [`Overview.md`](../requirements/Overview.md) as the **sanitized, source-reconciled public comparison contract** based on supplied private v1.1, pending owner confirmation that no newer decisions supersede it. Keep the original private material outside GitHub, and publish only sanitized K-ID changes. Once reviewed, conduct product-first and component-first research in parallel under the gate/evidence rules above.
 
 **R-01 acceptance is met only when:**
 
-- All candidate K-IDs are either confirmed, explicitly amended/deferred, or visibly left open with a responsible decision owner.
-- The private 50-question input has been reconciled without publishing personal material.
+- All documented K-IDs are traceable to the supplied effective private requirements revision or an explicit research issue, with unresolved details visibly marked open and a responsible decision owner.
+- The supplied private 50-question input and post-interview changes have been reconciled without publishing personal material; the owner has confirmed whether a later version supersedes it.
 - Definitions and local/remote trust boundaries are approved as operationally testable.
 - Downstream technology comparisons can cite stable K-IDs, evidence grades and issue dependencies without inventing hidden architectural commitments.
 - The documentation-only PR has been reviewed; no prototypes or product changes are merged.
 
-**Current verdict:** ready for review and private reconciliation, **not ready to close R-01 as fully accepted**. No extra implementation or speculative follow-up issues are justified by this requirements pass.
+**Current verdict:** private input reconciliation complete **for the supplied v1.1 record**. The report and baseline are ready for owner review, but **do not close R-01 until current-version sign-off and outstanding policy decisions are accepted**. No implementation or speculative follow-up issues are justified.
