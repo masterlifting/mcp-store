@@ -36,7 +36,7 @@ No synthetic runtime experiment was necessary to classify requirements; **none w
 
 - **Process:** research-only documentation PRs; no product code, new MCP producer, Resolver/CI/Harness changes, prototype merger or pre-approved implementation plan ([#62](https://github.com/masterlifting/mcp-store/issues/62), [#76](https://github.com/masterlifting/mcp-store/issues/76)).
 - **Public boundary:** no private interview content, personal source records, credentials, session tokens, real exports or non-synthetic examples in the public repository.
-- **Decision neutrality:** MCP, database, graph, vector/lexical search, UI and hosting are candidates, not prior commitments.
+- **Decision neutrality:** MCP, database, relational/RDF storage, lexical-search engine, UI technology and repository hosting are candidates, not prior commitments. The supplied v1.1 explicitly rules out vector/embedding retrieval in the knowledge engine.
 - **Honest evidence:** cite versioned/dated official specifications and actual source code; separate verified facts, measurements, inference and unknowns; do not silently promote hypotheses into requirements.
 
 These are **currently applicable to the research work**, even before private product-requirement reconciliation.
@@ -104,7 +104,7 @@ These definitions are used by the public baseline; R-04, R-07, R-08, R-09 and R-
 
 Every later research PR should use this order.
 
-1. **Map requirement and authority.** Name K-IDs and classify as confirmed invariant, candidate gate, criterion or open decision. Note any conflict with a current user decision; do not suppress uncertainty.
+1. **Map requirement and authority.** Name K-IDs and classify as research-process invariant, documented v1 gate, criterion or open decision. Note any conflict with a current user decision; do not suppress uncertainty.
 2. **Define the compared capability.** Product vs reusable library vs adapter vs architectural reference is not an interchangeable unit of comparison. Include no-change/reuse and at least one plausible alternative.
 3. **Collect direct primary evidence.** Official documentation/specification, upstream source at immutable revision, release date/version, license/maintainer status and actual runtime requirements. Verify product edition and optional/mandatory cloud services. For a negative claim, identify the missing contract in the checked version, not just the absence of a marketing feature.
 4. **Evaluate gates separately from trade-offs.** A violation of a **documented v1 gate** is non-compensable by speed, stars or convenience; record it and obtain owner resolution before excluding an approach by policy exception. An open decision remains open; unknowns are not passes.
@@ -120,7 +120,7 @@ Every later research PR should use this order.
 | S — source-verified | Actual behavior/implementation boundary of a known revision. | Reviewed API/SDK source or release manifest. | Code inspection alone is not a performance measurement. |
 | X — experiment | Reproducible behavior under recorded synthetic conditions. | Fixed multilingual queries, disconnected-network test, retry/delete matrix. | Scope conclusions to actual tested environment. |
 | I — inference | Reasoned interpretation or recommended trade-off. | Lower anticipated maintenance if an existing SDK is reused. | Must link evidence and state uncertainty. |
-| U — unknown | Missing, contradictory or inaccessible evidence. | Private interview decision not supplied; vendor behavior not tested. | **Not** a passed gate or proven absence of feature. |
+| U — unknown | Missing, contradictory or inaccessible evidence. | Later private amendment not supplied; vendor behavior not tested. | **Not** a passed gate or proven absence of feature. |
 
 Attach candidate versions and evidence dates to every claim likely to change with releases. For benchmarks or vulnerability cases, keep source fixtures synthetic. When a standard is versioned, cite that **specific edition**; do not silently assume the latest.
 
