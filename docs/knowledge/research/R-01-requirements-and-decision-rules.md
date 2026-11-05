@@ -38,6 +38,7 @@ No synthetic runtime experiment was necessary to classify requirements; **none w
 - **Public boundary:** no private interview content, personal source records, credentials, session tokens, real exports or non-synthetic examples in the public repository.
 - **Decision neutrality:** MCP, database, relational/RDF storage, lexical-search engine, UI technology and repository hosting are candidates, not prior commitments. The supplied v1.1 explicitly rules out vector/embedding retrieval in the knowledge engine.
 - **Honest evidence:** cite versioned/dated official specifications and actual source code; separate verified facts, measurements, inference and unknowns; do not silently promote hypotheses into requirements.
+- **Reduction-first quality (K-24):** simplify existing requirements, documents and code before adding abstractions, duplication or boilerplate; retain necessary correctness, coverage and safety.
 
 These are **currently applicable to the research work**, even before private product-requirement reconciliation.
 
@@ -111,6 +112,7 @@ Every later research PR should use this order.
 5. **Compare on equivalent synthetic cases.** Use the same fixed corpus, exact queries, source permissions, failure injection and benchmark definitions where applicable. Report the host, versions, sample size, measurement procedure and limitations. Do not invent thresholds or infer p95 from a single query.
 6. **Compare marginal costs.** Assess operational processes, necessary adapters, source sync/restore, licensing, implementation/maintenance, migration/exit and the code that can actually be **removed** by reuse. Prefer an existing solution when it satisfies the required behavior with lower total ownership cost; a custom core needs an evidenced gap, not language preference.
 7. **Record outcome.** Choose `suitable`, `conditionally suitable`, `unsuitable` or `undetermined`; state sources, date, why alternatives were not preferred, assumptions, residual risks and a reproducible test or unanswered question that could change the outcome. **Only R-14 plus explicit owner approval** can authorize a final architectural direction.
+8. **Review and reduce (K-24).** Before submitting, inspect both task requirements and deliverables for **unambiguity, idiomaticity, structure, logical sequence, verifiability, brevity, information density, non-duplication and LLM readability**. Remove redundant text, code and abstractions where safe; justify any net increase by necessary behavior or evidence. Do not sacrifice correctness, explicit contracts, security or meaningful tests to satisfy a line-count target.
 
 ### Evidence grades
 
@@ -174,6 +176,7 @@ The numbering R-15/R-14 is historical issue naming, **not** permission to synthe
 - The supplied private 50-question input and post-interview changes have been reconciled without publishing personal material; the owner has confirmed whether a later version supersedes it.
 - Definitions and local/remote trust boundaries are approved as operationally testable.
 - Downstream technology comparisons can cite stable K-IDs, evidence grades and issue dependencies without inventing hidden architectural commitments.
+- Agent research outputs and their requirements pass the K-24 reduction-first quality review without loss of verifiability.
 - The documentation-only PR has been reviewed; no prototypes or product changes are merged.
 
 **Current verdict:** private input reconciliation complete **for the supplied v1.1 record**. The report and baseline are ready for owner review, but **do not close R-01 until current-version sign-off and outstanding policy decisions are accepted**. No implementation or speculative follow-up issues are justified.
