@@ -34,6 +34,9 @@ class IteratingClient:
     async def get_messages(self, entity, **kwargs):
         return self.messages_by_id.get(kwargs.get("ids"))
 
+    async def get_me(self):
+        return SimpleNamespace(id=42)
+
     async def iter_messages(self, entity, **kwargs):
         self.iter_messages_calls.append((entity, kwargs))
         for message in self.iterated_messages:
@@ -121,6 +124,12 @@ def _message(message_id, text, reply_to=None, action=None):
         forwards=None,
         out=False,
     )
+
+
+def _topic_message(message_id, text, topic_id):
+    return _message(message_id, text, reply_to=SimpleNamespace(
+        forum_topic=True, reply_to_msg_id=topic_id, reply_to_top_id=topic_id
+    ))
 
 
 class TopicCreateAction:
@@ -348,8 +357,8 @@ async def test_get_topic_messages_in_range_scopes_iterator_and_results_to_topic(
     through_message_id = 219833
     client = IteratingClient(
         [
-            _message(219831, "Included"),
-            _message(219832, "Included upper"),
+            _topic_message(219831, "Included", topic_id),
+            _topic_message(219832, "Included upper", topic_id),
         ],
         {topic_id: _message(topic_id, "Topic root", action=TopicCreateAction())},
     )
@@ -382,8 +391,8 @@ async def test_get_topic_messages_in_range_cannot_admit_cross_topic_server_resul
     topic_id = 33429
     client = ServerScopedTopicClient(
         {
-            topic_id: [_message(219833, "Included")],
-            99999: [_message(219833, "Foreign topic message")],
+            topic_id: [_topic_message(219833, "Included", topic_id)],
+            99999: [_topic_message(219833, "Foreign topic message", 99999)],
         },
         {topic_id: _message(topic_id, "Topic root", action=TopicCreateAction())},
     )
