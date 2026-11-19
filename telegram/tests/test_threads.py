@@ -399,6 +399,17 @@ async def test_get_topic_messages_in_range_scopes_iterator_and_results_to_topic(
     assert payload["retrieved_count"] == 2
     assert payload["range_complete"] is True
 
+    fingerprint = payload["records_sha256"]
+    client.iterated_messages[0].views = 20
+    client.iterated_messages[0].replies = SimpleNamespace(replies=5)
+    refreshed = json.loads(await messages.get_topic_messages_in_range(
+        chat_id=-1001528034935, topic_id=topic_id,
+        after_message_id=219830, through_message_id=through_message_id,
+    ))
+    assert refreshed["results"][0]["engagement"]["views"] == 20
+    assert refreshed["results"][0]["comments"] == 5
+    assert refreshed["records_sha256"] == fingerprint
+
 
 @pytest.mark.asyncio
 async def test_get_topic_messages_in_range_cannot_admit_cross_topic_server_results(monkeypatch):
