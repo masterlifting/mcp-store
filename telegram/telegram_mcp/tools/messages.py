@@ -115,7 +115,10 @@ def _review_record(msg, topic_id: Optional[int] = None) -> dict:
     if topic_id is not None:
         record["topic_id"] = topic_id
     raw_text = getattr(msg, "message", None) or ""
-    record["text_truncated"] = len(raw_text) > 4096
+    # Keep range records small; complete text is retrieved on demand in chunks.
+    if raw_text:
+        record["text"] = sanitize_user_content(raw_text, max_length=1024)
+    record["text_truncated"] = len(raw_text) > 1024
     if getattr(msg, "rich_message", None) is not None:
         record["content_unsupported"] = True
 
