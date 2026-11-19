@@ -95,6 +95,20 @@ def _link_urls(msg):
     return out
 
 
+def _review_fingerprint(records) -> str:
+    """Bind review-relevant records without volatile engagement/display fields."""
+    stable = [
+        {key: value for key, value in record.items()
+         if key not in {"engagement", "comments", "pinned", "sender", "username"}}
+        for record in records
+    ]
+    canonical = json.dumps(
+        stable, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        default=json_serializer,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
 def _review_record(msg, topic_id: Optional[int] = None) -> dict:
     """Inventory content for bounded chat or topic review without media bytes."""
     record = message_to_dict(msg)
@@ -540,17 +554,7 @@ async def get_messages_in_range(
         ):
             if after_message_id < msg.id <= through_message_id:
                 records.append(_review_record(msg))
-        # Ignore volatile counters and mutable profile/pin display fields.
-        # The returned records remain unchanged; only the resume proof is stable.
-        stable_records = [
-            {key: value for key, value in record.items()
-             if key not in {"engagement", "comments", "pinned", "sender", "username"}}
-            for record in records
-        ]
-        canonical_records = json.dumps(
-            stable_records, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
-            default=json_serializer,
-        ).encode("utf-8")
+
         return format_tool_result(
             records,
             metadata={
@@ -560,7 +564,7 @@ async def get_messages_in_range(
                 "through_message_id": through_message_id,
                 "retrieved_count": len(records),
                 "range_complete": True,
-                "records_sha256": hashlib.sha256(canonical_records).hexdigest(),
+                "records_sha256": _review_fingerprint(records),
             },
         )
     except Exception as e:
@@ -630,10 +634,7 @@ async def get_topic_messages_in_range(
             if not (topic_root or topic_reply):
                 return "Topic range iterator returned unverified topic membership."
             records.append(_review_record(msg, topic_id))
-        canonical_records = json.dumps(
-            records, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
-            default=json_serializer,
-        ).encode("utf-8")
+
         return format_tool_result(
             records,
             metadata={
@@ -644,7 +645,7 @@ async def get_topic_messages_in_range(
                 "through_message_id": through_message_id,
                 "retrieved_count": len(records),
                 "range_complete": True,
-                "records_sha256": hashlib.sha256(canonical_records).hexdigest(),
+                "records_sha256": _review_fingerprint(records),
             },
         )
     except Exception as e:
