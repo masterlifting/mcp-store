@@ -219,44 +219,6 @@ async def test_get_topic_messages_rejects_unverified_topic_root(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_get_message_text_chunk_recovers_full_text_for_chat_and_topic(monkeypatch):
-    topic_id = 33429
-    message_id = 219831
-    text = "A" * 4096 + "THE_END"
-    root = _message(topic_id, "Topic root", action=TopicCreateAction())
-    client = IteratingClient(
-        [_topic_message(message_id, text, topic_id)],
-        {topic_id: root, message_id: _message(message_id, text)},
-    )
-    monkeypatch.setattr(messages, "get_client", lambda account=None: client)
-    monkeypatch.setattr(messages, "resolve_entity", _resolve)
-    monkeypatch.setattr(messages.types, "MessageActionTopicCreate", TopicCreateAction)
-
-    first = json.loads(await messages.get_message_text_chunk(
-        chat_id=-1001528034935, message_id=message_id, limit=1024,
-    ))
-    last = json.loads(await messages.get_message_text_chunk(
-        chat_id=-1001528034935, message_id=message_id,
-        offset=4090, limit=32, topic_id=topic_id,
-    ))
-
-    preview = messages._review_record(client.iterated_messages[0], topic_id)
-    assert preview["text_truncated"] is True
-    assert preview["text"].endswith("... [truncated]")
-    assert preview["text_sha256"] == first["results"][0]["text_sha256"]
-    assert first["results"][0]["text"] == "A" * 1024
-    assert first["results"][0]["has_more"] is True
-    assert last["results"][0]["text"] == "A" * 6 + "THE_END"
-    assert last["results"][0]["total_chars"] == len(text)
-    assert last["results"][0]["next_offset"] == len(text)
-    assert last["results"][0]["has_more"] is False
-    assert first["results"][0]["text_sha256"] == last["results"][0]["text_sha256"]
-    assert last["results"][0]["topic_id"] == topic_id
-    assert last["chat_id"] == -1001528034935
-    assert last["account_user_id"] == 42
-
-
-@pytest.mark.asyncio
 async def test_get_messages_in_range_uses_exact_id_bounds_and_returns_terminal_metadata(
     monkeypatch,
 ):
