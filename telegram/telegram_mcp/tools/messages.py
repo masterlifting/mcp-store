@@ -540,8 +540,15 @@ async def get_messages_in_range(
         ):
             if after_message_id < msg.id <= through_message_id:
                 records.append(_review_record(msg))
+        # Ignore volatile counters and mutable profile/pin display fields.
+        # The returned records remain unchanged; only the resume proof is stable.
+        stable_records = [
+            {key: value for key, value in record.items()
+             if key not in {"engagement", "comments", "pinned", "sender", "username"}}
+            for record in records
+        ]
         canonical_records = json.dumps(
-            records, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            stable_records, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
             default=json_serializer,
         ).encode("utf-8")
         return format_tool_result(
