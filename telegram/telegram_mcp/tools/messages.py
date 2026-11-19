@@ -555,6 +555,13 @@ async def get_message_text_chunk(
 
         if getattr(msg, "id", None) != message_id:
             return "Exact message was not found in the selected chat or topic."
+        if topic_id is not None and message_id != topic_id:
+            header = getattr(msg, "reply_to", None)
+            membership = (header is not None and getattr(header, "forum_topic", False)
+                          and (getattr(header, "reply_to_top_id", None)
+                               or getattr(header, "reply_to_msg_id", None)) == topic_id)
+            if not membership:
+                return "Topic message membership could not be verified."
         me = await cl.get_me()
         user_id = getattr(me, "id", None)
         if type(user_id) is not int or user_id <= 0:
