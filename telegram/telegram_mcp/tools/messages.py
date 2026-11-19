@@ -143,7 +143,10 @@ def _topic_review_record(msg, topic_id: int) -> dict:
             }
         if media in {"video", "video_note"} and not raw_text:
             record["video_text_missing"] = True
-    elif getattr(msg, "media", None) is not None:
+    elif (
+        getattr(msg, "media", None) is not None
+        and getattr(msg, "web_preview", None) is None
+    ):
         record["content_unsupported"] = True
     return record
 
