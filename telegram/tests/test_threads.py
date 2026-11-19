@@ -240,14 +240,28 @@ async def test_get_messages_in_range_uses_exact_id_bounds_and_returns_terminal_m
     payload = json.loads(result)
     assert client.iter_messages_calls == [("forum-entity", {"min_id": 100, "max_id": 106})]
     assert [record["id"] for record in payload["results"]] == [101, 105]
-    assert payload | {"results": None} == {
+    fingerprint = payload["records_sha256"]
+    assert isinstance(fingerprint, str) and len(fingerprint) == 64
+    assert payload | {"results": None, "records_sha256": None} == {
         "results": None,
         "chat_id": -1001528034935,
+        "account_user_id": 42,
         "after_message_id": 100,
         "through_message_id": 105,
         "retrieved_count": 2,
         "range_complete": True,
+        "records_sha256": None,
     }
+
+    # Counter changes must not invalidate an unchanged review on resume.
+    client.iterated_messages[1].views = 80
+    client.iterated_messages[1].replies = SimpleNamespace(replies=15)
+    refreshed = json.loads(await messages.get_messages_in_range(
+        chat_id=-1001528034935, after_message_id=100, through_message_id=105
+    ))
+    assert refreshed["results"][0]["engagement"]["views"] == 80
+    assert refreshed["results"][0]["comments"] == 15
+    assert refreshed["records_sha256"] == fingerprint
 
 
 @pytest.mark.asyncio
@@ -384,6 +398,17 @@ async def test_get_topic_messages_in_range_scopes_iterator_and_results_to_topic(
     assert payload["topic_id"] == topic_id
     assert payload["retrieved_count"] == 2
     assert payload["range_complete"] is True
+
+    fingerprint = payload["records_sha256"]
+    client.iterated_messages[0].views = 20
+    client.iterated_messages[0].replies = SimpleNamespace(replies=5)
+    refreshed = json.loads(await messages.get_topic_messages_in_range(
+        chat_id=-1001528034935, topic_id=topic_id,
+        after_message_id=219830, through_message_id=through_message_id,
+    ))
+    assert refreshed["results"][0]["engagement"]["views"] == 20
+    assert refreshed["results"][0]["comments"] == 5
+    assert refreshed["records_sha256"] == fingerprint
 
 
 @pytest.mark.asyncio

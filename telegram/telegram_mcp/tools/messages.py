@@ -95,10 +95,25 @@ def _link_urls(msg):
     return out
 
 
-def _topic_review_record(msg, topic_id: int) -> dict:
-    """Enrich only bounded topic reads; leave general message tools unchanged."""
+def _review_fingerprint(records) -> str:
+    """Bind review-relevant records without volatile engagement/display fields."""
+    stable = [
+        {key: value for key, value in record.items()
+         if key not in {"engagement", "comments", "pinned", "sender", "username"}}
+        for record in records
+    ]
+    canonical = json.dumps(
+        stable, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        default=json_serializer,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _review_record(msg, topic_id: Optional[int] = None) -> dict:
+    """Inventory content for bounded chat or topic review without media bytes."""
     record = message_to_dict(msg)
-    record["topic_id"] = topic_id
+    if topic_id is not None:
+        record["topic_id"] = topic_id
     raw_text = getattr(msg, "message", None) or ""
     record["text_truncated"] = len(raw_text) > 4096
     if getattr(msg, "rich_message", None) is not None:
@@ -404,16 +419,54 @@ async def _get_topic_read_watermark(cl, entity, topic_id: int):
     return None
 
 
-async def _get_chat_read_watermark(cl, entity):
-    """Read the authoritative inbox watermark for one exact chat peer."""
+async def _get_chat_dialog(cl, entity):
+    """Fetch the authoritative dialog row for one resolved chat."""
     input_peer = await cl.get_input_entity(entity)
     peer_dialogs = await cl(
         functions.messages.GetPeerDialogsRequest(peers=[types.InputDialogPeer(peer=input_peer)])
     )
     dialogs = getattr(peer_dialogs, "dialogs", None) or []
-    if len(dialogs) != 1:
-        return None
-    return getattr(dialogs[0], "read_inbox_max_id", None)
+    return dialogs[0] if len(dialogs) == 1 else None
+
+
+async def _get_chat_read_watermark(cl, entity):
+    """Read the authoritative inbox watermark for one exact chat peer."""
+    dialog = await _get_chat_dialog(cl, entity)
+    return getattr(dialog, "read_inbox_max_id", None)
+
+
+@mcp.tool(annotations=ToolAnnotations(title="Get Chat Review State", readOnlyHint=True))
+@with_account(readonly=True)
+async def get_chat_review_state(chat_id: int, account: Optional[str] = None) -> str:
+    """Read exact ordinary-chat bounds and authenticated account identity."""
+    error = _validate_canonical_chat_id(chat_id)
+    if error:
+        return error
+    try:
+        cl = get_client(account)
+        entity = await resolve_entity(chat_id, cl)
+        error = _validate_resolved_canonical_chat_id(entity, chat_id)
+        if error:
+            return error
+        me = await cl.get_me()
+        user_id = getattr(me, "id", None)
+        if isinstance(user_id, bool) or not isinstance(user_id, int) or user_id <= 0:
+            return "Authenticated Telegram user ID is unavailable."
+        dialog = await _get_chat_dialog(cl, entity)
+        after = getattr(dialog, "read_inbox_max_id", None)
+        through = getattr(dialog, "top_message", None)
+        if (isinstance(after, bool) or not isinstance(after, int) or after <= 0
+                or isinstance(through, bool) or not isinstance(through, int)
+                or through < after or through <= 0):
+            return "Chat read boundaries are unavailable or inconsistent."
+        return format_tool_result([{
+            "account_user_id": user_id,
+            "chat_id": chat_id,
+            "read_through_message_id": after,
+            "latest_message_id": through,
+        }])
+    except Exception as exc:
+        return log_and_format_error("get_chat_review_state", exc, chat_id=chat_id)
 
 
 @mcp.tool(annotations=ToolAnnotations(title="Get Topic Review State", readOnlyHint=True))
@@ -488,6 +541,10 @@ async def get_messages_in_range(
         resolved_chat_validation_error = _validate_resolved_canonical_chat_id(entity, chat_id)
         if resolved_chat_validation_error:
             return resolved_chat_validation_error
+        me = await cl.get_me()
+        account_user_id = getattr(me, "id", None)
+        if isinstance(account_user_id, bool) or not isinstance(account_user_id, int) or account_user_id <= 0:
+            return "Authenticated Telegram user ID is unavailable."
         records = []
         # Telethon excludes max_id, so through + 1 makes the upper boundary inclusive.
         async for msg in cl.iter_messages(
@@ -496,15 +553,18 @@ async def get_messages_in_range(
             max_id=through_message_id + 1,
         ):
             if after_message_id < msg.id <= through_message_id:
-                records.append(message_to_dict(msg))
+                records.append(_review_record(msg))
+
         return format_tool_result(
             records,
             metadata={
                 "chat_id": chat_id,
+                "account_user_id": account_user_id,
                 "after_message_id": after_message_id,
                 "through_message_id": through_message_id,
                 "retrieved_count": len(records),
                 "range_complete": True,
+                "records_sha256": _review_fingerprint(records),
             },
         )
     except Exception as e:
@@ -573,11 +633,8 @@ async def get_topic_messages_in_range(
                                 or getattr(header, "reply_to_msg_id", None)) == topic_id)
             if not (topic_root or topic_reply):
                 return "Topic range iterator returned unverified topic membership."
-            records.append(_topic_review_record(msg, topic_id))
-        canonical_records = json.dumps(
-            records, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
-            default=json_serializer,
-        ).encode("utf-8")
+            records.append(_review_record(msg, topic_id))
+
         return format_tool_result(
             records,
             metadata={
@@ -588,7 +645,7 @@ async def get_topic_messages_in_range(
                 "through_message_id": through_message_id,
                 "retrieved_count": len(records),
                 "range_complete": True,
-                "records_sha256": hashlib.sha256(canonical_records).hexdigest(),
+                "records_sha256": _review_fingerprint(records),
             },
         )
     except Exception as e:
