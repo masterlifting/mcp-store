@@ -240,6 +240,10 @@ async def test_get_message_text_chunk_recovers_full_text_for_chat_and_topic(monk
         offset=4090, limit=32, topic_id=topic_id,
     ))
 
+    preview = messages._review_record(client.iterated_messages[0], topic_id)
+    assert preview["text_truncated"] is True
+    assert preview["text"].endswith("... [truncated]")
+    assert preview["text_sha256"] == first["results"][0]["text_sha256"]
     assert first["results"][0]["text"] == "A" * 1024
     assert first["results"][0]["has_more"] is True
     assert last["results"][0]["text"] == "A" * 6 + "THE_END"
