@@ -515,6 +515,82 @@ async def get_topic_review_state(
                                     topic_id=topic_id)
 
 
+@mcp.tool(annotations=ToolAnnotations(title="Get Message Text Chunk", readOnlyHint=True))
+@with_account(readonly=True)
+async def get_message_text_chunk(
+    chat_id: int,
+    message_id: int,
+    offset: int = 0,
+    limit: int = 1024,
+    topic_id: Optional[int] = None,
+    account: Optional[str] = None,
+) -> str:
+    """Return a bounded part of one message's sanitized text without a 4096-char cutoff."""
+    error = _validate_canonical_chat_id(chat_id)
+    if error:
+        return error
+    if (type(message_id) is not int or message_id <= 0
+            or type(offset) is not int or offset < 0
+            or type(limit) is not int or not 1 <= limit <= 1024
+            or (topic_id is not None and (type(topic_id) is not int or topic_id <= 0))):
+        return "Invalid message ID, topic ID, offset or chunk limit."
+
+    try:
+        cl = get_client(account)
+        entity = await resolve_entity(chat_id, cl)
+        error = _validate_resolved_canonical_chat_id(entity, chat_id)
+        if error:
+            return error
+
+        if topic_id is not None:
+            root = await _get_topic_root(cl, entity, topic_id)
+            if not root:
+                return "Exact topic root was not found."
+            msg = (root if message_id == topic_id else
+                   await _get_exact_topic_message(cl, entity, topic_id, message_id))
+        else:
+            msg = await cl.get_messages(entity, ids=message_id)
+            if isinstance(msg, list):
+                msg = msg[0] if len(msg) == 1 else None
+
+        if getattr(msg, "id", None) != message_id:
+            return "Exact message was not found in the selected chat or topic."
+        me = await cl.get_me()
+        user_id = getattr(me, "id", None)
+        if type(user_id) is not int or user_id <= 0:
+            return "Authenticated Telegram user ID is unavailable."
+
+        raw = getattr(msg, "message", None) or ""
+        if not raw:
+            return "Message has no text."
+        # The regular range view intentionally truncates at 4096. Sanitize the
+        # whole value here, then return only a bounded part on every call.
+        full_text = sanitize_user_content(raw, max_length=len(raw))
+        total = len(full_text)
+        if offset >= total:
+            return "Chunk offset is outside the message text."
+        end = min(offset + limit, total)
+        record = {
+            "message_id": message_id,
+            "offset": offset,
+            "next_offset": end,
+            "total_chars": total,
+            "text_sha256": hashlib.sha256(full_text.encode("utf-8")).hexdigest(),
+            "text": full_text[offset:end],
+            "has_more": end < total,
+        }
+        if topic_id is not None:
+            record["topic_id"] = topic_id
+        return format_tool_result(
+            [record],
+            metadata={"chat_id": chat_id, "account_user_id": user_id},
+        )
+    except Exception as exc:
+        return log_and_format_error(
+            "get_message_text_chunk", exc, chat_id=chat_id, message_id=message_id,
+        )
+
+
 @mcp.tool(
     annotations=ToolAnnotations(
         title="Get Messages In Range", openWorldHint=True, readOnlyHint=True
