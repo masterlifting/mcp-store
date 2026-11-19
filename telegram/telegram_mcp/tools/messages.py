@@ -521,7 +521,9 @@ async def get_topic_review_state(
                                     topic_id=topic_id)
 
 
-@mcp.tool(annotations=ToolAnnotations(title="Get Message Text Chunk", readOnlyHint=True))
+@mcp.tool(
+    annotations=ToolAnnotations(title="Get Message Text Chunk", readOnlyHint=True)
+)
 @with_account(readonly=True)
 async def get_message_text_chunk(
     chat_id: int,
@@ -531,14 +533,19 @@ async def get_message_text_chunk(
     topic_id: Optional[int] = None,
     account: Optional[str] = None,
 ) -> str:
-    """Return a bounded part of one message's sanitized text without a 4096-char cutoff."""
+    """Return a bounded sanitized text fragment from an exact message."""
     error = _validate_canonical_chat_id(chat_id)
     if error:
         return error
-    if (type(message_id) is not int or message_id <= 0
-            or type(offset) is not int or offset < 0
-            or type(limit) is not int or not 1 <= limit <= 1024
-            or (topic_id is not None and (type(topic_id) is not int or topic_id <= 0))):
+    if (
+        type(message_id) is not int
+        or message_id <= 0
+        or type(offset) is not int
+        or offset < 0
+        or type(limit) is not int
+        or not 1 <= limit <= 1024
+        or (topic_id is not None and (type(topic_id) is not int or topic_id <= 0))
+    ):
         return "Invalid message ID, topic ID, offset or chunk limit."
 
     try:
@@ -552,8 +559,10 @@ async def get_message_text_chunk(
             root = await _get_topic_root(cl, entity, topic_id)
             if not root:
                 return "Exact topic root was not found."
-            msg = (root if message_id == topic_id else
-                   await _get_exact_topic_message(cl, entity, topic_id, message_id))
+            msg = (
+                root if message_id == topic_id else
+                await _get_exact_topic_message(cl, entity, topic_id, message_id)
+            )
         else:
             msg = await cl.get_messages(entity, ids=message_id)
             if isinstance(msg, list):
@@ -563,10 +572,15 @@ async def get_message_text_chunk(
             return "Exact message was not found in the selected chat or topic."
         if topic_id is not None and message_id != topic_id:
             header = getattr(msg, "reply_to", None)
-            membership = (header is not None and getattr(header, "forum_topic", False)
-                          and (getattr(header, "reply_to_top_id", None)
-                               or getattr(header, "reply_to_msg_id", None)) == topic_id)
-            if not membership:
+            parent_topic = (
+                getattr(header, "reply_to_top_id", None)
+                or getattr(header, "reply_to_msg_id", None)
+            )
+            if not (
+                header is not None
+                and getattr(header, "forum_topic", False)
+                and parent_topic == topic_id
+            ):
                 return "Topic message membership could not be verified."
         me = await cl.get_me()
         user_id = getattr(me, "id", None)
@@ -576,8 +590,8 @@ async def get_message_text_chunk(
         raw = getattr(msg, "message", None) or ""
         if not raw:
             return "Message has no text."
-        # The regular range view intentionally truncates at 4096. Sanitize the
-        # whole value here, then return only a bounded part on every call.
+        # Range records have 1,024-char previews. Sanitize the entire text
+        # first, then expose at most one requested fragment per call.
         full_text = sanitize_user_content(raw, max_length=len(raw))
         total = len(full_text)
         if offset >= total:
@@ -600,7 +614,7 @@ async def get_message_text_chunk(
         )
     except Exception as exc:
         return log_and_format_error(
-            "get_message_text_chunk", exc, chat_id=chat_id, message_id=message_id,
+            "get_message_text_chunk", exc, chat_id=chat_id, message_id=message_id
         )
 
 
