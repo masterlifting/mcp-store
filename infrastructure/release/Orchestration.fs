@@ -44,13 +44,18 @@ let private runChild (root: string) (scrubEnvVars: string list) (executable: str
     }
 
 // Parse canonical producer policy without executing producer-authored code.
+// Preparation holds no publication credential, so it resolves the toolchain locally from its owners; a handed-over
+// MCP_RELEASE_SDK_ROOT must agree with that local resolution.
 let private loadProducerConfig (root: string) (configPath: string) : Async<Result<ReleasePolicy.PolicyProjection, ReleaseError>> =
     async {
         let absolute = Path.GetFullPath(Path.Combine(root, configPath))
 
-        match ReleasePolicy.parse absolute with
+        match! ReleaseToolchain.resolveLocal root with
         | Error error -> return Error error
-        | Ok policy -> return Ok policy
+        | Ok toolchain ->
+            match ReleasePolicy.parse toolchain absolute with
+            | Error error -> return Error error
+            | Ok policy -> return Ok policy
     }
 
 let private sha256OfFile (path: string) : Async<Result<string, ReleaseError>> =
@@ -137,6 +142,9 @@ let private validateStandaloneManifest
             match ReleaseCompare.contractFromPolicy projection projection.ArchiveName with
             | Error error -> Error error
             | Ok contract ->
+                // Candidate path: the declared producer runtime must equal the manifest's byte-derived runtime.
+                let packagedRuntime = ReleaseCompare.producerRuntimeMatchesPackaged manifest
+
                 let checks =
                     [ manifest.Id = contract.ComponentId, "id"
                       manifest.Version = contract.Version, "version"
@@ -148,7 +156,7 @@ let private validateStandaloneManifest
                 match checks |> List.tryFind (fun (matches, _) -> not matches) with
                 | Some (_, field) ->
                     Error(IdentityMismatch(field, "the trusted producer policy", "the prepared manifest"))
-                | None -> Ok()
+                | None -> packagedRuntime
 
 let private emitPreparedFailure (phase: string) (reason: string) (componentId: string) (version: string) (archiveName: string) (assetUri: string) : string =
     let node = JsonObject()

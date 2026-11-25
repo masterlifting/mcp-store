@@ -213,6 +213,11 @@ let assertDistributionContract (producer: Producer) (layout: Layout) : Async<uni
         assertString "packaged runtime configuration framework" "Microsoft.NETCore.App" frameworkNode.["name"]
         assertString "packaged runtime configuration version matches the manifest runtime" declaredRuntimeVersion frameworkNode.["version"]
 
+        // The producer runtime is the SDK-derived value; it must equal the packaged runtime requirement, so a declared
+        // runtime the payload does not actually require cannot pass the producer-distribution gate.
+        assertEqual "producer runtime equals the packaged runtime requirement" producer.RuntimeVersion declaredRuntimeVersion
+        assertEqual "manifest producer runtime equals the packaged runtime requirement" (producerNode["runtime"].GetValue<string>()) declaredRuntimeVersion
+
         let archive = ZipFile.OpenRead layout.ArchivePath
         let entries = archive.Entries |> Seq.map (fun entry -> entry.FullName.Replace('\\', '/')) |> Seq.toList
         assertExactFiles "archive entries are exactly the hashed members plus the manifest" archiveMembers entries

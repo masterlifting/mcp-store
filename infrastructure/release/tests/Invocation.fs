@@ -57,11 +57,15 @@ let private runUpdate (parameters: string list) =
         return result, body
     }
 
-// WHY: Update.ps1 -Project must echo the canonical SDK literal exactly once; the canonical
-//   Config.json no longer carries the executing F# bootstrap so we read the SDK literal from
-//   the production Update.ps1 output, not from the obsolete FSI bootstrap.
+// WHY: Update.ps1 -Project must echo the SDK version authored in the root `global.json` exactly once;
+//   the expected value is read from that owner rather than restated as a copied literal.
 let updateProjectEmitsCanonicalSdkLiteral () = async {
     let! result, output = runUpdate [ "-Project" ]
+    let expectedSdk =
+        match ReleaseToolchain.readSdkVersion repoRoot with
+        | Ok value -> value
+        | Error error -> failwithf "the canonical global.json could not be read: %s" (ReleaseError.message error)
+
     match result with
     | Error error ->
         failed <- failed + 1
@@ -77,28 +81,26 @@ let updateProjectEmitsCanonicalSdkLiteral () = async {
         match sdkLine with
         | Some value ->
             assertTrue
-                (sprintf "RELEASE_SDK matches canonical SDK literal: %s" value)
-                (value = "RELEASE_SDK=11.0.100")
+                (sprintf "RELEASE_SDK matches the global.json owner: %s" value)
+                (value = "RELEASE_SDK=" + expectedSdk)
         | None ->
             failed <- failed + 1
             failures.Add(sprintf "RELEASE_SDK line missing from Update.ps1 -Project output: %s" combined)
 }
 
-// WHY: the canonical 9-field Config.json supplies the executing version directly; a malformed
-//   unknown field rejection confirms the projection is sourced from the strict JSON policy,
-//   not from an obsolete F# interpreter.
+// WHY: the canonical Config.json no longer carries the shared toolchain, so a malformed unknown field
+//   rejection confirms the projection is sourced from the strict JSON policy through the injected toolchain.
 let policyRejectsUnknownField () =
     let tempPath = Path.Combine(Path.GetTempPath(), "mcp-invocation-unknown-" + Guid.NewGuid().ToString("N") + ".json")
     let source =
         "{\"componentId\":\"dotnet\",\"version\":\"1.0.5\",\"entryDll\":\"Mcp.Dotnet.dll\"," +
-        "\"sdkVersion\":\"11.0.100-rc.1.26425.128\",\"runtimeVersion\":\"11.0.0-rc.1.26425.128\"," +
         "\"platform\":\"win-x64\",\"archiveName\":\"v1.0.5.zip\"," +
         "\"assetUri\":\"https://github.com/masterlifting/mcp-store/releases/download/dotnet/v1.0.5.zip\"," +
         "\"publishedFiles\":[\"Mcp.Dotnet.dll\"]," +
         "\"launchArguments\":[{\"flag\":\"--fixture-input\",\"input\":\"fixtureInput\",\"type\":\"absolute-file\"}]," +
         "\"rogueField\":\"rogue\"}"
     File.WriteAllText(tempPath, source)
-    match ReleasePolicy.parseBytes tempPath (File.ReadAllBytes tempPath) with
+    match ReleasePolicy.parseBytes Fixture.canonicalToolchain tempPath (File.ReadAllBytes tempPath) with
     | Error (MalformedArtifact (_, detail)) ->
         assertTrue
             (sprintf "unknown Config.json field is rejected: %s" detail)
@@ -113,7 +115,7 @@ let policyRejectsUnknownField () =
 let policyRejectsEmbeddedNulByte () =
     let tempPath = Path.Combine(Path.GetTempPath(), "mcp-invocation-nul-" + Guid.NewGuid().ToString("N") + ".json")
     let bytes = Encoding.UTF8.GetBytes("{\"componentId\":\u0000\"dotnet\"}")
-    match ReleasePolicy.parseBytes tempPath bytes with
+    match ReleasePolicy.parseBytes Fixture.canonicalToolchain tempPath bytes with
     | Error (MalformedArtifact (_, detail)) ->
         assertTrue
             (sprintf "embedded NUL is rejected: %s" detail)
@@ -128,6 +130,8 @@ let private scratchRoot () =
     let root = Path.Combine(Path.GetTempPath(), "mcp-invocation-root-" + Guid.NewGuid().ToString("N"))
     let roster = Path.Combine(root, "infrastructure", "release")
     Directory.CreateDirectory roster |> ignore
+    // The pre-SDK projection reads the authored SDK from the scratch root, so the owner travels with the mutant.
+    Fixture.copyToolchainOwners root
     File.Copy(Path.Combine(repoRoot, "infrastructure", "release", "Participants.json"), Path.Combine(roster, "Participants.json"))
 
     for componentId in [ "dotnet"; "workflow" ] do

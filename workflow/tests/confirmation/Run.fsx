@@ -3,6 +3,8 @@
 // The producer runs in a child process whose application-data and home directories are redirected to an isolated run root under the approved temporary base, so the real per-account integrity key is never read, created, or rotated here.
 // Every answer to an elicitation is a deterministic JSON-RPC test double standing in for the native host form, so no case in this suite is evidence that a human approved any operation.
 
+#load "../Sdk.fsx"
+
 open System
 open System.Collections.Concurrent
 open System.Diagnostics
@@ -89,7 +91,7 @@ let rawId (message: JsonNode) =
 let repoRoot = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "..", ".."))
 let releaseEntryDll = Path.Combine(repoRoot, "workflow", "bin", "Release", "net11.0", "Mcp.Workflow.dll")
 let guardScript = Path.Combine(__SOURCE_DIRECTORY__, "Isolation.fsx")
-let requiredSdk = "11.0.100"
+let requiredSdk = Sdk.requiredSdk
 
 if not (File.Exists releaseEntryDll) then
     failWith

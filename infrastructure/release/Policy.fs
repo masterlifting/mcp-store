@@ -1,6 +1,9 @@
 // role: reusable module/helper
 // Strict reader for a producer's canonical Config.json policy plus the trusted
 // distribution contract derived from it. Pure: no processes or filesystem writes.
+// The per-component policy owns identity, entry point, platform, archive and launch descriptors. The SDK and runtime
+// versions are not policy: the caller passes the toolchain resolved from its owners (`ReleaseToolchain`), and a Config.json
+// that still declares either version is rejected as an unknown field.
 module ReleasePolicy
 
 open System
@@ -30,8 +33,6 @@ let private requiredFields =
     [ "componentId"
       "version"
       "entryDll"
-      "sdkVersion"
-      "runtimeVersion"
       "platform"
       "archiveName"
       "assetUri"
@@ -45,7 +46,7 @@ let private sha256Hex (bytes: byte array) : string =
 
 let private malformed sourcePath detail = Error(MalformedArtifact(sourcePath, detail))
 
-let parseBytes (sourcePath: string) (boundedBytes: byte array) : Result<PolicyProjection, ReleaseError> =
+let parseBytes (toolchain: ReleaseToolchain.Toolchain) (sourcePath: string) (boundedBytes: byte array) : Result<PolicyProjection, ReleaseError> =
     if isNull boundedBytes then
         malformed sourcePath "the canonical Config.json bytes are null"
     elif boundedBytes.Length > maxSourceBytes then
@@ -179,7 +180,7 @@ let parseBytes (sourcePath: string) (boundedBytes: byte array) : Result<PolicyPr
                             []
 
                     let scalarFields =
-                        [ "componentId"; "version"; "entryDll"; "sdkVersion"; "runtimeVersion"; "platform"; "archiveName"; "assetUri" ]
+                        [ "componentId"; "version"; "entryDll"; "platform"; "archiveName"; "assetUri" ]
 
                     let scalars = scalarFields |> List.map (fun field -> field, readString field)
 
@@ -209,8 +210,8 @@ let parseBytes (sourcePath: string) (boundedBytes: byte array) : Result<PolicyPr
                                 { ComponentId = valueOf "componentId"
                                   Version = valueOf "version"
                                   EntryDll = valueOf "entryDll"
-                                  SdkVersion = valueOf "sdkVersion"
-                                  RuntimeVersion = valueOf "runtimeVersion"
+                                  SdkVersion = toolchain.SdkVersion
+                                  RuntimeVersion = toolchain.RuntimeVersion
                                   Platform = valueOf "platform"
                                   ArchiveName = valueOf "archiveName"
                                   AssetUri = valueOf "assetUri"
@@ -238,11 +239,11 @@ let private readBounded (path: string) : Result<byte array, ReleaseError> =
     | :? IOException as error -> Error(FileFailure("read", path, error.Message))
     | :? UnauthorizedAccessException as error -> Error(FileFailure("read", path, error.Message))
 
-let parse (sourcePath: string) : Result<PolicyProjection, ReleaseError> =
+let parse (toolchain: ReleaseToolchain.Toolchain) (sourcePath: string) : Result<PolicyProjection, ReleaseError> =
     try
         let absolute = Path.GetFullPath sourcePath
         if not (File.Exists absolute) then Error(MissingArtifact absolute)
-        else readBounded absolute |> Result.bind (parseBytes absolute)
+        else readBounded absolute |> Result.bind (parseBytes toolchain absolute)
     with
     | :? IOException as error -> Error(FileFailure("read", sourcePath, error.Message))
     | :? UnauthorizedAccessException as error -> Error(FileFailure("read", sourcePath, error.Message))

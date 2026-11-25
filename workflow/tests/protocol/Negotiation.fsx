@@ -4,6 +4,7 @@
 // The isolation guard loads before the producer is started, so the key path is never captured outside that sandbox.
 
 #load "../Isolation.fsx"
+#load "../Sdk.fsx"
 
 open System
 open System.Diagnostics
@@ -12,7 +13,7 @@ open System.Security.Cryptography
 open System.Text.Json.Nodes
 
 let repoRoot = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "..", ".."))
-let requiredSdk = "11.0.100"
+let requiredSdk = Sdk.requiredSdk
 let releaseEntryDll = Path.Combine(repoRoot, "workflow", "bin", "Release", "net11.0", "Mcp.Workflow.dll")
 
 let resolveDotnetHost () =

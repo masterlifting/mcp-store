@@ -133,7 +133,7 @@ let private loadProducer componentId =
     let configPath = Path.Combine(repositoryRoot, componentId, "release", "Config.json")
     let bytes = File.ReadAllBytes configPath
     let policy =
-        match ReleasePolicy.parseBytes configPath bytes with
+        match ReleasePolicy.parseBytes Fixture.canonicalToolchain configPath bytes with
         | Ok projection -> projection
         | Error error -> failwithf "%s canonical policy failed to parse: %s" componentId (ReleaseError.message error)
 

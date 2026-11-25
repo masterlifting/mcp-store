@@ -459,7 +459,14 @@ let private verifyArchiveBytes (bytes: byte[]) : Async<Result<unit, ReleaseError
 
                     match! ReleaseCompare.observe path with
                     | Error error -> return Error error
-                    | Ok _ -> return Ok()
+                    | Ok observation ->
+                        // Candidate-only: the declared producer.runtime must equal the packaged runtime version.
+                        match observation.ManifestBody with
+                        | None -> return Error(MalformedArtifact(path, "the canonical embedded manifest is missing"))
+                        | Some body ->
+                            match DistributionContract.parseBytes (Encoding.UTF8.GetBytes body) with
+                            | Error error -> return Error error
+                            | Ok manifest -> return ReleaseCompare.producerRuntimeMatchesPackaged manifest
                 with
                 | error -> return Error(FileFailure("verify", path, error.Message))
             }
@@ -559,19 +566,23 @@ let private uploadBytes
                 return Error(FileFailure("release", locator.Tag, "the release does not exist; a container-creation flow is required"))
             | Ok (AssetVerified digest) -> return Ok digest
             | Ok (AssetAbsent releaseId) ->
-                let! postOutcome = postAsset auth locator releaseId assetName bytes contentType transport
-
-                // Any POST outcome is reconciled by a bounded remote read and byte verification before success.
-                match! probe auth locator assetName bytes expectedDigest maxBytes verify transport with
-                | Ok (AssetVerified digest) -> return Ok digest
-                | Ok (AssetAbsent _) ->
-                    return
-                        match postOutcome with
-                        | Error error -> Error error
-                        | Ok() -> Error(FileFailure("upload", assetName, "the uploaded asset was not observable at the expected bytes"))
-                | Ok AssetImmutable -> return Error(FileFailure("immutable", assetName, $"the {locator.Tag} release became immutable after the upload"))
-                | Ok ReleaseUnavailable -> return Error(FileFailure("release", locator.Tag, "the release became unobservable after the upload"))
+                // Pre-POST gate: the exact local buffer that will be sent is verified here, because the absent-asset probe has no remote bytes to verify.
+                match! verify bytes with
                 | Error error -> return Error error
+                | Ok() ->
+                    let! postOutcome = postAsset auth locator releaseId assetName bytes contentType transport
+
+                    // Any POST outcome is reconciled by a bounded remote read and byte verification before success.
+                    match! probe auth locator assetName bytes expectedDigest maxBytes verify transport with
+                    | Ok (AssetVerified digest) -> return Ok digest
+                    | Ok (AssetAbsent _) ->
+                        return
+                            match postOutcome with
+                            | Error error -> Error error
+                            | Ok() -> Error(FileFailure("upload", assetName, "the uploaded asset was not observable at the expected bytes"))
+                    | Ok AssetImmutable -> return Error(FileFailure("immutable", assetName, $"the {locator.Tag} release became immutable after the upload"))
+                    | Ok ReleaseUnavailable -> return Error(FileFailure("release", locator.Tag, "the release became unobservable after the upload"))
+                    | Error error -> return Error error
     }
 
 // Byte-safe adapter for the SEC1 publisher: the candidate bytes are read and

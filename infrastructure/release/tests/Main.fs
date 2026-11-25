@@ -28,6 +28,7 @@ let private suites =
               Revision.tests
               Runner.tests
               Telegram.tests
+              Toolchain.tests
               Orchestration.tests
               Authority.tests ])
 

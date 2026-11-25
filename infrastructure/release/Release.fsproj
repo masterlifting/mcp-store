@@ -1,5 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
+    <!-- Documented exception: the publisher stage excludes repository-wide build props, so the framework and language
+         version stay here. Check.ps1 fails when these two values differ from the root Directory.Build.props owner. -->
     <TargetFramework>net11.0</TargetFramework>
     <OutputType>Exe</OutputType>
     <AssemblyName>ReleaseRunner</AssemblyName>
@@ -16,6 +18,7 @@
     <Compile Include="../distribution/Contract.fs" />
     <Compile Include="../distribution/Pin.fs" />
     <Compile Include="../distribution/Archive.fs" />
+    <Compile Include="Toolchain.fs" />
     <Compile Include="Policy.fs" />
     <Compile Include="Compare.fs" />
     <Compile Include="Metadata.fs" />

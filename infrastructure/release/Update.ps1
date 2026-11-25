@@ -1,8 +1,11 @@
 # role: entrypoint/command
-# Pre-SDK projection and post-install verification of the canonical toolchain from each producer's policy JSON.
+# Pre-SDK projection and post-install verification of the canonical toolchain.
 # `Participants.json` is the only enrollment authority: the projection, the component list, the workflow loops and the
-# CLI paths derive from it, and `*/release/Config.json` stays the only value source. Nothing here evaluates F#, so the
-# projection runs before any SDK exists and the verification needs no separate bootstrap script.
+# CLI paths derive from it, and `*/release/Config.json` stays the only value source for the per-component policy. The
+# shared toolchain comes from its owners: the SDK version from the root `global.json`, and the runtime version derived
+# from the pinned SDK itself, so `-Project` (which runs before any SDK exists) emits no runtime and `-Verify` resolves
+# and reports it after the install. Nothing here evaluates F#, so the projection runs before any SDK exists and the
+# verification needs no separate bootstrap script.
 
 [CmdletBinding(DefaultParameterSetName = "Project")]
 param(
@@ -21,13 +24,16 @@ param(
 $ErrorActionPreference = "Stop"
 
 . (Join-Path $PSScriptRoot "Roster.ps1")
+. (Join-Path $PSScriptRoot "Toolchain.ps1")
 
 $rosterPath = Join-Path $Root "infrastructure/release/Participants.json"
 
 # The exact policy field set the compiled reader also accepts; a drift here fails before any SDK install.
 $script:PolicyFields = @(
-    "componentId"; "version"; "entryDll"; "sdkVersion"; "runtimeVersion"; "platform"; "archiveName"; "assetUri"; "publishedFiles"; "launchArguments")
-$script:ToolchainFields = @("sdkVersion"; "runtimeVersion"; "platform")
+    "componentId"; "version"; "entryDll"; "platform"; "archiveName"; "assetUri"; "publishedFiles"; "launchArguments")
+# The only toolchain-related field left in a component policy is the platform label: a RID the artifact is qualified for,
+# not a version and not byte-derivable. The SDK and runtime versions are not policy and are rejected as unknown fields.
+$script:ToolchainFields = @("platform")
 # The launch descriptors are authored policy with the same closed shape the compiled reader accepts: an ordered
 # non-empty list of flag/input/type triples, a closed input-type set, and unique flags and input names.
 $script:LaunchArgumentFields = @("flag"; "input"; "type")
@@ -112,8 +118,6 @@ function Get-Projection {
         $result[$entry.componentId] = @{
             version        = "$($document.version)"
             entryDll       = "$($document.entryDll)"
-            sdkVersion     = "$($document.sdkVersion)"
-            runtimeVersion = "$($document.runtimeVersion)"
             platform       = "$($document.platform)"
         }
     }
@@ -168,13 +172,13 @@ function Write-KeyValue {
 $roster = Get-ReleaseRoster -Root $Root
 $componentIds = @($roster | ForEach-Object { $_.componentId })
 $projection = Get-Projection -Participants $roster
-$sdk = $projection["sdkVersion"]
-$runtime = $projection["runtimeVersion"]
+# The one authored SDK version, read by the same strict rules as the compiled reader before any SDK exists.
+$sdk = Get-OwnedSdkVersion -Root $Root
 $platform = $projection["platform"]
 
+# `$summary` is shared by both modes; the runtime is a property of the installed SDK, so only -Verify adds it.
 $summary = [ordered]@{
     "RELEASE_SDK"      = $sdk
-    "RELEASE_RUNTIME"  = $runtime
     "RELEASE_PLATFORM" = $platform
 }
 foreach ($componentId in $componentIds) {
@@ -185,12 +189,11 @@ foreach ($componentId in $componentIds) {
 }
 
 if ($Project) {
-    Write-Host "# projected canonical toolchain and roster participants from the policy JSON (no F# evaluation)"
+    Write-Host "# projected canonical toolchain and roster participants from global.json and the policy JSON (no SDK, no F# evaluation)"
     # The matrix is projected as JSON so the workflow carries no participation list of its own.
     $componentsJson = ConvertTo-Json -Compress -InputObject $componentIds
     if ($env:GITHUB_OUTPUT) {
         Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "sdk=$sdk"
-        Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "runtime=$runtime"
         Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "platform=$platform"
         Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "components=$componentsJson"
     } else {
@@ -220,10 +223,51 @@ if ($observedSdks -notcontains $sdk) {
     throw "the canonical SDK '$sdk' is not installed; observed [$($observedSdks -join ', ')]"
 }
 
+# The pinned version resolves to exactly one root (fail closed otherwise), and the runtime is derived from that SDK's own
+# bundled facts with the same element, framework, uniqueness and size rules as the compiled reader.
+$sdkRoot = Select-ToolchainSdkRoot -Version $sdk -Installs $installedSdks
+$runtime = Get-DerivedRuntimeVersion -Root $Root -SdkRoot $sdkRoot
+
+# The SELECTED SDK must be the owner's: `dotnet --version` runs at the repository root so global.json applies, and
+# `Push-Location $Root` keeps a `-Root` override from desynchronising the working directory from the owner it reads.
+Push-Location $Root
+try {
+    $selectedOutput = @(& dotnet --version)
+    if ($LASTEXITCODE -ne 0) { throw "dotnet --version failed ($LASTEXITCODE) at '$Root'; the pinned SDK cannot be selected" }
+} finally {
+    Pop-Location
+}
+$selected = "$($selectedOutput | Select-Object -First 1)".Trim()
+if ($selected -cne $sdk) {
+    throw "the selected SDK is '$selected' where the owner declares '$sdk'"
+}
+
+# The payload is framework-dependent, so the host needs a COMPATIBLE runtime, not the exact derived patch: the same
+# major.minor with a patch at least the derived value. A prerelease never satisfies a stable derived value, because a host
+# does not roll a prerelease forward; exact equality is required only when the derived value is itself a prerelease.
+function Test-RuntimeCompatible {
+    param([string]$Derived, [string[]]$Installed)
+
+    if ($Derived.Contains('-')) { return ($Installed -ccontains $Derived) }
+    $stable = '\A(?<major>[0-9]+)\.(?<minor>[0-9]+)\.(?<patch>[0-9]+)\z'
+    $wanted = [regex]::Match($Derived, $stable)
+    if (-not $wanted.Success) { throw "the derived runtime '$Derived' is not a three-part stable version" }
+    foreach ($candidate in $Installed) {
+        $found = [regex]::Match("$candidate", $stable)
+        if (-not $found.Success) { continue }
+        if ($found.Groups['major'].Value -eq $wanted.Groups['major'].Value -and
+            $found.Groups['minor'].Value -eq $wanted.Groups['minor'].Value -and
+            [int]$found.Groups['patch'].Value -ge [int]$wanted.Groups['patch'].Value) {
+            return $true
+        }
+    }
+    return $false
+}
+
 $installedRuntimes = @(Get-InstalledRuntime)
 $observedRuntimes = @($installedRuntimes | Where-Object { $_.Framework -eq "Microsoft.NETCore.App" } | ForEach-Object { $_.Version })
-if ($observedRuntimes -notcontains $runtime) {
-    throw "the canonical runtime 'Microsoft.NETCore.App $runtime' is not installed; observed [$($observedRuntimes -join ', ')]"
+if (-not (Test-RuntimeCompatible -Derived $runtime -Installed $observedRuntimes)) {
+    throw "no installed runtime is compatible with 'Microsoft.NETCore.App $runtime' (same major.minor, patch at least the derived value, never a prerelease for a stable value); observed [$($observedRuntimes -join ', ')]"
 }
 
 $runningPlatform = [System.Runtime.InteropServices.RuntimeInformation]::RuntimeIdentifier
@@ -233,10 +277,16 @@ if ($runningPlatform -ne $platform) {
 
 Write-Host "verified executing toolchain sdk=$sdk runtime=$runtime platform=$platform for $componentLabel"
 
+$summary["RELEASE_RUNTIME"] = $runtime
+
 if ($env:GITHUB_ENV) {
     Write-KeyValue -Pairs $summary -Target $env:GITHUB_ENV
+    # The SDK root is handed over only here, only after every check above has passed, and before any credential step, so
+    # the publication entry point reads it instead of running the muxer listing with the token in the environment.
+    Write-KeyValue -Pairs ([ordered]@{ $script:ToolchainSdkRootVariable = $sdkRoot }) -Target $env:GITHUB_ENV
 } else {
     Write-Host "GITHUB_ENV is not set; skipping environment write (local validation mode)"
+    Write-Host "$($script:ToolchainSdkRootVariable)=$sdkRoot"
 }
 
 exit 0

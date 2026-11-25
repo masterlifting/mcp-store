@@ -10,7 +10,8 @@ The clean-slate producer set contains exactly these MCP producers:
 
 Dotnet and Workflow publish deterministic framework-dependent distributions.
 Telegram is the Python producer and is tested from its `telegram/` boundary with
-`uv`.
+`uv`. Telegram-only changes do not run the .NET release or Unix qualification
+workflows; that exclusion is not a Telegram CI.
 
 ## Installer and resolver
 

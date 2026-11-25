@@ -48,7 +48,14 @@ Invariants enforced by `parse`/`validate`:
   `sha256`. Flags must be `--`-prefixed, and flags and input names are unique
   case-insensitively.
 - `producer` records build provenance only. It is not a consumer SDK requirement
-  and not a supported-platform claim.
+  and not a supported-platform claim. Its `sdk` is the version authored once in the
+  root `global.json`, its `runtime` is derived from that pinned SDK (the
+  `DefaultRuntimeFrameworkVersion` of its `Microsoft.NETCore.App` framework
+  reference for the owned TFM, never authored in a producer config), and its
+  `platform` is the RID declared per component. At publication of a candidate the
+  declared `producer.runtime` must equal the manifest's byte-derived
+  `runtime.version`; already published archives are observed without that check so a
+  published version stays addressable.
 - `runtime.framework` is `Microsoft.NETCore.App`, and `runtime.config` must be the
   packaged runtime configuration of `launch.entrypoint`
   (`Path.ChangeExtension(entrypoint, ".runtimeconfig.json")`).

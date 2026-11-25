@@ -27,7 +27,7 @@ let private canonicalConfigPath (root: string) (componentId: string) =
 let readCanonicalConfig (root: string) (componentId: string) =
     let path = canonicalConfigPath root componentId
     let bytes = File.ReadAllBytes path
-    match ReleasePolicy.parseBytes path bytes with
+    match ReleasePolicy.parseBytes Release.Tests.Fixture.canonicalToolchain path bytes with
     | Ok projection ->
         { ComponentId = componentId
           ConfigPath = path
@@ -38,7 +38,7 @@ let readCanonicalConfig (root: string) (componentId: string) =
 
 let readConfigFile (path: string) =
     let bytes = File.ReadAllBytes path
-    match ReleasePolicy.parseBytes path bytes with
+    match ReleasePolicy.parseBytes Release.Tests.Fixture.canonicalToolchain path bytes with
     | Ok projection ->
         { ComponentId = projection.ComponentId
           ConfigPath = path
@@ -48,6 +48,6 @@ let readConfigFile (path: string) =
     | Error error -> failwithf "%s Config.json failed: %s" path (SharedFailure.ReleaseError.message error)
 
 let parseConfigBytes (sourcePath: string) (bytes: byte[]) =
-    match ReleasePolicy.parseBytes sourcePath bytes with
+    match ReleasePolicy.parseBytes Release.Tests.Fixture.canonicalToolchain sourcePath bytes with
     | Ok projection -> Ok projection
     | Error error -> Error(SharedFailure.ReleaseError.message error)

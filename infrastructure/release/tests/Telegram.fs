@@ -49,21 +49,56 @@ let private workflowJobBody (workflow: string) (jobName: string) =
     let matched = Regex.Match(workflow, pattern)
     if matched.Success then matched.Groups.["body"].Value else ""
 
+// The only executable Telegram reference a qualifying workflow may carry is the exact trigger exclusion line.
+let private exactTelegramExclusion = "      - 'telegram/**'"
+
+let private telegramExecutableLines (workflowFile: string) =
+    readIfExists (Path.Combine(repoRoot, ".github", "workflows", workflowFile))
+    |> fun source -> source.Split([| '\n' |], StringSplitOptions.RemoveEmptyEntries)
+    |> Array.filter isExecutableYamlLine
+    |> Array.map (fun line -> line.TrimEnd('\r'))
+    |> Array.filter (fun line -> containsIgnoreCase line "telegram")
+    |> Array.toList
+
+// unix.yml's advisory pre-merge step restates the exclusion once as its own guard constant; nothing else may mention Telegram.
+let private allowedTelegramLines workflowFile =
+    if workflowFile = "unix.yml" then
+        [ exactTelegramExclusion; "          $exclusion = \"" + exactTelegramExclusion + "\"" ]
+    else
+        [ exactTelegramExclusion ]
+
 let releaseWorkflowExcludesTelegram () =
-    let path = Path.Combine(repoRoot, ".github", "workflows", "release.yml")
-    let source = readIfExists path
-    assertTrue "release.yml exists on the tracked tree" (not (String.IsNullOrEmpty source))
+    for workflowFile in [ "release.yml"; "unix.yml" ] do
+        let source = readIfExists (Path.Combine(repoRoot, ".github", "workflows", workflowFile))
+        assertTrue (sprintf "%s exists on the tracked tree" workflowFile) (not (String.IsNullOrEmpty source))
+        assertEqual
+            (sprintf "%s executable lines reference telegram only through the exact exclusion line" workflowFile)
+            (allowedTelegramLines workflowFile)
+            (telegramExecutableLines workflowFile)
 
-    let executableLines =
-        source.Split([| '\n' |], StringSplitOptions.RemoveEmptyEntries)
-        |> Array.filter isExecutableYamlLine
-
-    let telegramHits =
-        executableLines
-        |> Array.filter (fun line -> containsIgnoreCase line "telegram")
-        |> Array.toList
-
-    assertTrue "release.yml executable lines do not reference telegram" (List.isEmpty telegramHits)
+// Telegram is a non-input: no .NET or Workflow producer build input consumes it.
+let producerBuildInputsExcludeTelegram () =
+    let inputExtensions = set [ ".fs"; ".fsx"; ".fsproj"; ".props"; ".targets"; ".json"; ".ps1" ]
+    let excludedDirectories = set [ "bin"; "obj"; "dist" ]
+    let rec enumerate (directory: string) : string seq =
+        seq {
+            for file in Directory.EnumerateFiles directory do
+                if inputExtensions.Contains(Path.GetExtension(file).ToLowerInvariant()) then yield file
+            for child in Directory.EnumerateDirectories directory do
+                if not (excludedDirectories.Contains(Path.GetFileName child)) then yield! enumerate child
+        }
+    for producer in [ "dotnet"; "workflow" ] do
+        let producerRoot = Path.Combine(repoRoot, producer)
+        assertTrue (sprintf "%s/ producer build input directory exists" producer) (Directory.Exists producerRoot)
+        let hits =
+            if Directory.Exists producerRoot then
+                enumerate producerRoot
+                |> Seq.filter (fun path -> containsIgnoreCase (File.ReadAllText path) "telegram")
+                |> Seq.map (fun path -> Path.GetRelativePath(repoRoot, path))
+                |> Seq.toList
+            else
+                []
+        assertTrue (sprintf "no %s/** build input references telegram: %A" producer hits) (List.isEmpty hits)
 let releaseWorkflowAndRosterUseDynamicParticipants () =
     let rosterPath = Path.Combine(repoRoot, "infrastructure", "release", "Participants.json")
     assertTrue "Participants.json exists" (File.Exists rosterPath)
@@ -223,16 +258,14 @@ let telegramProducerExistsButUntouched () =
     let pyproject = Path.Combine(telegramDir, "pyproject.toml")
     assertTrue "telegram/pyproject.toml is the producer manifest" (File.Exists pyproject)
 
-    let workflowsPath = Path.Combine(repoRoot, ".github", "workflows", "release.yml")
-    let source = readIfExists workflowsPath
-    let executable =
-        source.Split([| '\n' |], StringSplitOptions.RemoveEmptyEntries)
-        |> Array.filter isExecutableYamlLine
-    let hits =
-        executable
-        |> Array.filter (fun line -> line.Contains("telegram/", StringComparison.OrdinalIgnoreCase))
-        |> Array.toList
-    assertTrue "release.yml executable lines do not reference telegram/ paths" (List.isEmpty hits)
+    for workflowFile in [ "release.yml"; "unix.yml" ] do
+        let hits =
+            telegramExecutableLines workflowFile
+            |> List.filter (fun line -> line.Contains("telegram/", StringComparison.OrdinalIgnoreCase))
+        assertEqual
+            (sprintf "%s executable lines reference telegram/ only through the exact exclusion line" workflowFile)
+            (allowedTelegramLines workflowFile)
+            hits
 
 let runSuite () = async {
     releaseWorkflowExcludesTelegram ()
@@ -242,6 +275,7 @@ let runSuite () = async {
     releaseScriptsExcludeTelegram ()
     runnerSourceExcludesTelegram ()
     productionModulesExcludeTelegram ()
+    producerBuildInputsExcludeTelegram ()
     telegramProducerExistsButUntouched ()
 
     printfn "telegram-isolation-tests summary: passed=%d failed=%d" passed failed

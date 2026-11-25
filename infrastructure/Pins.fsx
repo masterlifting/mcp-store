@@ -6,6 +6,7 @@ module ReleasePins
 #load "Provenance.fs"
 #load "distribution/Contract.fs"
 #load "distribution/Pin.fs"
+#load "release/Toolchain.fs"
 #load "release/Policy.fs"
 
 open SharedFailure
@@ -28,7 +29,9 @@ let writeConsumerPins
     (outputPath: string)
     : Async<Result<string * string * string, ReleaseError>> =
     releaseResult {
-        let! policy = ReleasePolicy.parse configPath
+        // The SDK and runtime versions come from their owners, never from the component policy.
+        let! toolchain = ReleaseToolchain.resolveLocal root
+        let! policy = ReleasePolicy.parse toolchain configPath
         do! BuildProvenance.assertCleanTree root
         let! head = BuildProvenance.committedHead root
         let! manifestText = BuildProvenance.readAllTextAsync manifestPath

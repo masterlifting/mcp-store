@@ -105,7 +105,7 @@ let private repositoryRoot = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__,
 //   observation the production publisher makes is the input the inner pipeline observes.
 let private releasePolicy componentId =
     let path = Path.Combine(repositoryRoot, componentId, "release", "Config.json")
-    ReleasePolicy.parseBytes path (File.ReadAllBytes path)
+    ReleasePolicy.parseBytes Fixture.canonicalToolchain path (File.ReadAllBytes path)
     |> function
         | Ok policy -> policy
         | Error error -> failwithf "%s canonical policy failed to parse: %s" componentId (ReleaseError.message error)

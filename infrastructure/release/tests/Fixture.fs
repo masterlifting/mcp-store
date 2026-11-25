@@ -13,6 +13,13 @@ open DistributionContract
 
 let repoRoot = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "..", ".."))
 
+// The canonical toolchain expectation is resolved from its owners (`global.json` and the pinned SDK),
+// never restated as a copied literal. Product identity below stays an independent expectation.
+let canonicalToolchain =
+    match ReleaseToolchain.resolveLocalSynchronously repoRoot with
+    | Ok toolchain -> toolchain
+    | Error error -> failwithf "the canonical toolchain owner could not be resolved: %s" (ReleaseError.message error)
+
 // Canonical v2 fixture identity. Emission goes through the shared renderer so the
 // synthetic bytes are the exact contract the producers emit, never a parallel shape.
 let canonicalComponentId = "dotnet"
@@ -20,8 +27,8 @@ let canonicalVersion = "1.0.7"
 let canonicalArchiveName = "v1.0.7.zip"
 let canonicalEvaluatedRevision = "3612e8e6dd4655543e6d4b9dc0edee9c24b82bf1"
 let canonicalPublishedRevision = "fc0aefa9db0fb7262ee6ca1b54bd6bbb752b8b01"
-let canonicalSdk = "11.0.100"
-let canonicalRuntime = "11.0.0"
+let canonicalSdk = canonicalToolchain.SdkVersion
+let canonicalRuntime = canonicalToolchain.RuntimeVersion
 let canonicalPlatform = "win-x64"
 let canonicalAssetUri = "https://github.com/masterlifting/mcp-store/releases/download/dotnet/v1.0.7.zip"
 let canonicalSourceRepository = "https://github.com/masterlifting/mcp-store"
@@ -237,3 +244,31 @@ let newTempDir (prefix: string) =
 
 let safeDeleteDir (dir: string) =
     try Directory.Delete(dir, true) with _ -> ()
+
+let private copyFromRepository (root: string) (relativePath: string) =
+    let source = Path.Combine(repoRoot, relativePath)
+    let target = Path.Combine(root, relativePath)
+    Directory.CreateDirectory(Path.GetDirectoryName target) |> ignore
+    File.Copy(source, target, true)
+
+// The toolchain owners and the project files the strict readers and the coherence guard resolve under a
+// scratch root. A caller that proves a missing owner fails closed removes one entry after seeding.
+let copyToolchainOwners (root: string) =
+    for relativePath in
+        [ "global.json"
+          "Directory.Build.props"
+          "infrastructure/release/Release.fsproj"
+          "dotnet/tests/Tests.fsproj"
+          "infrastructure/release/tests/Tests.fsproj"
+          "infrastructure/resolver/tests/Tests.fsproj" ] do
+        copyFromRepository root relativePath
+
+// The coherence guard also reads every roster participant's policy config under the root it is given.
+let copyCanonicalPolicy (root: string) (componentId: string) =
+    copyFromRepository root (Path.Combine(componentId, "release", "Config.json"))
+
+let seedCoherenceRoot (root: string) =
+    copyToolchainOwners root
+
+    for componentId in [ "dotnet"; "workflow" ] do
+        copyCanonicalPolicy root componentId

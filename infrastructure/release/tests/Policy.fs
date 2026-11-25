@@ -20,19 +20,19 @@ let private configPath componentId =
 let private sha256Hex (bytes: byte[]) =
     SHA256.HashData bytes |> Convert.ToHexString |> fun value -> value.ToLowerInvariant()
 
-// WHY: the strict JSON grammar has exactly nine required fields; the canonical Config.json
-//   supplies them with no interpolation, no extra policies, and no overlapping keys. Each
+// WHY: the strict JSON grammar has exactly eight required policy fields; the SDK and runtime are
+//   supplied by the shared toolchain owner instead of being copied into the component config. Each
 //   canonical projection test reads the bytes once via the Snapshots (FixtureHelpers)
 //   helper so the bound SourceSha256 is computed from the same bytes the parser observes.
 let private requiredFields =
-    [ "componentId"; "version"; "entryDll"; "sdkVersion"; "runtimeVersion"
+    [ "componentId"; "version"; "entryDll"
       "platform"; "archiveName"; "assetUri"; "publishedFiles"; "launchArguments" ]
 
 let private expectMalformed (name: string) (sourcePath: string) (input: string) =
     testCase name (fun () ->
         let bytes = Encoding.UTF8.GetBytes input
 
-        match ReleasePolicy.parseBytes sourcePath bytes with
+        match ReleasePolicy.parseBytes Fixture.canonicalToolchain sourcePath bytes with
         | Error(MalformedArtifact(path, _)) ->
             Expect.equal path sourcePath "error path labels the supplied source name"
         | Error error -> failtestf "expected a typed malformed-artifact error, got %A" error
@@ -40,7 +40,7 @@ let private expectMalformed (name: string) (sourcePath: string) (input: string) 
 
 let private expectMalformedBytes (name: string) (sourcePath: string) (bytes: byte[]) =
     testCase name (fun () ->
-        match ReleasePolicy.parseBytes sourcePath bytes with
+        match ReleasePolicy.parseBytes Fixture.canonicalToolchain sourcePath bytes with
         | Error(MalformedArtifact(path, _)) ->
             Expect.equal path sourcePath "error path labels the supplied source name"
         | Error error -> failtestf "expected a typed malformed-artifact error, got %A" error
@@ -72,8 +72,10 @@ let private projectionTests =
          Expect.equal actual.ComponentId (node["componentId"].GetValue<string>()) $"{componentId} component identity matches the canonical literal"
          Expect.equal actual.Version (node["version"].GetValue<string>()) $"{componentId} version matches the canonical literal"
          Expect.equal actual.EntryDll (node["entryDll"].GetValue<string>()) $"{componentId} entry assembly matches the canonical literal"
-         Expect.equal actual.SdkVersion (node["sdkVersion"].GetValue<string>()) $"{componentId} SDK policy matches the canonical literal"
-         Expect.equal actual.RuntimeVersion (node["runtimeVersion"].GetValue<string>()) $"{componentId} runtime policy matches the canonical literal"
+         Expect.equal actual.SdkVersion Fixture.canonicalToolchain.SdkVersion $"{componentId} SDK policy derives from the toolchain owner"
+         Expect.equal actual.RuntimeVersion Fixture.canonicalToolchain.RuntimeVersion $"{componentId} runtime policy derives from the pinned SDK"
+         Expect.isFalse (node.ContainsKey "sdkVersion") $"{componentId} Config.json carries no copied SDK version"
+         Expect.isFalse (node.ContainsKey "runtimeVersion") $"{componentId} Config.json carries no copied runtime version"
          Expect.equal actual.Platform (node["platform"].GetValue<string>()) $"{componentId} platform matches the canonical literal"
          Expect.equal actual.ArchiveName (node["archiveName"].GetValue<string>()) $"{componentId} archive name matches the canonical literal"
          Expect.equal actual.AssetUri (node["assetUri"].GetValue<string>()) $"{componentId} asset URI matches the canonical literal"
@@ -133,7 +135,7 @@ let private strictJsonGrammarTests =
               duplicate.Split([|"\"version\":"|], StringSplitOptions.None).Length - 1
           Expect.isTrue (duplicate.Contains "\"version\":\"9.9\"") "duplicate fixture carries the inserted version literal"
           Expect.equal versionCount 2 "duplicate fixture contains exactly two version keys"
-          match ReleasePolicy.parseBytes "Config.json" (Encoding.UTF8.GetBytes duplicate) with
+          match ReleasePolicy.parseBytes Fixture.canonicalToolchain "Config.json" (Encoding.UTF8.GetBytes duplicate) with
           | Error(MalformedArtifact(path, _)) ->
               Expect.equal path "Config.json" "duplicate-version path labels the supplied source name"
           | Error error -> failtestf "expected a typed malformed-artifact error, got %A" error
@@ -144,10 +146,10 @@ let private strictJsonGrammarTests =
           mutated (fun node -> node.Remove "version" |> ignore) |> bytes)
       expectMalformedBytes "missing required field entryDll is rejected" "Config.json" (
           mutated (fun node -> node.Remove "entryDll" |> ignore) |> bytes)
-      expectMalformedBytes "missing required field sdkVersion is rejected" "Config.json" (
-          mutated (fun node -> node.Remove "sdkVersion" |> ignore) |> bytes)
-      expectMalformedBytes "missing required field runtimeVersion is rejected" "Config.json" (
-          mutated (fun node -> node.Remove "runtimeVersion" |> ignore) |> bytes)
+      expectMalformedBytes "a policy that still declares sdkVersion is rejected as an unknown field" "Config.json" (
+          mutated (fun node -> node["sdkVersion"] <- JsonValue.Create "11.0.100") |> bytes)
+      expectMalformedBytes "a policy that still declares runtimeVersion is rejected as an unknown field" "Config.json" (
+          mutated (fun node -> node["runtimeVersion"] <- JsonValue.Create "11.0.0") |> bytes)
       expectMalformedBytes "missing required field platform is rejected" "Config.json" (
           mutated (fun node -> node.Remove "platform" |> ignore) |> bytes)
       expectMalformedBytes "missing required field archiveName is rejected" "Config.json" (
@@ -199,12 +201,12 @@ let private strictJsonGrammarTests =
       testCase "oversized source returns a typed malformed-artifact error" (fun () ->
           let oversized =
               "{\"componentId\":\"dotnet\"" + String(',', 16 * 1024 * 1024)
-          match ReleasePolicy.parseBytes "oversized" (Encoding.UTF8.GetBytes oversized) with
+          match ReleasePolicy.parseBytes Fixture.canonicalToolchain "oversized" (Encoding.UTF8.GetBytes oversized) with
           | Error(MalformedArtifact("oversized", _)) -> ()
           | Error error -> failtestf "expected typed malformed-artifact error, got %A" error
           | Ok projection -> failtestf "oversized source was accepted: %A" projection)
       testCase "a malformed JSON document returns a typed malformed-artifact error" (fun () ->
-          match ReleasePolicy.parseBytes "not-json" (Encoding.UTF8.GetBytes "{ this is not valid JSON") with
+          match ReleasePolicy.parseBytes Fixture.canonicalToolchain "not-json" (Encoding.UTF8.GetBytes "{ this is not valid JSON") with
           | Error(MalformedArtifact("not-json", _)) -> ()
           | Error error -> failtestf "expected typed malformed-artifact error, got %A" error
           | Ok projection -> failtestf "malformed JSON was accepted: %A" projection) ]
@@ -215,8 +217,14 @@ let private semanticGrammarTests =
           Expect.isTrue (projections.Length = 2) "exactly two canonical projections were observed"
           for componentId, snapshot in projections do
               Expect.isTrue (snapshot.Parsed.Version.Length > 0) $"{componentId} version is non-empty"
-              Expect.isTrue (snapshot.Parsed.SdkVersion.Contains "11.0") $"{componentId} SDK version names the canonical SDK family"
-              Expect.isTrue (snapshot.Parsed.RuntimeVersion.Contains "11.0") $"{componentId} runtime version names the canonical runtime family"
+              Expect.equal
+                  snapshot.Parsed.SdkVersion
+                  Fixture.canonicalToolchain.SdkVersion
+                  $"{componentId} SDK version is the owner's selected SDK"
+              Expect.equal
+                  snapshot.Parsed.RuntimeVersion
+                  Fixture.canonicalToolchain.RuntimeVersion
+                  $"{componentId} runtime version is the pinned SDK's derived runtime"
               Expect.isTrue (snapshot.Parsed.Platform = "win-x64") $"{componentId} platform is the canonical win-x64"
               Expect.isTrue (snapshot.Parsed.AssetUri.Contains componentId) $"{componentId} asset URI names the component id"
               Expect.isTrue (snapshot.Parsed.ArchiveName.StartsWith "v") $"{componentId} archive name is versioned")
@@ -245,7 +253,7 @@ let private snapshotTests =
           let expectedHash = sha256Hex snapshot
 
           let parsed =
-              match ReleasePolicy.parseBytes sourcePath snapshot with
+              match ReleasePolicy.parseBytes Fixture.canonicalToolchain sourcePath snapshot with
               | Ok projection -> projection
               | Error error -> failtestf "canonical config was rejected: %A" error
 
@@ -255,7 +263,7 @@ let private snapshotTests =
 
           try
               let reparsed =
-                  match ReleasePolicy.parseBytes sourcePath observedBytes with
+                  match ReleasePolicy.parseBytes Fixture.canonicalToolchain sourcePath observedBytes with
                   | Ok projection -> projection
                   | Error error -> failtestf "original byte snapshot was rejected after file mutation: %A" error
 

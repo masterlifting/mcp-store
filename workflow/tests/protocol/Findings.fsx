@@ -4,6 +4,7 @@
 // The producer persists signed tasks under the per-account key, so the suite runs only in an isolated child process whose per-account application data directory is redirected to a sandbox.
 
 #load "../Isolation.fsx"
+#load "../Sdk.fsx"
 
 open System
 open System.Diagnostics
@@ -16,7 +17,7 @@ open System.Threading.Tasks
 let repoRoot = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "..", ".."))
 
 // The framework-dependent Release build has no apphost, so the pinned .NET host runs it with `dotnet exec <entry DLL>`.
-let requiredSdk = "11.0.100"
+let requiredSdk = Sdk.requiredSdk
 
 let releaseEntryDll =
     Path.Combine(repoRoot, "workflow", "bin", "Release", "net11.0", "Mcp.Workflow.dll")

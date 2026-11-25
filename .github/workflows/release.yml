@@ -6,11 +6,14 @@ name: release
 
 run-name: release ${{ github.sha }}
 
-# No path filter or dispatch: an unrelated push can still change packaged bytes.
+# A filter may exclude Telegram-only revisions because Telegram is not a .NET release input, but no filter may skip a .NET-affecting revision.
+# Check.ps1 enforces the exact trigger shape (one exclusion, no other filter, no other event); there is no dispatch.
 on:
   push:
     branches:
       - main
+    paths-ignore:
+      - 'telegram/**'
 
 # Least privilege: read default; only the publication job elevates to write.
 permissions:

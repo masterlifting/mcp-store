@@ -4,7 +4,7 @@
 
 - `dotnet/` owns the deterministic .NET build/test/details MCP producer (`Mcp.Dotnet`).
 - `workflow/` owns the deterministic workflow/task-state MCP producer (`Mcp.Workflow`).
-- `telegram/` owns the Telegram MCP package (`telegram-mcp`).
+- `telegram/` owns the Telegram MCP package (`telegram-mcp`). Telegram-only changes do not run the .NET release or Unix qualification workflows (`paths-ignore: ['telegram/**']`); that exclusion is not a Telegram CI.
 
 The official GitHub MCP is an external dependency and is not produced or installed by this repository.
 

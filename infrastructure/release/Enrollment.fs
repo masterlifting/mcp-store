@@ -1,6 +1,7 @@
 // role: reusable module/helper
 // Single authoritative enrollment roster for the release transaction; rejects any drift between the roster and a per-component projection.
-// Policy values stay in each producer's canonical Config.json; this module never mirrors them.
+// Per-component policy values stay in each producer's canonical Config.json and the shared SDK and runtime versions stay in
+// their toolchain owners; this module never mirrors either.
 module ReleaseEnrollment
 
 open System
@@ -100,7 +101,7 @@ let private parseRoster (text: string) (sourcePath: string) : Result<Roster, Rel
 
                             match forbidden with
                             | Some field ->
-                                failure <- Some(MalformedArtifact(sourcePath, $"the enrollment roster entry at index {index - 1} has forbidden field '{field}'; versions, SDKs, allowlists, URIs, and launch descriptors must stay in each producer's Config.json"))
+                                failure <- Some(MalformedArtifact(sourcePath, $"the enrollment roster entry at index {index - 1} has forbidden field '{field}'; per-component policy values and launch descriptors must stay in each producer's Config.json, and the shared toolchain stays in its owners"))
                             | None ->
                                 match requireStringField entry "componentId" sourcePath, requireStringField entry "configPath" sourcePath with
                                 | Error error, _ -> failure <- Some error

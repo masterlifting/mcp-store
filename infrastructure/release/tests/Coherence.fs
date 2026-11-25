@@ -17,6 +17,9 @@ let private withRoot (action: string -> Async<unit>) =
     async {
         let root = Path.Combine(Path.GetTempPath(), "mcp-release-coherence-" + Guid.NewGuid().ToString("N"))
         Directory.CreateDirectory root |> ignore
+        // The production guard resolves the toolchain owners, the documented project exception and every roster
+        // policy under the root it is given, so the scratch root carries those files verbatim.
+        Fixture.seedCoherenceRoot root
 
         try
             do! action root
@@ -47,11 +50,20 @@ let private writeRoster (root: string) (participants: (string * string) list) (e
 let private baselineWorkflow () =
     Path.Combine(repoRoot, ".github", "workflows", "release.yml") |> File.ReadAllText
 
-let private runCoherenceWithOutput (root: string) (workflowText: string) (components: string) (outputPath: string option) =
+let private baselineUnixWorkflow () =
+    Path.Combine(repoRoot, ".github", "workflows", "unix.yml") |> File.ReadAllText
+
+let private runCoherenceBoth
+    (root: string)
+    (workflowText: string)
+    (unixText: string)
+    (components: string)
+    (outputPath: string option) =
     async {
         let workflowPath = Path.Combine(root, ".github", "workflows", "release.yml")
         Directory.CreateDirectory(Path.GetDirectoryName workflowPath) |> ignore
         File.WriteAllText(workflowPath, workflowText)
+        File.WriteAllText(Path.Combine(root, ".github", "workflows", "unix.yml"), unixText)
 
         let info = ProcessStartInfo("pwsh")
         info.WorkingDirectory <- repoRoot
@@ -76,6 +88,9 @@ let private runCoherenceWithOutput (root: string) (workflowText: string) (compon
         | Ok result -> return result
         | Error error -> return failwith error
     }
+
+let private runCoherenceWithOutput (root: string) (workflowText: string) (components: string) (outputPath: string option) =
+    runCoherenceBoth root workflowText (baselineUnixWorkflow ()) components outputPath
 
 let private runCoherence root workflowText components = runCoherenceWithOutput root workflowText components None
 
@@ -374,6 +389,84 @@ let private coherenceGuardChecksActualRosterAndWorkflowMarkers =
                 })
     }
 
+// The exact trigger shape is enforced for BOTH workflows by the production guard: a broadened exclusion, a missing
+// exclusion and an extra event are each rejected, whichever workflow carries the drift.
+let private coherenceGuardRejectsTriggerShapeDriftInBothWorkflows =
+    testCaseAsync "the production Check.ps1 rejects a broadened, missing or extra-event trigger in both workflows" <| async {
+        do!
+            withRoot (fun root ->
+                async {
+                    writeRoster root currentParticipants None |> ignore
+                    let projection = "[\"dotnet\",\"workflow\"]"
+                    let release = baselineWorkflow ()
+                    let unix = baselineUnixWorkflow ()
+                    let exclusion = "      - 'telegram/**'"
+                    Expect.isTrue (release.Contains exclusion && unix.Contains exclusion) "both baselines carry the exact exclusion line"
+
+                    let broadened (text: string) = text.Replace(exclusion, exclusion + "\n      - 'docs/**'")
+                    let missing (text: string) =
+                        Regex.Replace(text, "^    paths-ignore:\\r?\\n      - 'telegram/\\*\\*'\\r?\\n", "", RegexOptions.Multiline)
+                    let extraEvent (text: string) =
+                        Regex.Replace(text, "^on:\\r?\\n", "on:\n  schedule:\n    - cron: '0 0 * * *'\n", RegexOptions.Multiline)
+
+                    let! baselineCode, baselineOut, baselineErr = runCoherenceBoth root release unix projection None
+                    Expect.equal baselineCode 0 $"the exact trigger shapes pass: {baselineOut}{baselineErr}"
+
+                    let cases =
+                        [ "broadened exclusion", broadened, "paths-ignore must carry exactly the one item"
+                          "missing exclusion", missing, "exactly one paths-ignore block is required"
+                          "extra event", extraEvent, "no event other than" ]
+
+                    for caseName, mutate, diagnostic in cases do
+                        Expect.notEqual (mutate release) release $"the {caseName} variant of release.yml differs from the baseline"
+                        Expect.notEqual (mutate unix) unix $"the {caseName} variant of unix.yml differs from the baseline"
+
+                        let! releaseCode, releaseOut, releaseErr = runCoherenceBoth root (mutate release) unix projection None
+                        Expect.notEqual releaseCode 0 $"a {caseName} in release.yml fails the actual guard"
+                        Expect.isTrue
+                            (containsDiagnostic "exact trigger shape" (releaseOut + releaseErr)
+                             && containsDiagnostic "release.yml" (releaseOut + releaseErr)
+                             && containsDiagnostic diagnostic (releaseOut + releaseErr))
+                            $"the {caseName} in release.yml is identified: {releaseOut}{releaseErr}"
+
+                        let! unixCode, unixOut, unixErr = runCoherenceBoth root release (mutate unix) projection None
+                        Expect.notEqual unixCode 0 $"a {caseName} in unix.yml fails the actual guard"
+                        Expect.isTrue
+                            (containsDiagnostic "exact trigger shape" (unixOut + unixErr)
+                             && containsDiagnostic "unix.yml" (unixOut + unixErr)
+                             && containsDiagnostic diagnostic (unixOut + unixErr))
+                            $"the {caseName} in unix.yml is identified: {unixOut}{unixErr}"
+                })
+    }
+
+// The advisory pre-merge subset in unix.yml is the real step body, run unmodified: it accepts the shipped trigger and
+// rejects its own three in-memory negative cases.
+let private unixAdvisoryStepAcceptsShippedTriggerAndRejectsNegativeCases =
+    testCaseAsync "the advisory unix.yml trigger step accepts the shipped shape and rejects the three negative cases" <| async {
+        do!
+            withRoot (fun root ->
+                async {
+                    let script = extractWorkflowStep (baselineUnixWorkflow ()) "advisory pre-merge check of this workflow's own trigger shape"
+                    let scriptPath = Path.Combine(root, "unix-advisory-step.ps1")
+                    File.WriteAllText(scriptPath, script)
+                    let info = ProcessStartInfo("pwsh")
+                    info.WorkingDirectory <- repoRoot
+                    info.UseShellExecute <- false
+                    info.RedirectStandardOutput <- true
+                    info.RedirectStandardError <- true
+                    [ "-NoProfile"; "-File"; scriptPath ] |> List.iter info.ArgumentList.Add
+
+                    match! ReleaseTestProcess.capture 60000 info with
+                    | Error error -> failtest error
+                    | Ok(code, stdout, stderr) ->
+                        Expect.equal code 0 $"the advisory step accepts the shipped trigger: {stdout}{stderr}"
+                        for caseName in [ "broadened exclusion"; "missing exclusion"; "extra event" ] do
+                            Expect.isTrue
+                                (stdout.Contains($"negative case rejected: {caseName}", StringComparison.Ordinal))
+                                $"the advisory step rejects the {caseName} variant: {stdout}{stderr}"
+                })
+    }
+
 let private coherenceGuardRejectsRosterPolicyAndInventoryDrift =
     testCaseAsync "the production Check.ps1 rejects roster policy and inventory drift" <| async {
         do!
@@ -396,6 +489,12 @@ let private coherenceGuardRejectsRosterPolicyAndInventoryDrift =
                     let! omittedResult = invokeCurrentWorkflow ()
 
                     writeRoster root [ "dotnet", "dotnet/release/Alternate.json"; "workflow", "workflow/release/Config.json" ] None |> ignore
+                    // The alternate path exists so the guard reaches the CLI-entry registration rule instead of a
+                    // missing policy file; a policy that declares the retired toolchain fields is covered elsewhere.
+                    File.Copy(
+                        Path.Combine(root, "dotnet", "release", "Config.json"),
+                        Path.Combine(root, "dotnet", "release", "Alternate.json"),
+                        true)
                     let! pathResult = invokeCurrentWorkflow ()
 
                     let outputOf (_, stdout, stderr) = stdout + stderr
@@ -701,12 +800,41 @@ let private metadataBoundaryAndRecordStepShareTheTrustedPublicationPath =
                 })
     }
 
+// Every owner the guard resolves is required: a missing owner fails the guard closed instead of skipping the
+// assertion that depended on it.
+let private coherenceGuardFailsClosedWhenAnOwnerIsMissing =
+    testCaseAsync "the production Check.ps1 fails closed when a toolchain owner or project file is missing" <| async {
+        let cases =
+            [ "global.json", "global.json"
+              "Directory.Build.props", "Directory.Build.props"
+              "infrastructure/release/Release.fsproj", "Release.fsproj"
+              "dotnet/tests/Tests.fsproj", "dotnet/tests/Tests.fsproj"
+              "infrastructure/release/tests/Tests.fsproj", "infrastructure/release/tests/Tests.fsproj"
+              "infrastructure/resolver/tests/Tests.fsproj", "infrastructure/resolver/tests/Tests.fsproj" ]
+
+        for relativePath, diagnostic in cases do
+            do!
+                withRoot (fun root ->
+                    async {
+                        writeRoster root currentParticipants None |> ignore
+                        File.Delete(Path.Combine(root, relativePath))
+                        let! code, stdout, stderr = runCoherence root (baselineWorkflow ()) "[\"dotnet\",\"workflow\"]"
+                        Expect.notEqual code 0 $"a missing {relativePath} fails the production guard"
+                        Expect.isTrue
+                            ((stdout + stderr).Contains(diagnostic, StringComparison.Ordinal))
+                            $"the missing {relativePath} is named: {stdout}{stderr}"
+                    })
+    }
+
 let tests =
     testList
         "cross-stage coherence"
         [ coherenceGuardChecksActualRosterAndWorkflowMarkers
+          coherenceGuardRejectsTriggerShapeDriftInBothWorkflows
+          unixAdvisoryStepAcceptsShippedTriggerAndRejectsNegativeCases
           coherenceGuardRejectsRosterPolicyAndInventoryDrift
           coherenceGuardUsesExplicitProjectionAcrossStepOutputs
+          coherenceGuardFailsClosedWhenAnOwnerIsMissing
           releaseWorkflowStopsBeforePublicationWhenWorkflowTestsFail
           releaseWorkflowRequiresFreshPreparationBuilderAndPublisherJobs
           metadataBoundaryAndRecordStepShareTheTrustedPublicationPath ]

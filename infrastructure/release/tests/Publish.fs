@@ -630,6 +630,54 @@ let uploadCandidateSnapshotMismatchZeroRequests () = async {
     })
     assertEqual "snapshot mismatch issues zero requests" 0 (Array.length handler.Captured)
 }
+// The packaged runtime configuration still matches the manifest's byte-derived runtime, so the
+// candidate is internally valid apart from the declared producer.runtime. The absent-asset probe
+// has no remote bytes to compare, so the pre-POST gate must reject the typed mismatch itself.
+let uploadCandidateRuntimeMismatchBeforePost () = async {
+    use handler = new RecordingHandler("api.github.com")
+    let transport = transportFromHandler handler
+    let mismatchedRuntime = Fixture.canonicalRuntime + "-synthetic"
+    let manifest =
+        Fixture.canonicalManifest
+            Fixture.canonicalEvaluatedRevision
+            Fixture.canonicalSdk
+            (Fixture.canonicalPayloadHashes ())
+
+    let archivePath = Path.Combine(tempRoot, "runtime-mismatch.zip")
+
+    Fixture.writeManifestArchive
+        archivePath
+        (DistributionContract.render
+            { manifest with
+                Producer = { manifest.Producer with Runtime = mismatchedRuntime } })
+
+    let archiveBytes = File.ReadAllBytes archivePath
+    let archiveSha = sha256Hex archiveBytes
+    handler.Queue(Reply(200, [], releaseJson (Some 99L) false []))
+    do! withUploadFlag (Some "true") (fun _ -> async {
+        let auth = { Token = "sentinel" }
+        let locator = { Owner = "x"; Repository = "y"; Tag = "dotnet" }
+        match! classify "uploadCandidateRuntimeMismatchBeforePost" (fun _ ->
+            uploadCandidateBytes auth locator Fixture.canonicalArchiveName archiveBytes (Some archiveSha) transport) with
+        | Ok (Error (IdentityMismatch (field, expected, actual))) ->
+            assertEqual "runtime mismatch reports producer.runtime" "producer.runtime" field
+            assertEqual "runtime mismatch expects the packaged runtime" Fixture.canonicalRuntime expected
+            assertEqual "runtime mismatch reports the declared producer runtime" mismatchedRuntime actual
+        | Ok (Error error) ->
+            failed <- failed + 1
+            failures.Add(sprintf "runtime mismatch: expected a producer.runtime identity mismatch got %s" (ReleaseError.message error))
+        | Ok (Ok digest) ->
+            failed <- failed + 1
+            failures.Add(sprintf "runtime mismatch: expected a refusal got verified digest %s" digest)
+        | Error classification ->
+            failed <- failed + 1
+            failures.Add(sprintf "runtime mismatch: %s" classification)
+    })
+    let captured = handler.Captured
+    assertEqual "runtime mismatch issues zero POSTs" 0 (captured |> Array.filter (fun c -> c.Method = "POST") |> Array.length)
+    assertEqual "runtime mismatch downloads no asset bytes" 0 (captured |> Array.filter (fun c -> c.Url.Contains("/releases/assets/", StringComparison.Ordinal)) |> Array.length)
+    assertEqual "runtime mismatch only reads the release" 1 (Array.length captured)
+}
 let uploadMetadataTargetsMetadataAssetName () = async {
     use handler = new RecordingHandler("api.github.com")
     let transport = transportFromHandler handler
@@ -730,6 +778,7 @@ let runSuite () = async {
     do! uploadCandidatePostServerErrorNoRetry ()
     do! uploadCandidateAmbiguousPostMustObserveRemote ()
     do! uploadCandidateSnapshotMismatchZeroRequests ()
+    do! uploadCandidateRuntimeMismatchBeforePost ()
     do! uploadCandidatePostTimeoutReadsBackVerifiedBytes ()
     do! uploadMetadataTargetsMetadataAssetName ()
     do! uploadMetadataUsesProducerOwnedToolchains ()

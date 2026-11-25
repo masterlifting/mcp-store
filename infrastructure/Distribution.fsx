@@ -8,6 +8,7 @@ module DistributionBuild
 #load "Provenance.fs"
 #load "distribution/Contract.fs"
 #load "distribution/Archive.fs"
+#load "release/Toolchain.fs"
 #load "release/Policy.fs"
 
 open System
@@ -45,11 +46,18 @@ type DistributionResult =
       ManifestSha256: string
       Revision: string }
 
-// Build and pin entrypoints share the compiled publisher's bounded policy parser.
+// This script lives directly under the repository's infrastructure directory, which anchors the toolchain owners.
+let private repositoryRoot = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, ".."))
+
+// Build and pin entrypoints share the compiled publisher's bounded policy parser. The SDK and runtime versions come from
+// their owners (`global.json` and the pinned SDK), resolved locally in this credential-free context, never from the policy.
 let loadConfig (path: string) : PolicyProjection =
-    match ReleasePolicy.parse path with
-    | Ok policy -> policy
+    match ReleaseToolchain.resolveLocalSynchronously repositoryRoot with
     | Error error -> raise (InvalidDataException(ReleaseError.message error))
+    | Ok toolchain ->
+        match ReleasePolicy.parse toolchain path with
+        | Ok policy -> policy
+        | Error error -> raise (InvalidDataException(ReleaseError.message error))
 
 let private listFiles (root: string) (searchOption: SearchOption) =
     Directory.EnumerateFiles(root, "*", searchOption)

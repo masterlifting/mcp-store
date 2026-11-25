@@ -6,22 +6,30 @@
 param(
     [string]$Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path,
     [string]$Workflow = "",
+    [string]$UnixWorkflow = "",
     [string]$Components = ""
 )
 
 $ErrorActionPreference = "Stop"
 
 . (Join-Path $PSScriptRoot "Roster.ps1")
+. (Join-Path $PSScriptRoot "Toolchain.ps1")
 
 $roster = Get-ReleaseRoster -Root $Root
 $componentIds = @($roster | ForEach-Object { $_.componentId })
 $workflowPath = if ($Workflow) { $Workflow } else { Join-Path $Root ".github\workflows\release.yml" }
+$unixWorkflowPath = if ($UnixWorkflow) { $UnixWorkflow } else { Join-Path $Root ".github\workflows\unix.yml" }
 
 if (-not (Test-Path -LiteralPath $workflowPath)) {
     throw "release workflow not found: $workflowPath"
 }
 
+if (-not (Test-Path -LiteralPath $unixWorkflowPath)) {
+    throw "unix qualification workflow not found: $unixWorkflowPath"
+}
+
 $text = Get-Content -LiteralPath $workflowPath -Raw
+$unixText = Get-Content -LiteralPath $unixWorkflowPath -Raw
 $checked = 0
 
 function Assert-Count {
@@ -91,10 +99,174 @@ function Assert-Before {
     }
 }
 
-# The workflow trigger stays push-to-main only: a path filter or a manual dispatch would let an unevaluated revision release.
-Assert-Count -Name "push to main is the only trigger" -Pattern '^on:\r?\n  push:\r?\n    branches:\r?\n      - main\s*$' -Expected 1
-Assert-Count -Name "no path filter can skip packaged bytes" -Pattern '^ {4}paths:' -Expected 0
+# Telegram is a verified non-input to the .NET release, so the only filter allowed is the exact Telegram exclusion; no filter may skip a
+# .NET-affecting revision. This is the enforcing point for BOTH workflows (the unix.yml pre-merge subset is advisory).
+function Get-TriggerBlock {
+    param([Parameter(Mandatory = $true)][string]$Text, [Parameter(Mandatory = $true)][string]$Label)
+
+    $lines = @($Text -split '\r?\n' | ForEach-Object { $_.TrimEnd() })
+    $start = [array]::IndexOf($lines, 'on:')
+    if ($start -lt 0) {
+        throw "cross-stage coherence failed [trigger block]: $Label declares no top-level on: block"
+    }
+
+    $block = New-Object System.Collections.Generic.List[string]
+    for ($index = $start + 1; $index -lt $lines.Count; $index++) {
+        $line = $lines[$index]
+        if ([string]::IsNullOrWhiteSpace($line) -or $line.TrimStart().StartsWith('#')) { continue }
+        if (-not $line.StartsWith(' ')) { break }
+        $block.Add($line)
+    }
+
+    return $block.ToArray()
+}
+
+function Assert-TriggerShape {
+    param(
+        [Parameter(Mandatory = $true)][string]$Label,
+        [Parameter(Mandatory = $true)][string]$Text,
+        [Parameter(Mandatory = $true)][string]$Event,
+        [Parameter(Mandatory = $true)][string[]]$Expected
+    )
+
+    $script:checked = $script:checked + 1
+    $block = @(Get-TriggerBlock -Text $Text -Label $Label)
+    $faults = New-Object System.Collections.Generic.List[string]
+
+    $events = @($block | Where-Object { $_ -match '^  [^\s#][^:]*:' } | ForEach-Object { ($_ -replace '^  ([^:]+):.*$', '$1') })
+    if (($events -join ',') -cne $Event) {
+        $faults.Add("no event other than '$Event' is allowed under on: (found [$($events -join ', ')])")
+    }
+    foreach ($key in @('paths', 'branches-ignore', 'tags', 'tags-ignore')) {
+        if (@($block | Where-Object { $_ -match ('^\s+' + $key + ':') }).Count -ne 0) {
+            $faults.Add("the '$key' filter is forbidden")
+        }
+    }
+
+    $index = [array]::IndexOf($block, '    paths-ignore:')
+    if (@($block | Where-Object { $_ -match '^\s+paths-ignore:' }).Count -ne 1 -or $index -lt 0) {
+        $faults.Add('exactly one paths-ignore block is required')
+    }
+    else {
+        $items = @()
+        for ($next = $index + 1; $next -lt $block.Count; $next++) {
+            if ($block[$next].StartsWith('      ')) { $items += $block[$next] } else { break }
+        }
+        if ($items.Count -ne 1 -or $items[0] -cne "      - 'telegram/**'") {
+            $faults.Add("paths-ignore must carry exactly the one item 'telegram/**'")
+        }
+    }
+
+    if (($block -join "`n") -cne ($Expected -join "`n")) {
+        $faults.Add('the trigger block is not the exact expected shape')
+    }
+
+    if ($faults.Count -ne 0) {
+        throw "cross-stage coherence failed [exact trigger shape] in ${Label}: $($faults -join '; ')"
+    }
+}
+
+Assert-TriggerShape -Label $workflowPath -Text $text -Event 'push' -Expected @('  push:', '    branches:', '      - main', '    paths-ignore:', "      - 'telegram/**'")
+Assert-TriggerShape -Label $unixWorkflowPath -Text $unixText -Event 'pull_request' -Expected @('  pull_request:', '    paths-ignore:', "      - 'telegram/**'")
 Assert-Count -Name "no manual dispatch bypasses the push gate" -Pattern 'workflow_dispatch' -Expected 0
+$script:checked = $script:checked + 1
+if ($unixText -match 'workflow_dispatch') {
+    throw "cross-stage coherence failed [no manual dispatch in the qualification workflow]: $unixWorkflowPath declares workflow_dispatch"
+}
+
+# One authored version for the .NET toolchain. The SDK selection is owned by `global.json`, the framework, the language
+# version and the Expecto version by `Directory.Build.props`, and the runtime is derived from the pinned SDK. This runs at
+# step 2 of the publisher job, BEFORE the SDK is installed, so it only reads files: it must not run `dotnet --version`, which
+# fails under `rollForward: disable` on a runner without the exact SDK. The selected-SDK assertion lives in `Update.ps1 -Verify`.
+function Assert-Toolchain {
+    param([Parameter(Mandatory = $true)][string]$Name, [Parameter(Mandatory = $true)][scriptblock]$Check)
+
+    $script:checked = $script:checked + 1
+    try {
+        & $Check
+    } catch {
+        throw "cross-stage coherence failed [$Name]: $($_.Exception.Message)"
+    }
+}
+
+# A missing owner fails closed; it is never skipped.
+Assert-Toolchain -Name "global.json is the strict SDK owner" -Check { $null = Get-OwnedSdkVersion -Root $Root }
+Assert-Toolchain -Name "Directory.Build.props is the strict framework, language and Expecto owner" -Check { $null = Get-OwnedBuildProperties -Root $Root }
+$ownedProperties = Get-OwnedBuildProperties -Root $Root
+
+$ignoredDirectories = @(".git", "bin", "obj", "node_modules", ".venv")
+function Get-RepositoryFiles {
+    $pending = New-Object System.Collections.Generic.Stack[string]
+    $pending.Push($Root)
+    while ($pending.Count -gt 0) {
+        $directory = $pending.Pop()
+        foreach ($entry in [System.IO.Directory]::EnumerateFileSystemEntries($directory)) {
+            $name = [System.IO.Path]::GetFileName($entry)
+            if ([System.IO.Directory]::Exists($entry)) {
+                if ($ignoredDirectories -cnotcontains $name -and -not ((Get-Item -LiteralPath $entry -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint)) { $pending.Push($entry) }
+            } else {
+                $entry
+            }
+        }
+    }
+}
+
+$repositoryFiles = @(Get-RepositoryFiles)
+$relativeOf = { param($path) [System.IO.Path]::GetRelativePath($Root, $path).Replace('\', '/') }
+Assert-Toolchain -Name "exactly one Directory.Build.props and no competing build or package owner" -Check {
+    $found = @($repositoryFiles | ForEach-Object { & $relativeOf $_ })
+    $props = @($found | Where-Object { ([System.IO.Path]::GetFileName($_)) -ieq "Directory.Build.props" })
+    if ($props.Count -ne 1 -or $props[0] -cne "Directory.Build.props") { throw "the repository must contain exactly one root Directory.Build.props; found [$($props -join ', ')]" }
+    $competing = @($found | Where-Object {
+            $leaf = [System.IO.Path]::GetFileName($_)
+            ($leaf -like "Directory.Build.*" -and $_ -cne "Directory.Build.props") -or $leaf -ieq "Directory.Packages.props" -or $leaf -ieq "NuGet.config"
+        })
+    if ($competing.Count -gt 0) { throw "no Directory.Build.targets, nested Directory.Build.*, Directory.Packages.props or NuGet.config may exist; found [$($competing -join ', ')]" }
+}
+
+$projectFiles = @($repositoryFiles | Where-Object { $_ -like "*.fsproj" })
+$releaseProject = Join-Path $Root "infrastructure/release/Release.fsproj"
+Assert-Toolchain -Name "no project re-declares the owned framework or language version" -Check {
+    foreach ($project in $projectFiles) {
+        $relative = & $relativeOf $project
+        if ($relative -ceq "infrastructure/release/Release.fsproj") { continue }
+        $content = [System.IO.File]::ReadAllText($project)
+        if ($content -match '<TargetFrameworks?[\s>]') { throw "$relative re-declares TargetFramework or TargetFrameworks; Directory.Build.props owns it" }
+        if ($content -match '<LangVersion[\s>]') { throw "$relative re-declares LangVersion; Directory.Build.props owns it" }
+        if ($content -imatch '<OtherFlags>[^<]*--langversion') { throw "$relative re-declares the language version through OtherFlags; Directory.Build.props owns it" }
+    }
+}
+Assert-Toolchain -Name "the documented Release.fsproj exception equals the owner" -Check {
+    if (-not (Test-Path -LiteralPath $releaseProject -PathType Leaf)) { throw "infrastructure/release/Release.fsproj is missing" }
+    [xml]$release = Get-Content -LiteralPath $releaseProject -Raw
+    $frameworks = @($release.SelectNodes("//PropertyGroup/TargetFramework"))
+    $languages = @($release.SelectNodes("//PropertyGroup/LangVersion"))
+    if ($frameworks.Count -ne 1 -or $languages.Count -ne 1) { throw "Release.fsproj must declare exactly one TargetFramework and one LangVersion" }
+    if ($frameworks[0].InnerText -cne $ownedProperties.TargetFramework) { throw "Release.fsproj TargetFramework '$($frameworks[0].InnerText)' differs from the owner '$($ownedProperties.TargetFramework)'" }
+    if ($languages[0].InnerText -cne $ownedProperties.LangVersion) { throw "Release.fsproj LangVersion '$($languages[0].InnerText)' differs from the owner '$($ownedProperties.LangVersion)'" }
+}
+Assert-Toolchain -Name "every test PackageReference takes the owned Expecto version" -Check {
+    foreach ($relative in @("dotnet/tests/Tests.fsproj", "infrastructure/release/tests/Tests.fsproj", "infrastructure/resolver/tests/Tests.fsproj")) {
+        $path = Join-Path $Root $relative
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "$relative is missing" }
+        [xml]$project = Get-Content -LiteralPath $path -Raw
+        $references = @($project.SelectNodes("//PackageReference"))
+        if ($references.Count -eq 0) { throw "$relative declares no PackageReference" }
+        foreach ($reference in $references) {
+            if ($reference.GetAttribute("Version") -cne '$(ExpectoVersion)' -or $null -ne $reference.SelectSingleNode("Version")) {
+                throw "$relative PackageReference '$($reference.GetAttribute('Include'))' must carry exactly Version=`"`$(ExpectoVersion)`""
+            }
+        }
+    }
+}
+Assert-Toolchain -Name "no producer config declares a toolchain version" -Check {
+    foreach ($entry in $roster) {
+        $names = @((Get-Content -LiteralPath (Join-Path $Root $entry.configPath) -Raw | ConvertFrom-Json).PSObject.Properties.Name)
+        foreach ($forbidden in @("sdkVersion", "runtimeVersion")) {
+            if ($names -ccontains $forbidden) { throw "$($entry.configPath) declares '$forbidden'; the toolchain owners supply it" }
+        }
+    }
+}
 
 # Exactly the three frozen jobs exist; no bootstrap, builder or legacy test/prepare/publish job survives.
 Assert-Count -Name "the publisher job exists" -Pattern '^ {2}publisher:\s*$' -Expected 1
@@ -266,6 +438,15 @@ Assert-JobCount -Job "publication" -Name "publication uploads one metadata evide
 
 # Ordering: every transport arrives through the pinned action, and the downloaded member set is proven against the
 # independent declaration before anything from it executes.
+# The verification step resolves the SDK root and hands it over through MCP_RELEASE_SDK_ROOT, so it must run before the
+# runner's publish invocation (otherwise `publish` has no root) and before the step that declares the credential (otherwise
+# its muxer listing would run with the token in the environment). The token stays step-scoped: a job-level env block would
+# put it in every step, including the verification.
+Assert-Before -Job "publication" -Name "the toolchain is verified before the verified publisher is invoked" -First 'run: pwsh infrastructure/release/Update.ps1 -Verify' -Second '& $runner publish $configPath $candidateRoot'
+Assert-Before -Job "publication" -Name "the toolchain is verified before the step that declares the credential" -First 'run: pwsh infrastructure/release/Update.ps1 -Verify' -Second 'GITHUB_TOKEN: ${{ github.token }}'
+Assert-JobCount -Job "publication" -Name "the credential is declared by exactly one step-level entry" -Pattern '^ {10}GITHUB_TOKEN: \$\{\{ github\.token \}\}\s*$' -Expected 1
+Assert-JobCount -Job "publication" -Name "the publication job runs no SDK listing of its own" -Pattern '(--list-sdks|--list-runtimes)' -Expected 0
+Assert-JobCount -Job "publication" -Name "no job-level environment block can carry the credential into the verification step" -Pattern '^ {4}env:' -Expected 0
 Assert-Before -Job "publication" -Name "the declared artifact ids are validated before the first transfer" -First 'id: validateArtifacts' -Second 'uses: actions/download-artifact@'
 Assert-Before -Job "publication" -Name "the runtime transport is transferred before it is verified" -First 'uses: actions/download-artifact@' -Second '& pwsh -NoProfile -File $verifier'
 Assert-Before -Job "publication" -Name "the runtime inventory is verified before execution" -First '-InventoryJson $runtimeInventory' -Second '& $runner publish $configPath $candidateRoot'

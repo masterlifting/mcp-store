@@ -1,6 +1,6 @@
 # role: reusable module/helper
 # Pre-SDK reader for the enrollment roster; it mirrors the compiled `ReleaseEnrollment` acceptance rules so every gate rejects the same drift.
-# Only structural and participation policy is mirrored here; versions, SDKs, allowlists and URIs stay in each producer's canonical `Config.json`.
+# Only structural and participation policy is mirrored here; the per-component policy (versions, allowlists, URIs, platform) stays in each producer's canonical `Config.json`, and the shared SDK and runtime versions stay in their toolchain owners.
 
 $script:ReleaseSupportedComponentIds = @("dotnet", "workflow")
 $script:ReleaseForbiddenRosterFields = @(
@@ -39,7 +39,7 @@ function Get-ReleaseRoster {
 
         foreach ($field in $script:ReleaseForbiddenRosterFields) {
             if ($entry.PSObject.Properties.Name -contains $field) {
-                throw "the enrollment roster entry at index $($index - 1) has forbidden field '$field'; versions, SDKs, allowlists, URIs, and launch descriptors must stay in each producer's Config.json"
+                throw "the enrollment roster entry at index $($index - 1) has forbidden field '$field'; per-component policy values and launch descriptors must stay in each producer's Config.json, and the shared toolchain stays in its owners"
             }
         }
 

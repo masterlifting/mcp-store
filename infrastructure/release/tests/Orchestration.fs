@@ -25,17 +25,14 @@ let private componentIds = [ "dotnet"; "workflow" ]
 // The canonical root helper the coordination gate is routed through lives in the repository root.
 let private repoRoot = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "..", ".."))
 
-// WHY: the canonical SDK version is policy, not a discovered local value: each producer's
-//   Config.json is the only value source, so the fixture pin is read from the canonical policy
-//   instead of asking the host which SDK happens to be installed.
+// WHY: the canonical SDK version is the single authored owner in the root `global.json`, so the fixture
+//   pin is read from that owner instead of asking the host which SDK happens to be installed.
 let private repositorySdkVersion =
     lazy
-        (let configPath = Path.Combine(repoRoot, "workflow", "release", "Config.json")
-
-         match ReleasePolicy.parse configPath with
-         | Ok policy when not (String.IsNullOrWhiteSpace policy.SdkVersion) -> policy.SdkVersion
-         | Ok _ -> failwithf "the canonical policy declares no SDK version: %s" configPath
-         | Error error -> failwithf "the canonical policy could not be read: %s" (SharedFailure.ReleaseError.message error))
+        (match ReleaseToolchain.readSdkVersion repoRoot with
+         | Ok version when not (String.IsNullOrWhiteSpace version) -> version
+         | Ok _ -> failwithf "the canonical global.json declares no SDK version"
+         | Error error -> failwithf "the canonical global.json could not be read: %s" (SharedFailure.ReleaseError.message error))
 
 let private clearReadOnlyGitObjects (root: string) =
     let objectDirectory = Path.Combine(root, ".git", "objects")
@@ -66,15 +63,12 @@ let private write (root: string) (relativePath: string) (contents: string) =
     File.WriteAllText(path, contents)
     path
 
-// The fixture root receives the repository's SDK pin and a verbatim copy of the canonical root
+// The fixture root receives the repository's toolchain owners and a verbatim copy of the canonical root
 // helper, so the coordination gate exercises the trusted redirection instead of a second,
 // test-owned implementation of it.
 let private writeFixtureRuntime (root: string) =
-    let sdk = JsonObject()
-    sdk["version"] <- JsonValue.Create repositorySdkVersion.Value
-    let document = JsonObject()
-    document["sdk"] <- sdk
-    write root "global.json" (document.ToJsonString()) |> ignore
+    for relativePath in [ "global.json"; "Directory.Build.props" ] do
+        File.Copy(Path.Combine(repoRoot, relativePath), Path.Combine(root, relativePath), true)
 
     let source = Path.Combine(repoRoot, "Run.ps1")
 
@@ -95,8 +89,6 @@ let private policyJson componentId =
     node["componentId"] <- JsonValue.Create componentId
     node["version"] <- JsonValue.Create "7.8.9"
     node["entryDll"] <- JsonValue.Create entryDll
-    node["sdkVersion"] <- JsonValue.Create "fixture-sdk"
-    node["runtimeVersion"] <- JsonValue.Create "fixture-runtime"
     node["platform"] <- JsonValue.Create "fixture-platform"
     node["archiveName"] <- JsonValue.Create "v7.8.9.zip"
     node["assetUri"] <- JsonValue.Create $"https://github.com/masterlifting/mcp-store/releases/download/{componentId}/v7.8.9.zip"
@@ -119,8 +111,8 @@ let private policyJson componentId =
 //   canonical 9-field projection path is exercised as the canonical Config.json files.
 let private policySource componentId = policyJson componentId
 
-let private parsePolicy configPath =
-    ReleasePolicy.parseBytes configPath (File.ReadAllBytes configPath)
+let private parsePolicy (toolchain: ReleaseToolchain.Toolchain) configPath =
+    ReleasePolicy.parseBytes toolchain configPath (File.ReadAllBytes configPath)
     |> function
         | Ok policy -> policy
         | Error error -> failwithf "fixture policy failed to parse: %s" (SharedFailure.ReleaseError.message error)
@@ -419,7 +411,7 @@ let private writeFixture (root: string) (failure: StageFailure option) =
 
         for componentId in componentIds do
             let configPath = Path.Combine(root, componentId, "release", "Config.json")
-            writeProducerArchive root (parsePolicy configPath) head
+            writeProducerArchive root (parsePolicy Fixture.canonicalToolchain configPath) head
     }
 
 let private runPrepare root configPath outputPath =

@@ -47,7 +47,7 @@ let private releasePolicy componentId =
     let path = Path.Combine(repositoryRoot, componentId, "release", "Config.json")
     let bytes = File.ReadAllBytes path
 
-    match ReleasePolicy.parseBytes path bytes with
+    match ReleasePolicy.parseBytes Fixture.canonicalToolchain path bytes with
     | Ok policy -> policy
     | Error error -> failtestf "canonical %s policy was rejected: %A" componentId error
 

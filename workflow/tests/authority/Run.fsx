@@ -3,6 +3,7 @@
 // Every confirmation in the child is a deterministic test double, never operator authorization.
 
 #load "../../domain/Integrity.fs"
+#load "../Sdk.fsx"
 
 open System
 open System.Diagnostics
@@ -34,7 +35,7 @@ let isInsideDirectory (parent: string) (candidate: string) =
 
 let repoRoot = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "..", ".."))
 let childScript = Path.Combine(__SOURCE_DIRECTORY__, "Cases.fsx")
-let requiredSdk = "11.0.100"
+let requiredSdk = Sdk.requiredSdk
 
 let approvedBase =
     match Environment.GetEnvironmentVariable "MCP_WORKFLOW_TEST_TEMP_BASE" with

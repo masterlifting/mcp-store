@@ -25,6 +25,9 @@ let private withTemporaryRoot (action: string -> Async<unit>) : Async<unit> =
     async {
         let root = Path.Combine(Path.GetTempPath(), "mcp-release-enrollment-" + Guid.NewGuid().ToString("N"))
         Directory.CreateDirectory root |> ignore
+        // Update.ps1 reads the authored SDK from `global.json` before it projects, and prepare resolves the
+        // full toolchain, so the scratch root carries the same owners as the repository.
+        Fixture.copyToolchainOwners root
 
         try
             do! action root
@@ -62,18 +65,16 @@ let private writeRosterText root (text: string) =
     File.WriteAllText(path, text)
     path
 
-let private configText (componentId: string) (version: string) (entryDll: string) (sdk: string) (runtime: string) (platform: string) =
+let private configText (componentId: string) (version: string) (entryDll: string) (platform: string) =
     let archiveName = $"v{version}.zip"
     let assetUri = $"https://github.com/masterlifting/mcp-store/releases/download/{componentId}/{archiveName}"
-    // WHY: the production policy reader consumes strict JSON over the canonical 9 fields;
-    //   fixture Config.json files share the same shape so the roster toolchain checks
-    //   exercise the same projection path as the canonical configs.
+    // WHY: the production policy reader consumes strict JSON over the canonical policy fields; the SDK and
+    //   runtime are supplied by the toolchain owner, so a fixture config that still carried them would be
+    //   rejected as an unknown field.
     let node = System.Text.Json.Nodes.JsonObject()
     node["componentId"] <- System.Text.Json.Nodes.JsonValue.Create componentId
     node["version"] <- System.Text.Json.Nodes.JsonValue.Create version
     node["entryDll"] <- System.Text.Json.Nodes.JsonValue.Create entryDll
-    node["sdkVersion"] <- System.Text.Json.Nodes.JsonValue.Create sdk
-    node["runtimeVersion"] <- System.Text.Json.Nodes.JsonValue.Create runtime
     node["platform"] <- System.Text.Json.Nodes.JsonValue.Create platform
     node["archiveName"] <- System.Text.Json.Nodes.JsonValue.Create archiveName
     node["assetUri"] <- System.Text.Json.Nodes.JsonValue.Create assetUri
@@ -89,20 +90,20 @@ let private configText (componentId: string) (version: string) (entryDll: string
     node["launchArguments"] <- launchArguments
     node.ToJsonString(System.Text.Json.JsonSerializerOptions(WriteIndented = true))
 
-let private writeConfig root configPath componentId version entryDll sdk runtime platform =
+let private writeConfig root configPath componentId version entryDll platform =
     let path = Path.Combine(root, configPath)
     Directory.CreateDirectory(Path.GetDirectoryName path) |> ignore
-    File.WriteAllText(path, configText componentId version entryDll sdk runtime platform)
+    File.WriteAllText(path, configText componentId version entryDll platform)
     path
 
 let private projectConfigEntries =
     [ "dotnet", "dotnet/release/Config.json", "Mcp.Dotnet.dll"
       "workflow", "workflow/release/Config.json", "Mcp.Workflow.dll" ]
 
-let private writeProjectConfigs root sdk runtime platform participants =
+let private writeProjectConfigs root platform participants =
     for componentId, configPath, entryDll in projectConfigEntries do
         if participants |> List.exists (fun (id, _) -> id = componentId) then
-            writeConfig root configPath componentId "1.0.0" entryDll sdk runtime platform |> ignore
+            writeConfig root configPath componentId "1.0.0" entryDll platform |> ignore
 
 let private runUpdate root parameters =
     async {
@@ -137,13 +138,19 @@ let private containsDiagnostic (fragment: string) (text: string) =
     let normalized = Regex.Replace(withoutPowerShellBorders, @"\s+", " ")
     normalized.Contains(fragment, StringComparison.OrdinalIgnoreCase)
 
+let private addPolicyField root configPath (name: string) (value: string) =
+    let path = Path.Combine(root, configPath)
+    let node = JsonNode.Parse(File.ReadAllText path).AsObject()
+    node[name] <- JsonValue.Create value
+    File.WriteAllText(path, node.ToJsonString())
+
 let private updateProjectUsesRosterProjectionAndRejectsDrift =
     testCaseAsync "Update.ps1 -Project uses the controlled roster and rejects duplicate/config identity/toolchain drift" <| async {
         do!
             withTemporaryRoot (fun root ->
                 async {
                     let reversed = List.rev currentParticipants
-                    writeProjectConfigs root "fixture-sdk" "fixture-runtime" "fixture-platform" reversed
+                    writeProjectConfigs root "fixture-platform" reversed
                     writeRoster root reversed None |> ignore
 
                     let! exitCode, _, _, output = runUpdate root [ "-Project"; "-Root"; root ]
@@ -164,13 +171,16 @@ let private updateProjectUsesRosterProjectionAndRejectsDrift =
                     let! policyResult = runUpdate root [ "-Project"; "-Root"; root ]
 
                     writeRoster root currentParticipants None |> ignore
-                    writeConfig root "dotnet/release/Config.json" "workflow" "1.0.0" "Mcp.Workflow.dll" "fixture-sdk" "fixture-runtime" "fixture-platform" |> ignore
-                    writeConfig root "workflow/release/Config.json" "workflow" "1.0.0" "Mcp.Workflow.dll" "fixture-sdk" "fixture-runtime" "fixture-platform" |> ignore
+                    writeConfig root "dotnet/release/Config.json" "workflow" "1.0.0" "Mcp.Workflow.dll" "fixture-platform" |> ignore
+                    writeConfig root "workflow/release/Config.json" "workflow" "1.0.0" "Mcp.Workflow.dll" "fixture-platform" |> ignore
                     let! identityResult = runUpdate root [ "-Project"; "-Root"; root ]
 
-                    writeRoster root currentParticipants None |> ignore
-                    writeConfig root "dotnet/release/Config.json" "dotnet" "1.0.0" "Mcp.Dotnet.dll" "fixture-sdk" "fixture-runtime" "fixture-platform" |> ignore
-                    writeConfig root "workflow/release/Config.json" "workflow" "1.0.0" "Mcp.Workflow.dll" "fixture-sdk" "runtime-drift" "fixture-platform" |> ignore
+                    writeProjectConfigs root "fixture-platform" currentParticipants
+                    addPolicyField root "dotnet/release/Config.json" "sdkVersion" "11.0.100"
+                    let! policyFieldResult = runUpdate root [ "-Project"; "-Root"; root ]
+
+                    writeProjectConfigs root "fixture-platform" currentParticipants
+                    addPolicyField root "workflow/release/Config.json" "platform" "fixture-drift-platform"
                     let! toolchainResult = runUpdate root [ "-Project"; "-Root"; root ]
 
                     let outputOf (_, stdout, stderr, _) = stdout + stderr
@@ -188,7 +198,7 @@ let private updateProjectUsesRosterProjectionAndRejectsDrift =
                     Expect.isTrue
                         ((outputOf extraResult).Contains("unsupported componentId 'telegram'", StringComparison.Ordinal))
                         "the extra PS participant is identified"
-                    assertRejected "the PS boundary rejects copied policy before projection" policyResult
+                    assertRejected "the PS boundary rejects copied policy in the roster before projection" policyResult
                     Expect.isTrue
                         ((outputOf policyResult).Contains("forbidden field 'sdkVersion'", StringComparison.Ordinal))
                         "the PS policy mirror field is identified"
@@ -196,10 +206,14 @@ let private updateProjectUsesRosterProjectionAndRejectsDrift =
                     Expect.isTrue
                         (containsDiagnostic "does not match roster participant 'dotnet'" (outputOf identityResult))
                         $"config identity mismatch is actionable: {outputOf identityResult}"
-                    assertRejected "the PS bootstrap projection retains common-runtime enforcement" toolchainResult
+                    assertRejected "the PS boundary rejects a policy that still declares a toolchain version" policyFieldResult
                     Expect.isTrue
-                        ((outputOf toolchainResult).Contains("participants disagree on canonical 'runtimeVersion'", StringComparison.Ordinal))
-                        "common bootstrap runtime mismatch is reported"
+                        ((outputOf policyFieldResult).Contains("declares unknown field(s): sdkVersion", StringComparison.Ordinal))
+                        $"the retired policy field is identified: {outputOf policyFieldResult}"
+                    assertRejected "the PS boundary retains participant agreement for the remaining shared policy field" toolchainResult
+                    Expect.isTrue
+                        ((outputOf toolchainResult).Contains("participants disagree on canonical 'platform'", StringComparison.Ordinal))
+                        "common platform mismatch is reported"
                 })
     }
 
@@ -208,7 +222,7 @@ let private updateVerifyRejectsUnenrolledComponent =
         do!
             withTemporaryRoot (fun root ->
                 async {
-                    writeProjectConfigs root Fixture.canonicalSdk Fixture.canonicalRuntime Fixture.canonicalPlatform currentParticipants
+                    writeProjectConfigs root "fixture-platform" currentParticipants
                     writeRoster root currentParticipants None |> ignore
 
                     let! exitCode, stdout, stderr, _ =
@@ -227,7 +241,7 @@ let private prepareRejectsUnregisteredConfigBeforeAnyChild =
                 async {
                     writeRoster root currentParticipants None |> ignore
                     let configPath =
-                        writeConfig root "dotnet/release/Alternate.fsx" "dotnet" "1.0.4" "Mcp.Dotnet.dll" Fixture.canonicalSdk Fixture.canonicalRuntime Fixture.canonicalPlatform
+                        writeConfig root "dotnet/release/Alternate.fsx" "dotnet" "1.0.4" "Mcp.Dotnet.dll" "fixture-platform"
                     let marker = Path.Combine(root, "config-executed.txt")
                     File.AppendAllText(configPath, $"{Environment.NewLine}do System.IO.File.WriteAllText(@\"{marker}\", \"ran\")")
                     let candidateDirectory = Path.Combine(root, "candidate-output")

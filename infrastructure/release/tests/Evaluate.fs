@@ -95,7 +95,7 @@ let private verifiedCandidate (archivePath: string) (manifestPath: string) (eval
     let policyBytes = File.ReadAllBytes configPath
 
     let policy =
-        match ReleasePolicy.parseBytes configPath policyBytes with
+        match ReleasePolicy.parseBytes Fixture.canonicalToolchain configPath policyBytes with
         | Ok value -> value
         | Error error -> failtestf "canonical candidate policy was rejected: %s" (ReleaseError.message error)
 

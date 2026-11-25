@@ -1,13 +1,11 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFramework>net11.0</TargetFramework>
     <RootNamespace>Mcp.Dotnet.Tests</RootNamespace>
     <AssemblyName>Mcp.Dotnet.Tests</AssemblyName>
     <OutputType>Exe</OutputType>
     <IsPackable>false</IsPackable>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <WarningsAsErrors>3390;3391;3392;3393</WarningsAsErrors>
-    <LangVersion>9.0</LangVersion>
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="Support.fs" />
@@ -24,8 +22,8 @@
     <Compile Include="Main.fs" />
   </ItemGroup>
   <ItemGroup>
-    <PackageReference Include="Expecto" Version="10.2.3" />
-    <PackageReference Include="Expecto.FsCheck" Version="10.2.3" />
+    <PackageReference Include="Expecto" Version="$(ExpectoVersion)" />
+    <PackageReference Include="Expecto.FsCheck" Version="$(ExpectoVersion)" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="../Dotnet.fsproj" />

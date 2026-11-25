@@ -148,7 +148,7 @@ let arbitraryRootResolution () =
 
 let bothProducerPolicies () =
     for relative in [ "dotnet/release/Config.json"; "workflow/release/Config.json" ] do
-        let policy = assertOk (sprintf "%s projects a policy" relative) (ReleasePolicy.parse (Path.Combine(Fixture.repoRoot, relative)))
+        let policy = assertOk (sprintf "%s projects a policy" relative) (ReleasePolicy.parse Fixture.canonicalToolchain (Path.Combine(Fixture.repoRoot, relative)))
 
         let contract =
             assertOk (sprintf "%s projects a trusted contract" relative) (ReleaseCompare.contractFromPolicy policy policy.ArchiveName)

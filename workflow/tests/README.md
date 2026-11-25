@@ -66,6 +66,17 @@ The mandatory authenticated boundary signs every persisted task with the produce
 
 It is a helper script for those suites, not a standalone suite.
 
+## Expected SDK owner
+
+`Sdk.fsx` is the one reader of the repository-root `global.json` for these suites. It exposes `Sdk.requiredSdk`, the
+`sdk.version` that the repository build, the manifest's `producer.sdk` and the CI install all derive from, and it fails
+at load when the file is missing, is not valid strict JSON, or repeats a key, so a drifted owner is never reported as a
+passing check. `confirmation/Run.fsx`, `authentication/Run.fsx`, `authority/Run.fsx`, `integrity/Run.fsx`,
+`protocol/Run.fsx`, `protocol/Findings.fsx` and `protocol/Negotiation.fsx` `#load` it instead of carrying their own
+literal and parser. The full strict owner shape (exactly one `sdk` object of `version`, `rollForward` and
+`allowPrerelease`) stays owned by `infrastructure/release/Toolchain.fs` and its PowerShell mirror, so this helper reads
+only the value it asserts. It is a helper script, not a standalone suite.
+
 ### Authenticated expectations in these suites
 
 `contract/Run.fsx` covers the strict schema3 persistence boundary: the transport DTO carries the canonical schema version and deliberately omits the persistence receipt, the unsigned transport DTO is not a task load, the persisted sidecar carries a framed `hmac-sha256-v1:` receipt and parses back to the same model, the authenticated read returns the same model, only the canonical version is accepted, a legacy schema2 record is rejected with the typed unsupported-schema error and is never rewritten, legacy layouts are still rejected, and the runtime lock stays ephemeral.
@@ -113,4 +124,4 @@ foreach ($suite in $suites) {
 
 The `protocol/Run.fsx`, `protocol/Negotiation.fsx`, `protocol/Findings.fsx`, and `confirmation/Run.fsx` process-boundary scripts require an existing Release entry DLL. `coordination/Run.fsx` otherwise publishes the producer, so set `MCP_WORKFLOW_PACKAGED_DLL` to an already-authorized Release DLL in the environment that starts the recipe when builds are out of scope. Unix FIFO/socket cases in `artifacts/Run.fsx` are explicitly skipped on Windows hosts.
 
-`distribution/Run.fsx` invokes the release build and pin-generation scripts, which mutate distribution artifacts; run it only when release-artifact generation is authorized. `coordination/Abandon.fsx` is a child-process helper for `coordination/Run.fsx`, `integrity/Cases.fsx` is a child-process helper for `integrity/Run.fsx`, `authority/Cases.fsx` is a child-process helper for `authority/Run.fsx`, `authentication/Cases.fsx` is a child-process helper for `authentication/Run.fsx`, `confirmation/Isolation.fsx` is an isolation-guard helper for `confirmation/Run.fsx`, and `Isolation.fsx` is the shared isolation-guard helper for `authority/Metadata.fsx`, `locking/Run.fsx`, `evidence/Run.fsx`, `contract/Run.fsx`, `profile/Run.fsx`, `protocol/Run.fsx`, `domain/Run.fsx`, `Projections.fsx`, `schema/Run.fsx`, `path/Run.fsx`, `artifacts/Run.fsx`, `protocol/Findings.fsx`, `protocol/Negotiation.fsx`, and `coordination/Run.fsx`; `commands/Create.fsx`, `commands/Get.fsx`, `commands/Apply.fsx`, and `commands/Validate.fsx` are command entrypoints rather than standalone suites.
+`distribution/Run.fsx` invokes the release build and pin-generation scripts, which mutate distribution artifacts; run it only when release-artifact generation is authorized. `coordination/Abandon.fsx` is a child-process helper for `coordination/Run.fsx`, `integrity/Cases.fsx` is a child-process helper for `integrity/Run.fsx`, `authority/Cases.fsx` is a child-process helper for `authority/Run.fsx`, `authentication/Cases.fsx` is a child-process helper for `authentication/Run.fsx`, `confirmation/Isolation.fsx` is an isolation-guard helper for `confirmation/Run.fsx`, and `Isolation.fsx` is the shared isolation-guard helper for `authority/Metadata.fsx`, `locking/Run.fsx`, `evidence/Run.fsx`, `contract/Run.fsx`, `profile/Run.fsx`, `protocol/Run.fsx`, `domain/Run.fsx`, `Projections.fsx`, `schema/Run.fsx`, `path/Run.fsx`, `artifacts/Run.fsx`, `protocol/Findings.fsx`, `protocol/Negotiation.fsx`, and `coordination/Run.fsx`; `Sdk.fsx` is the shared expected-SDK helper for `confirmation/Run.fsx`, `authentication/Run.fsx`, `authority/Run.fsx`, `integrity/Run.fsx`, `protocol/Run.fsx`, `protocol/Findings.fsx`, and `protocol/Negotiation.fsx`; `commands/Create.fsx`, `commands/Get.fsx`, `commands/Apply.fsx`, and `commands/Validate.fsx` are command entrypoints rather than standalone suites.

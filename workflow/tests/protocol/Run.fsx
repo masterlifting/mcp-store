@@ -4,6 +4,7 @@
 // The suite persists tasks and reaches the producer-owned per-account integrity key, so it must run in an isolated child process with redirected per-account application data; the isolation guard loads before the domain sources so the key path is never captured outside that sandbox.
 
 #load "../Isolation.fsx"
+#load "../Sdk.fsx"
 #load "../../domain/Computation.fs"
 #load "../../domain/Integrity.fs"
 #load "../../domain/Workflow.fs"
@@ -25,7 +26,7 @@ let commandDirectory = Path.Combine(repoRoot, "workflow", "commands")
 // The frozen framework-dependent distribution has no apphost. Consumer
 // semantics resolve the pinned dotnet host and invoke
 // `dotnet exec <entry DLL>`.
-let requiredSdk = "11.0.100"
+let requiredSdk = Sdk.requiredSdk
 
 let releaseEntryDll =
     Path.Combine(repoRoot, "workflow", "bin", "Release", "net11.0", "Mcp.Workflow.dll")

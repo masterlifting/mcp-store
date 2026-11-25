@@ -3,6 +3,8 @@
 // The children run with redirected application-data and home directories, so the real per-account integrity key is never read, created, or rotated here.
 // Every confirmation in a child is a deterministic test double standing in for the native host form, so no case is evidence that a human approved anything.
 
+#load "../Sdk.fsx"
+
 open System
 open System.Diagnostics
 open System.IO
@@ -33,7 +35,7 @@ let isInsideDirectory (parent: string) (candidate: string) =
 
 let repoRoot = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "..", ".."))
 let childScript = Path.Combine(__SOURCE_DIRECTORY__, "Cases.fsx")
-let requiredSdk = "11.0.100"
+let requiredSdk = Sdk.requiredSdk
 
 
 let approvedBase =
