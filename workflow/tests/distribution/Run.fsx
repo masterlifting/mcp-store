@@ -48,7 +48,13 @@ let producer: DistributionTestHelper.Producer =
       ArchiveName = config.ArchiveName
       AssetUri = config.AssetUri
       PublishedFiles = config.PublishedFiles
-      LaunchKind = config.LaunchKind }
+      LaunchKind = DistributionContract.LaunchKind.wireName config.LaunchKind }
+
+// The helper checks manifest consistency only, so each entrypoint pins its own launch role.
+DistributionTestHelper.assertEqual
+    "the workflow package is an MCP launch target"
+    DistributionContract.DotnetExec
+    config.LaunchKind
 
 let layout: DistributionTestHelper.Layout =
     { RepoRoot = repoRoot

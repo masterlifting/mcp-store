@@ -6,7 +6,6 @@ module DistributionTestHelper
 
 #load "Failure.fs"
 #load "Provenance.fs"
-#load "distribution/Contract.fs"
 
 open System
 open System.IO
@@ -20,7 +19,9 @@ open SharedFailure
 open BuildProvenance
 
 // Producer-supplied identity for the shared v2 distribution contract. The launch
-// descriptor is asserted structurally rather than re-declared here.
+// descriptor is asserted structurally rather than re-declared here, and the launch kind
+// crosses as its contract wire name so entrypoints that already load the contract keep a
+// single contract type identity per script session.
 type Producer =
     { ComponentId: string
       Version: string
@@ -31,7 +32,7 @@ type Producer =
       ArchiveName: string
       AssetUri: string
       PublishedFiles: string list
-      LaunchKind: DistributionContract.LaunchKind }
+      LaunchKind: string }
 
 type Layout =
     { RepoRoot: string
@@ -146,17 +147,19 @@ let assertDistributionContract (producer: Producer) (layout: Layout) : Async<uni
 
         let launchNode = manifest["launch"].AsObject()
         assertExactKeys "manifest launch fields" [ "kind"; "entrypoint"; "arguments" ] (keysOf launchNode)
-        assertString "manifest launch kind" (DistributionContract.LaunchKind.wireName producer.LaunchKind) launchNode["kind"]
+        assertString "manifest launch kind" producer.LaunchKind launchNode["kind"]
         assertString "manifest launch entrypoint" producer.EntryDll launchNode["entrypoint"]
 
         let arguments = launchNode["arguments"].AsArray()
 
-        // The kind fixes the argument rule: an MCP launch target requires its inputs, while a host-run CLI declares none.
+        // The kind fixes the argument rule: an MCP launch target requires its inputs, while a host-run CLI declares
+        // none. These are the contract's wire names, and an unexpected value fails rather than skipping the rule.
         match producer.LaunchKind with
-        | DistributionContract.LaunchKind.DotnetExec ->
+        | "dotnet-exec" ->
             assertTrue "manifest launch declares at least one required argument" (arguments.Count > 0)
-        | DistributionContract.LaunchKind.DotnetCli ->
+        | "dotnet-cli" ->
             assertEqual "manifest launch declares no arguments for a host-run CLI" 0 arguments.Count
+        | other -> failwithf "manifest launch kind is not a closed contract value: %s" other
 
         for value in arguments do
             let argument = value.AsObject()

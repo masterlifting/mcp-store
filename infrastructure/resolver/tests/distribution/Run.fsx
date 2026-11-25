@@ -109,7 +109,7 @@ let producer: DistributionTestHelper.Producer =
       ArchiveName = config.ArchiveName
       AssetUri = config.AssetUri
       PublishedFiles = config.PublishedFiles
-      LaunchKind = config.LaunchKind }
+      LaunchKind = LaunchKind.wireName config.LaunchKind }
 
 let layout: DistributionTestHelper.Layout =
     { RepoRoot = repoRoot
@@ -132,7 +132,7 @@ async {
         DistributionTestHelper.assertTrue "regeneration removes resolver staging output" (not (File.Exists stalePublishPath))
         do! runScript (Path.Combine(resolverRoot, "release", "Pin.fsx")) |> Async.Ignore
 
-        DistributionTestHelper.assertEqual "the resolver is enrolled as a host-run CLI" DotnetCli producer.LaunchKind
+        DistributionTestHelper.assertEqual "the resolver is enrolled as a host-run CLI" (LaunchKind.wireName DotnetCli) producer.LaunchKind
         do! DistributionTestHelper.assertDistributionContract producer layout
 
         DistributionTestHelper.assertExactFiles
@@ -167,7 +167,7 @@ async {
             "the usage diagnostic names both subcommands"
             (capture.Stderr.Contains("expected 'resolve' or 'run'", StringComparison.Ordinal))
 
-        printfn "OK resolver package: %s is a %s artifact and refuses to start without a subcommand" archiveName (LaunchKind.wireName producer.LaunchKind)
+        printfn "OK resolver package: %s is a %s artifact and refuses to start without a subcommand" archiveName producer.LaunchKind
     finally
         if File.Exists stalePublishPath then File.Delete stalePublishPath
 
