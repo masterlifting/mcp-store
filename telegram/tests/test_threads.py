@@ -34,6 +34,9 @@ class IteratingClient:
     async def get_messages(self, entity, **kwargs):
         return self.messages_by_id.get(kwargs.get("ids"))
 
+    async def get_me(self):
+        return SimpleNamespace(id=42)
+
     async def iter_messages(self, entity, **kwargs):
         self.iter_messages_calls.append((entity, kwargs))
         for message in self.iterated_messages:
@@ -121,6 +124,12 @@ def _message(message_id, text, reply_to=None, action=None):
         forwards=None,
         out=False,
     )
+
+
+def _topic_message(message_id, text, topic_id):
+    return _message(message_id, text, reply_to=SimpleNamespace(
+        forum_topic=True, reply_to_msg_id=topic_id, reply_to_top_id=topic_id
+    ))
 
 
 class TopicCreateAction:
@@ -231,14 +240,28 @@ async def test_get_messages_in_range_uses_exact_id_bounds_and_returns_terminal_m
     payload = json.loads(result)
     assert client.iter_messages_calls == [("forum-entity", {"min_id": 100, "max_id": 106})]
     assert [record["id"] for record in payload["results"]] == [101, 105]
-    assert payload | {"results": None} == {
+    fingerprint = payload["records_sha256"]
+    assert isinstance(fingerprint, str) and len(fingerprint) == 64
+    assert payload | {"results": None, "records_sha256": None} == {
         "results": None,
         "chat_id": -1001528034935,
+        "account_user_id": 42,
         "after_message_id": 100,
         "through_message_id": 105,
         "retrieved_count": 2,
         "range_complete": True,
+        "records_sha256": None,
     }
+
+    # Counter changes must not invalidate an unchanged review on resume.
+    client.iterated_messages[1].views = 80
+    client.iterated_messages[1].replies = SimpleNamespace(replies=15)
+    refreshed = json.loads(await messages.get_messages_in_range(
+        chat_id=-1001528034935, after_message_id=100, through_message_id=105
+    ))
+    assert refreshed["results"][0]["engagement"]["views"] == 80
+    assert refreshed["results"][0]["comments"] == 15
+    assert refreshed["records_sha256"] == fingerprint
 
 
 @pytest.mark.asyncio
@@ -348,8 +371,8 @@ async def test_get_topic_messages_in_range_scopes_iterator_and_results_to_topic(
     through_message_id = 219833
     client = IteratingClient(
         [
-            _message(219831, "Included"),
-            _message(219832, "Included upper"),
+            _topic_message(219831, "Included", topic_id),
+            _topic_message(219832, "Included upper", topic_id),
         ],
         {topic_id: _message(topic_id, "Topic root", action=TopicCreateAction())},
     )
@@ -376,14 +399,25 @@ async def test_get_topic_messages_in_range_scopes_iterator_and_results_to_topic(
     assert payload["retrieved_count"] == 2
     assert payload["range_complete"] is True
 
+    fingerprint = payload["records_sha256"]
+    client.iterated_messages[0].views = 20
+    client.iterated_messages[0].replies = SimpleNamespace(replies=5)
+    refreshed = json.loads(await messages.get_topic_messages_in_range(
+        chat_id=-1001528034935, topic_id=topic_id,
+        after_message_id=219830, through_message_id=through_message_id,
+    ))
+    assert refreshed["results"][0]["engagement"]["views"] == 20
+    assert refreshed["results"][0]["comments"] == 5
+    assert refreshed["records_sha256"] == fingerprint
+
 
 @pytest.mark.asyncio
 async def test_get_topic_messages_in_range_cannot_admit_cross_topic_server_results(monkeypatch):
     topic_id = 33429
     client = ServerScopedTopicClient(
         {
-            topic_id: [_message(219833, "Included")],
-            99999: [_message(219833, "Foreign topic message")],
+            topic_id: [_topic_message(219833, "Included", topic_id)],
+            99999: [_topic_message(219833, "Foreign topic message", 99999)],
         },
         {topic_id: _message(topic_id, "Topic root", action=TopicCreateAction())},
     )

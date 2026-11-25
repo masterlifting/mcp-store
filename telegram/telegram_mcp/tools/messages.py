@@ -1,5 +1,7 @@
 """Messages MCP tools."""
 
+import hashlib
+
 from telegram_mcp.tools.chats import GetForumTopicsByIDRequest
 from telegram_mcp.runtime import *
 
@@ -91,6 +93,83 @@ def _link_urls(msg):
     except Exception:
         pass
     return out
+
+
+def _review_fingerprint(records) -> str:
+    """Bind review-relevant records without volatile engagement/display fields."""
+    stable = [
+        {key: value for key, value in record.items()
+         if key not in {"engagement", "comments", "pinned", "sender", "username"}}
+        for record in records
+    ]
+    canonical = json.dumps(
+        stable, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        default=json_serializer,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _review_record(msg, topic_id: Optional[int] = None) -> dict:
+    """Inventory content for bounded chat or topic review without media bytes."""
+    record = message_to_dict(msg)
+    if topic_id is not None:
+        record["topic_id"] = topic_id
+    raw_text = getattr(msg, "message", None) or ""
+    # Keep range records small, but fingerprint all sanitized text, including
+    # content beyond the preview, for later fragment and resume validation.
+    full_text = sanitize_user_content(raw_text, max_length=len(raw_text)) if raw_text else ""
+    if raw_text:
+        record["text"] = full_text[:1024]
+        record["text_sha256"] = hashlib.sha256(full_text.encode("utf-8")).hexdigest()
+    record["text_truncated"] = len(full_text) > 1024
+    if getattr(msg, "rich_message", None) is not None:
+        record["content_unsupported"] = True
+
+    urls = list(record.get("link_urls", []))
+    truncated = False
+
+    def add_url(url):
+        nonlocal truncated
+        if not isinstance(url, str) or not url:
+            return
+        if len(url) > 4096:
+            truncated = True
+        safe = sanitize_user_content(url).replace("\n", "").replace("\t", "")
+        if safe != "[empty]" and safe not in urls:
+            urls.append(safe)
+
+    for url in re.findall(r"(?i)\b(?:https?://|tg://)[^\s<>\"']+", raw_text):
+        add_url(url.rstrip(".,;:!?)]}"))
+    for row in getattr(msg, "buttons", None) or []:
+        for button in row:
+            add_url(getattr(button, "url", None))
+    add_url(getattr(getattr(msg, "web_preview", None), "url", None))
+    if urls:
+        record["link_urls"] = urls
+    if truncated or any(url.endswith("... [truncated]") for url in urls):
+        record["link_urls_truncated"] = True
+
+    media = record.get("media")
+    if media:
+        file = getattr(msg, "file", None)
+        if file is not None:
+            record["media_info"] = {
+                key: sanitize_user_content(value, max_length=256) if isinstance(value, str) else value
+                for key, value in (
+                    ("name", getattr(file, "name", None)),
+                    ("mime_type", getattr(file, "mime_type", None)),
+                    ("size", getattr(file, "size", None)),
+                )
+                if value is not None
+            }
+        if media in {"video", "video_note"} and not raw_text:
+            record["video_text_missing"] = True
+    elif (
+        getattr(msg, "media", None) is not None
+        and getattr(msg, "web_preview", None) is None
+    ):
+        record["content_unsupported"] = True
+    return record
 
 
 def get_reply_quote(msg) -> Optional[dict]:
@@ -346,16 +425,197 @@ async def _get_topic_read_watermark(cl, entity, topic_id: int):
     return None
 
 
-async def _get_chat_read_watermark(cl, entity):
-    """Read the authoritative inbox watermark for one exact chat peer."""
+async def _get_chat_dialog(cl, entity):
+    """Fetch the authoritative dialog row for one resolved chat."""
     input_peer = await cl.get_input_entity(entity)
     peer_dialogs = await cl(
         functions.messages.GetPeerDialogsRequest(peers=[types.InputDialogPeer(peer=input_peer)])
     )
     dialogs = getattr(peer_dialogs, "dialogs", None) or []
-    if len(dialogs) != 1:
-        return None
-    return getattr(dialogs[0], "read_inbox_max_id", None)
+    return dialogs[0] if len(dialogs) == 1 else None
+
+
+async def _get_chat_read_watermark(cl, entity):
+    """Read the authoritative inbox watermark for one exact chat peer."""
+    dialog = await _get_chat_dialog(cl, entity)
+    return getattr(dialog, "read_inbox_max_id", None)
+
+
+@mcp.tool(annotations=ToolAnnotations(title="Get Chat Review State", readOnlyHint=True))
+@with_account(readonly=True)
+async def get_chat_review_state(chat_id: int, account: Optional[str] = None) -> str:
+    """Read exact ordinary-chat bounds and authenticated account identity."""
+    error = _validate_canonical_chat_id(chat_id)
+    if error:
+        return error
+    try:
+        cl = get_client(account)
+        entity = await resolve_entity(chat_id, cl)
+        error = _validate_resolved_canonical_chat_id(entity, chat_id)
+        if error:
+            return error
+        me = await cl.get_me()
+        user_id = getattr(me, "id", None)
+        if isinstance(user_id, bool) or not isinstance(user_id, int) or user_id <= 0:
+            return "Authenticated Telegram user ID is unavailable."
+        dialog = await _get_chat_dialog(cl, entity)
+        after = getattr(dialog, "read_inbox_max_id", None)
+        through = getattr(dialog, "top_message", None)
+        if (isinstance(after, bool) or not isinstance(after, int) or after <= 0
+                or isinstance(through, bool) or not isinstance(through, int)
+                or through < after or through <= 0):
+            return "Chat read boundaries are unavailable or inconsistent."
+        return format_tool_result([{
+            "account_user_id": user_id,
+            "chat_id": chat_id,
+            "read_through_message_id": after,
+            "latest_message_id": through,
+        }])
+    except Exception as exc:
+        return log_and_format_error("get_chat_review_state", exc, chat_id=chat_id)
+
+
+@mcp.tool(annotations=ToolAnnotations(title="Get Topic Review State", readOnlyHint=True))
+@with_account(readonly=True)
+async def get_topic_review_state(
+    chat_id: int, topic_id: int, account: Optional[str] = None
+) -> str:
+    """Obtain one exact forum topic's boundaries and authenticated user ID."""
+    error = _validate_canonical_chat_id(chat_id)
+    if error:
+        return error
+    if isinstance(topic_id, bool) or not isinstance(topic_id, int) or topic_id <= 0:
+        return "topic_id must be a positive integer."
+    try:
+        cl = get_client(account)
+        entity = await resolve_entity(chat_id, cl)
+        error = _validate_resolved_canonical_chat_id(entity, chat_id)
+        if error:
+            return error
+        me = await cl.get_me()
+        user_id = getattr(me, "id", None)
+        if isinstance(user_id, bool) or not isinstance(user_id, int) or user_id <= 0:
+            return "Authenticated Telegram user ID is unavailable."
+        result = await cl(GetForumTopicsByIDRequest(channel=entity, topics=[topic_id]))
+        topics = [topic for topic in getattr(result, "topics", None) or []
+                  if getattr(topic, "id", None) == topic_id]
+        if len(topics) != 1:
+            return "Exact forum topic could not be resolved."
+        after = getattr(topics[0], "read_inbox_max_id", None)
+        through = getattr(topics[0], "top_message", None)
+        # Equality is normal after a successful mark-read. Zero is not treated
+        # as a proven starting boundary by the consumer until verified.
+        if (isinstance(after, bool) or not isinstance(after, int) or after < 0
+                or isinstance(through, bool) or not isinstance(through, int)
+                or through < after or through <= 0):
+            return "Topic read boundaries are unavailable or inconsistent."
+        return format_tool_result([{
+            "account_user_id": user_id,
+            "chat_id": chat_id,
+            "topic_id": topic_id,
+            "read_through_message_id": after,
+            "latest_message_id": through,
+        }])
+    except Exception as exc:
+        return log_and_format_error("get_topic_review_state", exc, chat_id=chat_id,
+                                    topic_id=topic_id)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(title="Get Message Text Chunk", readOnlyHint=True)
+)
+@with_account(readonly=True)
+async def get_message_text_chunk(
+    chat_id: int,
+    message_id: int,
+    offset: int = 0,
+    limit: int = 1024,
+    topic_id: Optional[int] = None,
+    account: Optional[str] = None,
+) -> str:
+    """Return a bounded sanitized text fragment from an exact message."""
+    error = _validate_canonical_chat_id(chat_id)
+    if error:
+        return error
+    if (
+        type(message_id) is not int
+        or message_id <= 0
+        or type(offset) is not int
+        or offset < 0
+        or type(limit) is not int
+        or not 1 <= limit <= 1024
+        or (topic_id is not None and (type(topic_id) is not int or topic_id <= 0))
+    ):
+        return "Invalid message ID, topic ID, offset or chunk limit."
+
+    try:
+        cl = get_client(account)
+        entity = await resolve_entity(chat_id, cl)
+        error = _validate_resolved_canonical_chat_id(entity, chat_id)
+        if error:
+            return error
+
+        if topic_id is not None:
+            root = await _get_topic_root(cl, entity, topic_id)
+            if not root:
+                return "Exact topic root was not found."
+            msg = (
+                root if message_id == topic_id else
+                await _get_exact_topic_message(cl, entity, topic_id, message_id)
+            )
+        else:
+            msg = await cl.get_messages(entity, ids=message_id)
+            if isinstance(msg, list):
+                msg = msg[0] if len(msg) == 1 else None
+
+        if getattr(msg, "id", None) != message_id:
+            return "Exact message was not found in the selected chat or topic."
+        if topic_id is not None and message_id != topic_id:
+            header = getattr(msg, "reply_to", None)
+            parent_topic = (
+                getattr(header, "reply_to_top_id", None)
+                or getattr(header, "reply_to_msg_id", None)
+            )
+            if not (
+                header is not None
+                and getattr(header, "forum_topic", False)
+                and parent_topic == topic_id
+            ):
+                return "Topic message membership could not be verified."
+        me = await cl.get_me()
+        user_id = getattr(me, "id", None)
+        if type(user_id) is not int or user_id <= 0:
+            return "Authenticated Telegram user ID is unavailable."
+
+        raw = getattr(msg, "message", None) or ""
+        if not raw:
+            return "Message has no text."
+        # Range records have 1,024-char previews. Sanitize the entire text
+        # first, then expose at most one requested fragment per call.
+        full_text = sanitize_user_content(raw, max_length=len(raw))
+        total = len(full_text)
+        if offset >= total:
+            return "Chunk offset is outside the message text."
+        end = min(offset + limit, total)
+        record = {
+            "message_id": message_id,
+            "offset": offset,
+            "next_offset": end,
+            "total_chars": total,
+            "text_sha256": hashlib.sha256(full_text.encode("utf-8")).hexdigest(),
+            "text": full_text[offset:end],
+            "has_more": end < total,
+        }
+        if topic_id is not None:
+            record["topic_id"] = topic_id
+        return format_tool_result(
+            [record],
+            metadata={"chat_id": chat_id, "account_user_id": user_id},
+        )
+    except Exception as exc:
+        return log_and_format_error(
+            "get_message_text_chunk", exc, chat_id=chat_id, message_id=message_id
+        )
 
 
 @mcp.tool(
@@ -384,6 +644,10 @@ async def get_messages_in_range(
         resolved_chat_validation_error = _validate_resolved_canonical_chat_id(entity, chat_id)
         if resolved_chat_validation_error:
             return resolved_chat_validation_error
+        me = await cl.get_me()
+        account_user_id = getattr(me, "id", None)
+        if isinstance(account_user_id, bool) or not isinstance(account_user_id, int) or account_user_id <= 0:
+            return "Authenticated Telegram user ID is unavailable."
         records = []
         # Telethon excludes max_id, so through + 1 makes the upper boundary inclusive.
         async for msg in cl.iter_messages(
@@ -392,15 +656,18 @@ async def get_messages_in_range(
             max_id=through_message_id + 1,
         ):
             if after_message_id < msg.id <= through_message_id:
-                records.append(message_to_dict(msg))
+                records.append(_review_record(msg))
+
         return format_tool_result(
             records,
             metadata={
                 "chat_id": chat_id,
+                "account_user_id": account_user_id,
                 "after_message_id": after_message_id,
                 "through_message_id": through_message_id,
                 "retrieved_count": len(records),
                 "range_complete": True,
+                "records_sha256": _review_fingerprint(records),
             },
         )
     except Exception as e:
@@ -444,25 +711,44 @@ async def get_topic_messages_in_range(
             return resolved_chat_validation_error
         if not await _get_topic_root(cl, entity, topic_id):
             return f"Topic root {topic_id} was not found in chat {chat_id}."
+        me = await cl.get_me()
+        account_user_id = getattr(me, "id", None)
+        if (isinstance(account_user_id, bool) or not isinstance(account_user_id, int)
+                or account_user_id <= 0):
+            return "Authenticated Telegram user ID is unavailable."
         records = []
-        # Telethon excludes max_id, so through + 1 makes the upper boundary inclusive.
+        # Telethon excludes max_id; the upper bound is inclusive.
         async for msg in cl.iter_messages(
             entity,
             min_id=after_message_id,
             max_id=through_message_id + 1,
             reply_to=topic_id,
         ):
-            if after_message_id < msg.id <= through_message_id:
-                records.append(message_to_dict(msg))
+            # A new arrival outside the frozen snapshot is not a review error.
+            if not after_message_id < msg.id <= through_message_id:
+                continue
+            header = getattr(msg, "reply_to", None)
+            topic_root = (msg.id == topic_id and isinstance(
+                getattr(msg, "action", None), types.MessageActionTopicCreate
+            ))
+            topic_reply = (header is not None and getattr(header, "forum_topic", False)
+                           and (getattr(header, "reply_to_top_id", None)
+                                or getattr(header, "reply_to_msg_id", None)) == topic_id)
+            if not (topic_root or topic_reply):
+                return "Topic range iterator returned unverified topic membership."
+            records.append(_review_record(msg, topic_id))
+
         return format_tool_result(
             records,
             metadata={
                 "chat_id": chat_id,
                 "topic_id": topic_id,
+                "account_user_id": account_user_id,
                 "after_message_id": after_message_id,
                 "through_message_id": through_message_id,
                 "retrieved_count": len(records),
                 "range_complete": True,
+                "records_sha256": _review_fingerprint(records),
             },
         )
     except Exception as e:
@@ -2392,6 +2678,7 @@ __all__ = [
     "get_topic_messages",
     "get_messages_in_range",
     "get_topic_messages_in_range",
+    "get_topic_review_state",
     "send_message",
     "send_scheduled_message",
     "get_scheduled_messages",
