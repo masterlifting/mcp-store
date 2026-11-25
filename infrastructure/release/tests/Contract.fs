@@ -160,7 +160,7 @@ let bothProducerPolicies () =
 
         assertEqual
             (sprintf "%s launch descriptor" relative)
-            { Kind = launchKindDotnetExec
+            { Kind = DotnetExec
               Entrypoint = policy.EntryDll
               Arguments = policy.LaunchArguments }
             contract.Launch
@@ -346,12 +346,49 @@ let manifestNonNumericSchemaVersion () =
     | Ok _ ->
         recordFailure "a string schemaVersion is a typed malformed-manifest error" "expected the non-integer diagnostic, got Ok"
 
+let private launchKindRules () =
+    let manifest =
+        Fixture.canonicalManifest Fixture.canonicalEvaluatedRevision Fixture.canonicalSdk (Fixture.canonicalPayloadHashes ())
+
+    let withLaunch kind arguments =
+        { manifest with
+            Launch =
+                { Kind = kind
+                  Entrypoint = Fixture.canonicalEntrypoint
+                  Arguments = arguments } }
+
+    assertDeclared
+        "an unknown launch kind is rejected"
+        (parse (manifestText (fun node -> node["launch"].AsObject()["kind"] <- JsonValue.Create "dotnet-native")))
+        "is not one of dotnet-exec, dotnet-cli"
+
+    assertDeclared
+        "a dotnet-exec launch without required arguments is rejected"
+        (validate (withLaunch DotnetExec []))
+        "must declare at least one required argument for 'dotnet-exec'"
+
+    assertDeclared
+        "a dotnet-cli launch with arguments is rejected"
+        (validate (withLaunch DotnetCli Fixture.canonicalLaunchArguments))
+        "must be empty for 'dotnet-cli'"
+
+    match validate (withLaunch DotnetCli []) with
+    | Ok () -> passed <- passed + 1
+    | Error error -> recordFailure "a dotnet-cli launch without arguments is accepted" (ReleaseError.message error)
+
+    match parse (DistributionContract.render (withLaunch DotnetCli [])) with
+    | Error error -> recordFailure "a dotnet-cli manifest round-trips its wire kind" (ReleaseError.message error)
+    | Ok parsed ->
+        assertEqual "a dotnet-cli manifest round-trips its wire kind" DotnetCli parsed.Launch.Kind
+        assertEqual "a dotnet-cli manifest round-trips its empty argument list" [] parsed.Launch.Arguments
+
 let tests =
     testCaseAsync "shared distribution contract assertions" <| async {
         arbitraryRootResolution ()
         bothProducerPolicies ()
         runtimeRequirementDerivation ()
         manifestNonNumericSchemaVersion ()
+        launchKindRules ()
         do! exactFailureClasses ()
         printfn "contract-tests summary: passed=%d failed=%d" passed failed
         Expect.equal 0 failed (String.concat Environment.NewLine failures)

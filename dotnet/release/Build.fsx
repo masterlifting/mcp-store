@@ -29,6 +29,7 @@ let run () =
           EntryDll = config.EntryDll
           ArchiveName = config.ArchiveName
           PublishedFiles = config.PublishedFiles
+          LaunchKind = config.LaunchKind
           LaunchArguments = config.LaunchArguments
           ExtraPublishProperties = [ "-p:GenerateDocumentationFile=false" ]
           Notice = "mcp-store dotnet MCP distribution\n" }

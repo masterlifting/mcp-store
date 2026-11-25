@@ -52,7 +52,8 @@ let producer: DistributionTestHelper.Producer =
       EntryDll = config.EntryDll
       ArchiveName = config.ArchiveName
       AssetUri = config.AssetUri
-      PublishedFiles = config.PublishedFiles }
+      PublishedFiles = config.PublishedFiles
+      LaunchKind = config.LaunchKind }
 
 let layout: DistributionTestHelper.Layout =
     { RepoRoot = repoRoot

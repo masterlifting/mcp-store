@@ -25,6 +25,7 @@ type PolicyProjection =
       ArchiveName: string
       AssetUri: string
       PublishedFiles: string list
+      LaunchKind: LaunchKind
       LaunchArguments: LaunchArgument list
       SourcePath: string
       SourceSha256: string }
@@ -37,6 +38,7 @@ let private requiredFields =
       "archiveName"
       "assetUri"
       "publishedFiles"
+      "launchKind"
       "launchArguments" ]
 
 let private maxSourceBytes = 16 * 1024 * 1024
@@ -116,7 +118,7 @@ let parseBytes (toolchain: ReleaseToolchain.Toolchain) (sourcePath: string) (bou
 
                     // The launch descriptors are authored policy: an ordered list of
                     // required flag/input/type triples with a closed value-kind set.
-                    let readLaunchArguments () =
+                    let readLaunchArguments (kind: LaunchKind) =
                         match properties.TryGetValue "launchArguments" with
                         | true, element when element.ValueKind = JsonValueKind.Array ->
                             let values = ResizeArray<LaunchArgument>()
@@ -171,8 +173,14 @@ let parseBytes (toolchain: ReleaseToolchain.Toolchain) (sourcePath: string) (bou
                             if parsed.Length <> (parsed |> List.map (fun argument -> argument.Input) |> List.distinct |> List.length) then
                                 failure <- Some "field 'launchArguments' repeats an argument input name"
 
-                            if parsed.IsEmpty && failure.IsNone then
-                                failure <- Some "field 'launchArguments' must declare at least one required argument"
+                            // Kind-specific rule: an MCP launch target declares required arguments; a CLI tool declares none.
+                            match kind with
+                            | DotnetExec ->
+                                if parsed.IsEmpty && failure.IsNone then
+                                    failure <- Some "field 'launchArguments' must declare at least one required argument for 'dotnet-exec'"
+                            | DotnetCli ->
+                                if not parsed.IsEmpty && failure.IsNone then
+                                    failure <- Some "field 'launchArguments' must be empty for 'dotnet-cli'"
 
                             parsed
                         | _ ->
@@ -180,7 +188,7 @@ let parseBytes (toolchain: ReleaseToolchain.Toolchain) (sourcePath: string) (bou
                             []
 
                     let scalarFields =
-                        [ "componentId"; "version"; "entryDll"; "platform"; "archiveName"; "assetUri" ]
+                        [ "componentId"; "version"; "entryDll"; "platform"; "archiveName"; "assetUri"; "launchKind" ]
 
                     let scalars = scalarFields |> List.map (fun field -> field, readString field)
 
@@ -201,11 +209,25 @@ let parseBytes (toolchain: ReleaseToolchain.Toolchain) (sourcePath: string) (bou
                                 | _ -> None)
 
                         let publishedFiles = readPublishedFiles ()
-                        let launchArguments = readLaunchArguments ()
 
-                        match failure with
-                        | Some detail -> malformed sourcePath detail
-                        | None ->
+                        let launchKindName = valueOf "launchKind"
+
+                        let launchKind =
+                            match LaunchKind.tryParse launchKindName with
+                            | Some parsed -> Some parsed
+                            | None ->
+                                failure <- Some $"field 'launchKind' '{launchKindName}' is not one of {LaunchKind.allNames}"
+                                None
+
+                        let launchArguments =
+                            match launchKind with
+                            | Some kind -> readLaunchArguments kind
+                            | None -> []
+
+                        match failure, launchKind with
+                        | Some detail, _ -> malformed sourcePath detail
+                        | None, None -> malformed sourcePath "field 'launchKind' is missing"
+                        | None, Some kind ->
                             Ok
                                 { ComponentId = valueOf "componentId"
                                   Version = valueOf "version"
@@ -216,6 +238,7 @@ let parseBytes (toolchain: ReleaseToolchain.Toolchain) (sourcePath: string) (bou
                                   ArchiveName = valueOf "archiveName"
                                   AssetUri = valueOf "assetUri"
                                   PublishedFiles = publishedFiles
+                                  LaunchKind = kind
                                   LaunchArguments = launchArguments
                                   SourcePath = sourcePath
                                   SourceSha256 = sha256Hex boundedBytes }

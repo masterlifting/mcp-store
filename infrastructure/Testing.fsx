@@ -6,6 +6,7 @@ module DistributionTestHelper
 
 #load "Failure.fs"
 #load "Provenance.fs"
+#load "distribution/Contract.fs"
 
 open System
 open System.IO
@@ -29,7 +30,8 @@ type Producer =
       EntryDll: string
       ArchiveName: string
       AssetUri: string
-      PublishedFiles: string list }
+      PublishedFiles: string list
+      LaunchKind: DistributionContract.LaunchKind }
 
 type Layout =
     { RepoRoot: string
@@ -144,12 +146,17 @@ let assertDistributionContract (producer: Producer) (layout: Layout) : Async<uni
 
         let launchNode = manifest["launch"].AsObject()
         assertExactKeys "manifest launch fields" [ "kind"; "entrypoint"; "arguments" ] (keysOf launchNode)
-        assertString "manifest launch kind" "dotnet-exec" launchNode["kind"]
+        assertString "manifest launch kind" (DistributionContract.LaunchKind.wireName producer.LaunchKind) launchNode["kind"]
         assertString "manifest launch entrypoint" producer.EntryDll launchNode["entrypoint"]
 
         let arguments = launchNode["arguments"].AsArray()
 
-        assertTrue "manifest launch declares at least one required argument" (arguments.Count > 0)
+        // The kind fixes the argument rule: an MCP launch target requires its inputs, while a host-run CLI declares none.
+        match producer.LaunchKind with
+        | DistributionContract.LaunchKind.DotnetExec ->
+            assertTrue "manifest launch declares at least one required argument" (arguments.Count > 0)
+        | DistributionContract.LaunchKind.DotnetCli ->
+            assertEqual "manifest launch declares no arguments for a host-run CLI" 0 arguments.Count
 
         for value in arguments do
             let argument = value.AsObject()

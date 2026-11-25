@@ -42,11 +42,18 @@ Invariants enforced by `parse`/`validate`:
 - Every displayed field is required; unknown, duplicate, missing, null, or
   wrongly typed fields fail closed. `parse` rejects duplicate JSON keys anywhere
   in the document so two parses cannot silently disagree.
-- `launch.kind` accepts only `dotnet-exec`. `launch.arguments` is a non-empty,
+- `launch.kind` accepts exactly `dotnet-exec` or `dotnet-cli`; any other kind fails
+  closed. `dotnet-exec` is an MCP launch target: `launch.arguments` is a non-empty,
   ordered list of structured `flag`/`input`/`type` descriptors — never a shell
   template — and `type` is one of `absolute-file`, `absolute-directory`, or
   `sha256`. Flags must be `--`-prefixed, and flags and input names are unique
-  case-insensitively.
+  case-insensitively. `dotnet-cli` is a CLI-only artifact, currently the Resolver
+  itself: it identifies the verified entrypoint and runtime prerequisite and its
+  `launch.arguments` must be empty. The resolver refuses a `dotnet-cli` manifest as
+  an MCP launch target in both `run` and `resolve`.
+- Adding a kind is **not** a schema change: the constant, parser and renderer
+  stay at schema 2, an unknown kind is still rejected, and no manifest reader
+  changes shape. A schema change still moves all three together.
 - `producer` records build provenance only. It is not a consumer SDK requirement
   and not a supported-platform claim. Its `sdk` is the version authored once in the
   root `global.json`, its `runtime` is derived from that pinned SDK (the

@@ -31,6 +31,7 @@ let run () =
           EntryDll = config.EntryDll
           ArchiveName = config.ArchiveName
           PublishedFiles = config.PublishedFiles
+          LaunchKind = config.LaunchKind
           LaunchArguments = config.LaunchArguments
           ExtraPublishProperties = []
           Notice = "mcp-store Workflow MCP distribution\n" }

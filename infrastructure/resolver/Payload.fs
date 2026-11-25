@@ -135,24 +135,29 @@ let verify (pin: DistributionPin.Pin) (archiveBytes: byte[]) : Result<Verified, 
             match verifiedPayload pin archive with
             | Error error -> Error error
             | Ok(manifest, manifestBytes, members) ->
-                match members |> List.tryFind (fun memberFile -> memberFile.Path = manifest.Runtime.Config) with
-                | None ->
-                    Error(
-                        MalformedArtifact(
-                            manifest.Runtime.Config,
-                            "the declared runtime configuration is not a verified member"
+                // The manifest is authenticated and every member verified; refusing here keeps a CLI-only
+                // descriptor from being retained, staged, published, or reported as an MCP launch target.
+                match ResolverLaunch.requireMcpTarget manifest with
+                | Error error -> Error error
+                | Ok () ->
+                    match members |> List.tryFind (fun memberFile -> memberFile.Path = manifest.Runtime.Config) with
+                    | None ->
+                        Error(
+                            MalformedArtifact(
+                                manifest.Runtime.Config,
+                                "the declared runtime configuration is not a verified member"
+                            )
                         )
-                    )
-                | Some config ->
-                    match ResolverRuntime.requirement manifest config.Bytes with
-                    | Error error -> Error error
-                    | Ok runtime ->
-                        Ok
-                            { Key = ResolverIdentity.pinKey pin
-                              Manifest = manifest
-                              ManifestBytes = manifestBytes
-                              Runtime = runtime
-                              Members = members }
+                    | Some config ->
+                        match ResolverRuntime.requirement manifest config.Bytes with
+                        | Error error -> Error error
+                        | Ok runtime ->
+                            Ok
+                                { Key = ResolverIdentity.pinKey pin
+                                  Manifest = manifest
+                                  ManifestBytes = manifestBytes
+                                  Runtime = runtime
+                                  Members = members }
 
 // The first differing path or digest identifies why the installed inventory is not verified.
 let difference (verified: Verified) (present: (string * string) list) : string option =

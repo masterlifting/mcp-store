@@ -280,9 +280,24 @@ Assert-Count -Name "only the publication job depends on both other jobs" -Patter
 Assert-Count -Name "no matrix leg survives" -Pattern 'matrix\.' -Expected 0
 Assert-Count -Name "no matrix strategy survives" -Pattern '^ {4}strategy:' -Expected 0
 Assert-Count -Name "no cross-job participation fallback" -Pattern 'fromJSON\(needs\.' -Expected 0
-Assert-Count -Name "no hardcoded participant list" -Pattern '^\s*-\s*(dotnet|workflow)\s*$' -Expected 0
-Assert-Count -Name "no participant literal in a CLI or policy path" -Pattern '(dotnet|workflow)/release/Config\.json' -Expected 0
-Assert-Count -Name "both jobs address the policy by the looped participant" -Pattern '\$component/release/Config\.json' -Expected 2
+# The participant and policy-path literals are derived from the roster, so a later roster change cannot leave a stale literal list here.
+$participantAlternation = ($componentIds | ForEach-Object { [regex]::Escape($_) }) -join '|'
+$configPathAlternation = ($roster | ForEach-Object { [regex]::Escape("$($_.configPath)") }) -join '|'
+Assert-Count -Name "no hardcoded participant list" -Pattern ('^\s*-\s*(' + $participantAlternation + ')\s*$') -Expected 0
+Assert-Count -Name "no participant literal in a CLI or policy path" -Pattern ('(' + $configPathAlternation + ')') -Expected 0
+Assert-Count -Name "no derived <componentId>/release path survives" -Pattern '\$component/release/' -Expected 0
+Assert-Count -Name "no derived <componentId>/tests path survives" -Pattern '\$component/tests/' -Expected 0
+# Every path is read from the projected componentId -> configPath map, which is the one canonical map `Update.ps1 -Project` emits from the roster.
+Assert-Count -Name "every path consumer reads the projected config-path map" -Pattern '\$env:RELEASE_CONFIG_PATHS \| ConvertFrom-Json -AsHashtable' -Expected 4
+Assert-JobCount -Job "publisher" -Name "publisher reads the projected config-path map" -Pattern '\$env:RELEASE_CONFIG_PATHS \| ConvertFrom-Json -AsHashtable' -Expected 1
+Assert-JobCount -Job "preparation" -Name "preparation reads the projected config-path map" -Pattern '\$env:RELEASE_CONFIG_PATHS \| ConvertFrom-Json -AsHashtable' -Expected 2
+Assert-JobCount -Job "publication" -Name "publication reads the projected config-path map" -Pattern '\$env:RELEASE_CONFIG_PATHS \| ConvertFrom-Json -AsHashtable' -Expected 1
+Assert-Count -Name "each path consumer fails closed on a missing map entry" -Pattern 'the projection declares no canonical config path for' -Expected 4
+Assert-Count -Name "every config path is addressed by the looped participant's map entry" -Pattern '\[string\]\$configPaths\[\$component\]\)' -Expected 4
+Assert-JobCount -Job "publisher" -Name "publisher derives the release directory from the map entry" -Pattern '^ {12}\$releaseDirectory = Split-Path -Parent \(\[string\]\$configPaths\[\$component\]\)\s*$' -Expected 1
+Assert-JobCount -Job "preparation" -Name "preparation derives the component root from the map entry" -Pattern '^ {12}\$releaseDirectory = Split-Path -Parent \(\[string\]\$configPaths\[\$component\]\)\s*$' -Expected 1
+Assert-JobCount -Job "preparation" -Name "preparation addresses the candidate policy by the map entry" -Pattern '^ {12}\$configPath = Join-Path \(Get-Location\) \(\[string\]\$configPaths\[\$component\]\)\s*$' -Expected 1
+Assert-JobCount -Job "publication" -Name "publication addresses the trusted policy by the map entry" -Pattern '^ {12}\$configPath = Join-Path \$workspace \(\[string\]\$configPaths\[\$component\]\)\s*$' -Expected 1
 
 # Every job projects the canonical toolchain before the SDK exists and verifies the executing toolchain afterwards.
 Assert-Count -Name "each job projects the canonical toolchain" -Pattern '^ {8}run: pwsh infrastructure/release/Update\.ps1 -Project\s*$' -Expected 3
@@ -299,12 +314,12 @@ Assert-JobCount -Job "preparation" -Name "preparation reads the projected compon
 Assert-JobCount -Job "publication" -Name "publication reads the projected components" -Pattern 'ConvertFrom-Json \$env:RELEASE_COMPONENTS' -Expected 2
 
 # Every action reference must be a reviewed 40-hex commit; a floating tag would let an upstream change reach the publication boundary.
-Assert-Count -Name "all action references are pinned commits" -Pattern 'uses: [A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+@[0-9a-f]{40} ' -Expected 13
+Assert-Count -Name "all action references are pinned commits" -Pattern 'uses: [A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+@[0-9a-f]{40} ' -Expected 15
 Assert-Count -Name "no floating or short action reference" -Pattern 'uses: [A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+@(?![0-9a-f]{40})' -Expected 0
 Assert-Count -Name "checkout uses the reviewed pinned commit" -Pattern 'uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1' -Expected 3
 Assert-Count -Name "SDK setup uses the reviewed pinned commit" -Pattern 'uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68' -Expected 3
-Assert-Count -Name "the platform upload action is the reviewed pinned commit" -Pattern 'uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9' -Expected 4
-Assert-Count -Name "the platform download action is the reviewed pinned commit" -Pattern 'uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333' -Expected 3
+Assert-Count -Name "the platform upload action is the reviewed pinned commit" -Pattern 'uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9' -Expected 5
+Assert-Count -Name "the platform download action is the reviewed pinned commit" -Pattern 'uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333' -Expected 4
 Assert-Count -Name "no floating artifact download reference exists" -Pattern 'uses: actions/download-artifact@(?![0-9a-f]{40} )' -Expected 0
 Assert-Count -Name "no artifact is selected by a zip wildcard" -Pattern '\*\.zip' -Expected 0
 Assert-Count -Name "no arbitrary artifact name lookup exists" -Pattern 'artifact-name' -Expected 0
@@ -378,19 +393,20 @@ Assert-JobCount -Job "publisher" -Name "publisher builds the compiled release re
 Assert-JobCount -Job "publisher" -Name "publisher builds the compiled resolver project" -Pattern 'dotnet build infrastructure/resolver/Resolver\.fsproj -c Release' -Expected 1
 Assert-JobCount -Job "publisher" -Name "publisher builds the compiled resolver Expecto project" -Pattern 'dotnet build infrastructure/resolver/tests/Tests\.fsproj -c Release' -Expected 1
 Assert-JobCount -Job "publisher" -Name "publisher runs the resolver Expecto gate" -Pattern 'dotnet run --project infrastructure/resolver/tests/Tests\.fsproj' -Expected 1
-Assert-JobCount -Job "publisher" -Name "publisher builds each enrolled producer's canonical local distribution" -Pattern '^ {12}& dotnet fsi --nologo "\$component/release/Build\.fsx"\s*$' -Expected 1
-Assert-JobCount -Job "publisher" -Name "publisher writes each enrolled producer's canonical consumer pin" -Pattern '^ {12}& dotnet fsi --nologo "\$component/release/Pin\.fsx"\s*$' -Expected 1
-Assert-Before -Job "publisher" -Name "the canonical toolchain is verified before local packaging" -First 'run: pwsh infrastructure/release/Update.ps1 -Verify' -Second '& dotnet fsi --nologo "$component/release/Build.fsx"'
-Assert-Before -Job "publisher" -Name "each producer is packed before its consumer pin" -First '& dotnet fsi --nologo "$component/release/Build.fsx"' -Second '& dotnet fsi --nologo "$component/release/Pin.fsx"'
-Assert-Before -Job "publisher" -Name "local packaging precedes the resolver launch gate" -First '& dotnet fsi --nologo "$component/release/Pin.fsx"' -Second 'dotnet run --project infrastructure/resolver/tests/Tests.fsproj'
-Assert-Before -Job "publisher" -Name "local packaging precedes the checkout build gates" -First '& dotnet fsi --nologo "$component/release/Pin.fsx"' -Second 'dotnet build dotnet/Dotnet.fsproj -c Release'
+Assert-JobCount -Job "publisher" -Name "publisher builds each enrolled producer's canonical local distribution" -Pattern '^ {12}& dotnet fsi --nologo "\$releaseDirectory/Build\.fsx"\s*$' -Expected 1
+Assert-JobCount -Job "publisher" -Name "publisher writes each enrolled producer's canonical consumer pin" -Pattern '^ {12}& dotnet fsi --nologo "\$releaseDirectory/Pin\.fsx"\s*$' -Expected 1
+Assert-Before -Job "publisher" -Name "the canonical toolchain is verified before local packaging" -First 'run: pwsh infrastructure/release/Update.ps1 -Verify' -Second '& dotnet fsi --nologo "$releaseDirectory/Build.fsx"'
+Assert-Before -Job "publisher" -Name "each producer is packed before its consumer pin" -First '& dotnet fsi --nologo "$releaseDirectory/Build.fsx"' -Second '& dotnet fsi --nologo "$releaseDirectory/Pin.fsx"'
+Assert-Before -Job "publisher" -Name "local packaging precedes the resolver launch gate" -First '& dotnet fsi --nologo "$releaseDirectory/Pin.fsx"' -Second 'dotnet run --project infrastructure/resolver/tests/Tests.fsproj'
+Assert-Before -Job "publisher" -Name "local packaging precedes the checkout build gates" -First '& dotnet fsi --nologo "$releaseDirectory/Pin.fsx"' -Second 'dotnet build dotnet/Dotnet.fsproj -c Release'
 Assert-JobCount -Job "publisher" -Name "publisher runs the complete compiled release gate" -Pattern '^ {8}run: pwsh infrastructure/release/Test\.ps1\s*$' -Expected 1
 Assert-JobCount -Job "publisher" -Name "publisher typechecks the retained release scripts" -Pattern 'Typecheck\.ps1 -SdkVersion' -Expected 1
 
 # Preparation job: both producers' package gates pass before either candidate transport is uploaded.
 Assert-JobCount -Job "preparation" -Name "preparation job is read-only" -Pattern '^ {6}contents: read\s*$' -Expected 1
 Assert-JobCount -Job "preparation" -Name "preparation checkout disables credential persistence" -Pattern 'persist-credentials: false\s*$' -Expected 1
-Assert-JobCount -Job "preparation" -Name "preparation runs each producer package gate" -Pattern '^ {12}\$entrypoint = "\$component/tests/distribution/Run\.fsx"\s*$' -Expected 1
+Assert-JobCount -Job "preparation" -Name "preparation runs each producer package gate" -Pattern '^ {12}\$entrypoint = "\$componentRoot/tests/distribution/Run\.fsx"\s*$' -Expected 1
+Assert-JobCount -Job "preparation" -Name "preparation derives each component root from its release directory" -Pattern '^ {12}\$componentRoot = Split-Path -Parent \$releaseDirectory\s*$' -Expected 1
 Assert-JobCount -Job "preparation" -Name "preparation runs the Workflow packaged coordination gate" -Pattern 'workflow/tests/coordination/Run\.fsx' -Expected 1
 Assert-JobCount -Job "preparation" -Name "preparation builds the release runner from the checkout" -Pattern 'dotnet build infrastructure/release/Release\.fsproj -c Release' -Expected 1
 Assert-JobCount -Job "preparation" -Name "preparation prepares each enrolled candidate through the canonical CLI" -Pattern '& \$runner prepare \$configPath \$candidate\s*\|' -Expected 1
@@ -411,13 +427,14 @@ Assert-JobCount -Job "publication" -Name "publication proves the ancestry throug
 # The pinned action treats a blank `artifact-ids` value as "every artifact in this run", so the three declared ids are
 # proven non-empty, positive decimal ids before any transfer action is entered.
 Assert-JobCount -Job "publication" -Name "publication validates the declared artifact ids exactly once" -Pattern '^ {8}id: validateArtifacts\s*$' -Expected 1
-Assert-JobCount -Job "publication" -Name "publication guards all three declared artifact ids" -Pattern '^ {10}Assert-ArtifactId ' -Expected 3
+Assert-JobCount -Job "publication" -Name "publication guards all four declared artifact ids" -Pattern '^ {10}Assert-ArtifactId ' -Expected 4
 Assert-JobCount -Job "publication" -Name "the artifact id guard embeds no workflow expression in its own body" -Pattern 'Assert-ArtifactId [^\r\n]*\$\{\{' -Expected 0
 Assert-JobCount -Job "publication" -Name "the runtime id guard reads the publisher job's own declared output" -Pattern '^ {10}RUNTIME_ARTIFACT_ID: \$\{\{ needs\.publisher\.outputs\.runtimeArtifactId \}\}\s*$' -Expected 1
 Assert-JobCount -Job "publication" -Name "the dotnet id guard reads the preparation job's own declared output" -Pattern '^ {10}CANDIDATE_ARTIFACT_ID_DOTNET: \$\{\{ needs\.preparation\.outputs\.candidateArtifactId_dotnet \}\}\s*$' -Expected 1
 Assert-JobCount -Job "publication" -Name "the workflow id guard reads the preparation job's own declared output" -Pattern '^ {10}CANDIDATE_ARTIFACT_ID_WORKFLOW: \$\{\{ needs\.preparation\.outputs\.candidateArtifactId_workflow \}\}\s*$' -Expected 1
-Assert-JobCount -Job "publication" -Name "publication transfers every transport through the pinned official action" -Pattern '^ {8}uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2\s*$' -Expected 3
-Assert-JobCount -Job "publication" -Name "publication addresses every transfer by an exact declared artifact id" -Pattern '^ {10}artifact-ids: \$\{\{ needs\.' -Expected 3
+Assert-JobCount -Job "publication" -Name "the resolver id guard reads the preparation job's own declared output" -Pattern '^ {10}CANDIDATE_ARTIFACT_ID_RESOLVER: \$\{\{ needs\.preparation\.outputs\.candidateArtifactId_resolver \}\}\s*$' -Expected 1
+Assert-JobCount -Job "publication" -Name "publication transfers every transport through the pinned official action" -Pattern '^ {8}uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2\s*$' -Expected 4
+Assert-JobCount -Job "publication" -Name "publication addresses every transfer by an exact declared artifact id" -Pattern '^ {10}artifact-ids: \$\{\{ needs\.' -Expected 4
 Assert-JobCount -Job "publication" -Name "publication restates no artifact identity beyond the pinned action" -Pattern '^ {10}(pattern|run-id|repository|github-token|merge-multiple):' -Expected 0
 Assert-JobCount -Job "publication" -Name "no publication step selects an artifact by name" -Pattern '^ {10}name: ' -Expected 1
 Assert-JobCount -Job "publication" -Name "publication ships no hand-written artifact client" -Pattern '(Invoke-WebRequest|Invoke-RestMethod|Expand-Archive|Save-ArtifactTransport|Get-FileHash|api\.github\.com)' -Expected 0
@@ -538,15 +555,41 @@ if ($candidateTransfers -ne $componentIds.Count) {
     throw "cross-stage coherence failed [candidate transfer inventory]: the workflow transfers $candidateTransfers candidate transport(s) for $($componentIds.Count) roster participant(s)"
 }
 
-# The CLI receives `<componentId>/release/Config.json`; the roster must register exactly that path per participant.
+# The CLI receives the roster-registered canonical config path through the projected map. The workflow derives each release
+# directory as the path's parent and each component root as that directory's parent, so every registered path must be a forward-slash
+# `<component root>/release/Config.json` whose component root is non-empty; a nested root such as `infrastructure/resolver` is accepted.
 foreach ($entry in $roster) {
     $checked = $checked + 1
-    $derived = "$($entry.componentId)/release/Config.json"
+    $registered = "$($entry.configPath)"
 
-    if ($derived -ne $entry.configPath) {
-        throw "cross-stage coherence failed [CLI entry registration]: participant '$($entry.componentId)' registers '$($entry.configPath)' but the workflow CLI path derives '$derived'"
+    if ($registered -cnotmatch '\A(?:[A-Za-z0-9_.-]+/)+release/Config\.json\z') {
+        throw "cross-stage coherence failed [CLI entry registration]: participant '$($entry.componentId)' registers '$registered', which is not a forward-slash '<component root>/release/Config.json' path the workflow can derive its release directory and component root from"
     }
 }
+
+# unix.yml carries the same derivation and holds no participant or policy-path literal; it is read-only and never transfers or publishes.
+function Assert-UnixCount {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string]$Pattern,
+        [Parameter(Mandatory = $true)][int]$Expected
+    )
+
+    $script:checked = $script:checked + 1
+    $found = [regex]::Matches($unixText, $Pattern, [System.Text.RegularExpressions.RegexOptions]::Multiline).Count
+
+    if ($found -ne $Expected) {
+        throw "cross-stage coherence failed [$Name]: expected $Expected match(es) of '$Pattern' in $unixWorkflowPath; found $found"
+    }
+}
+
+Assert-UnixCount -Name "unix qualification reads the projected config-path map" -Pattern '\$env:RELEASE_CONFIG_PATHS \| ConvertFrom-Json -AsHashtable' -Expected 1
+Assert-UnixCount -Name "unix qualification fails closed on a missing map entry" -Pattern 'the projection declares no canonical config path for' -Expected 1
+Assert-UnixCount -Name "unix qualification derives the release directory from the map entry" -Pattern '^ {12}\$releaseDirectory = Split-Path -Parent \(\[string\]\$configPaths\[\$component\]\)\s*$' -Expected 1
+Assert-UnixCount -Name "unix qualification packs and pins from the derived release directory" -Pattern '^ {12}& dotnet fsi --nologo "\$releaseDirectory/(Build|Pin)\.fsx"\s*$' -Expected 2
+Assert-UnixCount -Name "unix qualification carries no derived or literal participant path" -Pattern ('(\$component/(release|tests)/|' + $configPathAlternation + ')') -Expected 0
+Assert-UnixCount -Name "unix qualification never publishes, transfers or holds a credential" -Pattern '(github\.token|secrets\.|contents: write|upload-artifact|download-artifact|MCP_RELEASE_DO_UPLOAD)' -Expected 0
+Assert-UnixCount -Name "unix qualification reads the projected components once" -Pattern 'ConvertFrom-Json \$env:RELEASE_COMPONENTS' -Expected 1
 
 # The workflow passes the projection step's actual value; a step-local GITHUB_OUTPUT file belongs to a different step.
 if ([string]::IsNullOrWhiteSpace($Components)) {

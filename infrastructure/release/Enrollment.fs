@@ -31,11 +31,12 @@ let private forbiddenFields =
       "entryAllowlist"
       "publishedFiles"
       "entryDll"
+      "launchKind"
       "launchArguments" ]
 
-// Mandatory AC-06: the current release transaction supports exactly Dotnet and Workflow. The supported set is an explicit validation constraint, not a roster mirror, and is not versioned, mirrored, or duplicated into the roster file. A roster that contains a different componentId (or omits one) is rejected as drift.
+// Mandatory AC-06: the current release transaction supports exactly Dotnet, Workflow and the Resolver CLI component. The supported set is an explicit validation constraint, not a roster mirror, and is not versioned, mirrored, or duplicated into the roster file. A roster that contains a different componentId (or omits one) is rejected as drift.
 let supportedComponentIds : Set<string> =
-    Set.ofList [ "dotnet"; "workflow" ]
+    Set.ofList [ "dotnet"; "workflow"; "resolver" ]
 
 // Human-readable form for diagnostics.
 let private supportedComponentIdsList : string =

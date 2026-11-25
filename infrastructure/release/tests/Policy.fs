@@ -20,13 +20,13 @@ let private configPath componentId =
 let private sha256Hex (bytes: byte[]) =
     SHA256.HashData bytes |> Convert.ToHexString |> fun value -> value.ToLowerInvariant()
 
-// WHY: the strict JSON grammar has exactly eight required policy fields; the SDK and runtime are
+// WHY: the strict JSON grammar has exactly nine required policy fields; the SDK and runtime are
 //   supplied by the shared toolchain owner instead of being copied into the component config. Each
 //   canonical projection test reads the bytes once via the Snapshots (FixtureHelpers)
 //   helper so the bound SourceSha256 is computed from the same bytes the parser observes.
 let private requiredFields =
     [ "componentId"; "version"; "entryDll"
-      "platform"; "archiveName"; "assetUri"; "publishedFiles"; "launchArguments" ]
+      "platform"; "archiveName"; "assetUri"; "publishedFiles"; "launchKind"; "launchArguments" ]
 
 let private expectMalformed (name: string) (sourcePath: string) (input: string) =
     testCase name (fun () ->
@@ -160,6 +160,12 @@ let private strictJsonGrammarTests =
           mutated (fun node -> node.Remove "publishedFiles" |> ignore) |> bytes)
       expectMalformedBytes "missing required field launchArguments is rejected" "Config.json" (
           mutated (fun node -> node.Remove "launchArguments" |> ignore) |> bytes)
+      expectMalformedBytes "missing required field launchKind is rejected" "Config.json" (
+          mutated (fun node -> node.Remove "launchKind" |> ignore) |> bytes)
+      expectMalformedBytes "an unknown launchKind is rejected" "Config.json" (
+          mutated (fun node -> node["launchKind"] <- JsonValue.Create "dotnet-native") |> bytes)
+      expectMalformedBytes "a dotnet-cli policy with declared arguments is rejected" "Config.json" (
+          mutated (fun node -> node["launchKind"] <- JsonValue.Create "dotnet-cli") |> bytes)
       expectMalformedBytes "an unsupported launch argument type is rejected" "Config.json" (
           mutated (fun node ->
               let argument = node["launchArguments"].AsArray().[0].AsObject()
@@ -228,6 +234,15 @@ let private semanticGrammarTests =
               Expect.isTrue (snapshot.Parsed.Platform = "win-x64") $"{componentId} platform is the canonical win-x64"
               Expect.isTrue (snapshot.Parsed.AssetUri.Contains componentId) $"{componentId} asset URI names the component id"
               Expect.isTrue (snapshot.Parsed.ArchiveName.StartsWith "v") $"{componentId} archive name is versioned")
+      testCase "the canonical resolver policy is a dotnet-cli component at its nested root" (fun () ->
+          let path = Path.Combine(repositoryRoot, "infrastructure", "resolver", "release", "Config.json")
+          let snapshot = readConfigFile path
+          Expect.equal snapshot.Parsed.ComponentId "resolver" "the resolver policy is bound to its registered component id"
+          Expect.equal snapshot.Parsed.LaunchKind DistributionContract.DotnetCli "the resolver policy declares the CLI launch kind"
+          Expect.isEmpty snapshot.Parsed.LaunchArguments "a dotnet-cli component declares no launch arguments"
+          Expect.isTrue
+              (List.contains "FSharp.Core.dll" snapshot.Parsed.PublishedFiles)
+              "the resolver bootstrap closure includes FSharp.Core.dll")
       testCase "every published file is a contained bare name with no directory traversal" (fun () ->
           for componentId in canonicalComponentIds do
               let snapshot = readCanonicalConfig repositoryRoot componentId

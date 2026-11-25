@@ -424,6 +424,6 @@ let resolveLocal (repositoryRoot: string) : Async<Result<Toolchain, ReleaseError
             return resolveFromListing repositoryRoot listing handoff
     }
 
-// Blocking convenience for the FSI scripts, whose top level is synchronous.
+// Standalone entry bridge: FSI scripts and the release test fixture need one synchronous boundary.
 let resolveLocalSynchronously (repositoryRoot: string) : Result<Toolchain, ReleaseError> =
     resolveLocal repositoryRoot |> Async.RunSynchronously

@@ -118,7 +118,7 @@ let launchCommand
                     "the manifest declares launch input '%s' that the consumer environment does not supply"
                     argument.Input)
 
-    assertEqual "launch kind selects the structured dotnet exec form" launchKindDotnetExec manifest.Launch.Kind
+    assertEqual "launch kind selects the structured dotnet exec form" DotnetExec manifest.Launch.Kind
     let entrypoint = resolveMember extractionRoot manifest.Launch.Entrypoint
     assertTrue $"the entrypoint resolves to an extracted file: {manifest.Launch.Entrypoint}" (File.Exists entrypoint)
 

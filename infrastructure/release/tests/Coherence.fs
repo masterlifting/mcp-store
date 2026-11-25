@@ -11,7 +11,10 @@ open SharedFailure
 open BuildProvenance
 
 let private repoRoot = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "..", ".."))
-let private currentParticipants = [ "dotnet", "dotnet/release/Config.json"; "workflow", "workflow/release/Config.json" ]
+let private currentParticipants =
+    [ "dotnet", "dotnet/release/Config.json"
+      "workflow", "workflow/release/Config.json"
+      "resolver", "infrastructure/resolver/release/Config.json" ]
 
 let private withRoot (action: string -> Async<unit>) =
     async {
@@ -320,7 +323,7 @@ let private coherenceGuardChecksActualRosterAndWorkflowMarkers =
             withRoot (fun root ->
                 async {
                     writeRoster root currentParticipants None |> ignore
-                    let correctProjection = "[\"dotnet\",\"workflow\"]"
+                    let correctProjection = "[\"dotnet\",\"workflow\",\"resolver\"]"
                     let workflowFixture = baselineWorkflow ()
 
                     let! baselineCode, baselineOut, baselineErr = runCoherence root workflowFixture correctProjection
@@ -378,7 +381,7 @@ let private coherenceGuardChecksActualRosterAndWorkflowMarkers =
 
                     let hardcodedCli =
                             workflowFixture.Replace(
-                            "            $configPath = Join-Path (Get-Location) \"$component/release/Config.json\"",
+                            "            $configPath = Join-Path (Get-Location) ([string]$configPaths[$component])",
                             "            $configPath = Join-Path (Get-Location) \"dotnet/release/Config.json\""
                         )
                     let! cliCode, cliOut, cliErr = runCoherence root hardcodedCli correctProjection
@@ -397,7 +400,7 @@ let private coherenceGuardRejectsTriggerShapeDriftInBothWorkflows =
             withRoot (fun root ->
                 async {
                     writeRoster root currentParticipants None |> ignore
-                    let projection = "[\"dotnet\",\"workflow\"]"
+                    let projection = "[\"dotnet\",\"workflow\",\"resolver\"]"
                     let release = baselineWorkflow ()
                     let unix = baselineUnixWorkflow ()
                     let exclusion = "      - 'telegram/**'"
@@ -472,7 +475,7 @@ let private coherenceGuardRejectsRosterPolicyAndInventoryDrift =
         do!
             withRoot (fun root ->
                 async {
-                    let output = "[\"dotnet\",\"workflow\"]"
+                    let output = "[\"dotnet\",\"workflow\",\"resolver\"]"
                     let workflowFixture = baselineWorkflow ()
                     let invokeCurrentWorkflow () = runCoherence root workflowFixture output
 
@@ -488,7 +491,12 @@ let private coherenceGuardRejectsRosterPolicyAndInventoryDrift =
                     writeRoster root [ "dotnet", "dotnet/release/Config.json" ] None |> ignore
                     let! omittedResult = invokeCurrentWorkflow ()
 
-                    writeRoster root [ "dotnet", "dotnet/release/Alternate.json"; "workflow", "workflow/release/Config.json" ] None |> ignore
+                    let pathDriftParticipants =
+                        [ "dotnet", "dotnet/release/Alternate.json"
+                          "workflow", "workflow/release/Config.json"
+                          "resolver", "infrastructure/resolver/release/Config.json" ]
+
+                    writeRoster root pathDriftParticipants None |> ignore
                     // The alternate path exists so the guard reaches the CLI-entry registration rule instead of a
                     // missing policy file; a policy that declares the retired toolchain fields is covered elsewhere.
                     File.Copy(
@@ -514,8 +522,8 @@ let private coherenceGuardRejectsRosterPolicyAndInventoryDrift =
                         $"the unsupported participant is identified: {outputOf extraResult}"
                     assertRejected "an omitted required roster participant fails the actual guard" omittedResult
                     Expect.isTrue
-                        (containsDiagnostic "missing required componentId(s): workflow" (outputOf omittedResult))
-                        $"the omitted participant is identified: {outputOf omittedResult}"
+                        (containsDiagnostic "missing required componentId(s): workflow, resolver" (outputOf omittedResult))
+                        $"the omitted participants are identified: {outputOf omittedResult}"
                     assertRejected "config path drift fails the actual guard" pathResult
                     Expect.isTrue
                         ((outputOf pathResult).Contains("CLI entry registration", StringComparison.Ordinal))
@@ -540,7 +548,7 @@ let private coherenceGuardUsesExplicitProjectionAcrossStepOutputs =
                         |> Array.tryFind (fun line -> line.StartsWith("components=", StringComparison.Ordinal))
                         |> Option.map (fun line -> line.Substring("components=".Length))
                         |> Option.defaultValue ""
-                    Expect.equal projectedComponents "[\"dotnet\",\"workflow\"]" "the project step emits the roster component JSON"
+                    Expect.equal projectedComponents "[\"dotnet\",\"workflow\",\"resolver\"]" "the project step emits the roster component JSON"
 
                     let! guardCode, guardOut, guardErr = runCoherenceWithOutput root workflowFixture projectedComponents (Some guardOutput)
                     Expect.equal guardCode 0 $"the guard accepts the explicit projected value: {guardOut}{guardErr}"
@@ -818,7 +826,7 @@ let private coherenceGuardFailsClosedWhenAnOwnerIsMissing =
                     async {
                         writeRoster root currentParticipants None |> ignore
                         File.Delete(Path.Combine(root, relativePath))
-                        let! code, stdout, stderr = runCoherence root (baselineWorkflow ()) "[\"dotnet\",\"workflow\"]"
+                        let! code, stdout, stderr = runCoherence root (baselineWorkflow ()) "[\"dotnet\",\"workflow\",\"resolver\"]"
                         Expect.notEqual code 0 $"a missing {relativePath} fails the production guard"
                         Expect.isTrue
                             ((stdout + stderr).Contains(diagnostic, StringComparison.Ordinal))

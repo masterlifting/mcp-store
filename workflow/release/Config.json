@@ -11,6 +11,7 @@
     "Mcp.Workflow.dll",
     "Mcp.Workflow.runtimeconfig.json"
   ],
+  "launchKind": "dotnet-exec",
   "launchArguments": [
     { "flag": "--profile-catalog", "input": "profileCatalog", "type": "absolute-file" },
     { "flag": "--profile-catalog-sha256", "input": "profileCatalogSha256", "type": "sha256" }

@@ -20,7 +20,16 @@ type private StageFailure =
     | WorkflowDistributionFailure
     | WorkflowPackagedFailure
 
-let private componentIds = [ "dotnet"; "workflow" ]
+// The closed supported roster in its canonical order. The canonical config path owns the component
+// root, so the Resolver is enrolled and seeded at its nested root instead of a flat `<componentId>`.
+type private FixtureComponent =
+    { ComponentId: string
+      ConfigPath: string }
+
+let private fixtureComponents =
+    [ { ComponentId = "dotnet"; ConfigPath = "dotnet/release/Config.json" }
+      { ComponentId = "workflow"; ConfigPath = "workflow/release/Config.json" }
+      { ComponentId = "resolver"; ConfigPath = "infrastructure/resolver/release/Config.json" } ]
 
 // The canonical root helper the coordination gate is routed through lives in the repository root.
 let private repoRoot = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "..", ".."))
@@ -79,12 +88,17 @@ let private writeFixtureRuntime (root: string) =
     File.Copy(source, target, true)
     target
 
-// WHY: the strict Config.json reader requires the ordered launch descriptors; the
-//   fixture supplies one generic flag/input pair so the projection path matches the
-//   canonical Configs without restating producer identity.
+// WHY: the strict Config.json reader requires the ordered launch descriptors and a kind-specific
+//   argument list; the fixture supplies one generic flag/input pair for the MCP producers and the
+//   empty CLI argument list for the Resolver, so the projection path matches each canonical Config
+//   without restating producer identity.
 let private policyJson componentId =
-    let productName = if componentId = "dotnet" then "Dotnet" else "Workflow"
-    let entryDll = $"Mcp.{productName}.dll"
+    let isResolver = componentId = "resolver"
+    let productName =
+        if isResolver then "Resolver"
+        elif componentId = "dotnet" then "Dotnet"
+        else "Workflow"
+    let entryDll = if isResolver then "Resolver.dll" else $"Mcp.{productName}.dll"
     let node = JsonObject()
     node["componentId"] <- JsonValue.Create componentId
     node["version"] <- JsonValue.Create "7.8.9"
@@ -94,16 +108,21 @@ let private policyJson componentId =
     node["assetUri"] <- JsonValue.Create $"https://github.com/masterlifting/mcp-store/releases/download/{componentId}/v7.8.9.zip"
     let files = JsonArray()
     files.Add(JsonValue.Create "FSharp.Core.dll") |> ignore
-    files.Add(JsonValue.Create $"Mcp.{productName}.deps.json") |> ignore
+    let artifactPrefix = if isResolver then "Resolver" else $"Mcp.{productName}"
+    files.Add(JsonValue.Create $"{artifactPrefix}.deps.json") |> ignore
     files.Add(JsonValue.Create entryDll) |> ignore
-    files.Add(JsonValue.Create $"Mcp.{productName}.runtimeconfig.json") |> ignore
+    files.Add(JsonValue.Create $"{artifactPrefix}.runtimeconfig.json") |> ignore
     node["publishedFiles"] <- files
+    node["launchKind"] <- JsonValue.Create(if isResolver then "dotnet-cli" else "dotnet-exec")
     let launchArguments = JsonArray()
-    let argument = JsonObject()
-    argument["flag"] <- JsonValue.Create "--fixture-input"
-    argument["input"] <- JsonValue.Create "fixtureInput"
-    argument["type"] <- JsonValue.Create "absolute-file"
-    launchArguments.Add argument
+
+    if not isResolver then
+        let argument = JsonObject()
+        argument["flag"] <- JsonValue.Create "--fixture-input"
+        argument["input"] <- JsonValue.Create "fixtureInput"
+        argument["type"] <- JsonValue.Create "absolute-file"
+        launchArguments.Add argument
+
     node["launchArguments"] <- launchArguments
     node.ToJsonString(JsonSerializerOptions(WriteIndented = true))
 
@@ -117,12 +136,19 @@ let private parsePolicy (toolchain: ReleaseToolchain.Toolchain) configPath =
         | Ok policy -> policy
         | Error error -> failwithf "fixture policy failed to parse: %s" (SharedFailure.ReleaseError.message error)
 
+// The dist output is owned by the component root the canonical config path names, so the nested
+// Resolver writes `infrastructure/resolver/dist` instead of a flat `resolver/` directory.
+let private fixtureDistRoot (root: string) (policy: ReleasePolicy.PolicyProjection) =
+    let releaseDirectory = Path.GetDirectoryName(Path.GetFullPath(Path.Combine(root, policy.SourcePath)))
+    Path.Combine(Path.GetDirectoryName releaseDirectory, "dist")
+
 let private writeProducerArchive (root: string) (policy: ReleasePolicy.PolicyProjection) (revision: string) =
     let payloads = Fixture.policyPayloads policy "fixture"
     let manifestText = Fixture.policyManifestFor policy revision payloads
     let manifestBytes = Encoding.UTF8.GetBytes manifestText
-    let archivePath = Path.Combine(root, policy.ComponentId, "dist", policy.ArchiveName)
-    let manifestPath = Path.Combine(root, policy.ComponentId, "dist", policy.ComponentId, DistributionContract.manifestEntryName)
+    let dist = fixtureDistRoot root policy
+    let archivePath = Path.Combine(dist, policy.ArchiveName)
+    let manifestPath = Path.Combine(dist, policy.ComponentId, DistributionContract.manifestEntryName)
     Directory.CreateDirectory(Path.GetDirectoryName archivePath) |> ignore
     Directory.CreateDirectory(Path.GetDirectoryName manifestPath) |> ignore
     File.WriteAllBytes(manifestPath, manifestBytes)
@@ -369,25 +395,28 @@ let private writeFixture (root: string) (failure: StageFailure option) =
     async {
         let roster = JsonObject()
         let participants = JsonArray()
-        for componentId in componentIds do
+        for componentRecord in fixtureComponents do
             let item = JsonObject()
-            item["componentId"] <- JsonValue.Create componentId
-            item["configPath"] <- JsonValue.Create $"{componentId}/release/Config.json"
+            item["componentId"] <- JsonValue.Create componentRecord.ComponentId
+            item["configPath"] <- JsonValue.Create componentRecord.ConfigPath
             participants.Add item
         roster["participants"] <- participants
         write root "infrastructure/release/Participants.json" (roster.ToJsonString()) |> ignore
         writeFixtureRuntime root |> ignore
 
-        for componentId in componentIds do
+        for componentRecord in fixtureComponents do
+            let componentId = componentRecord.ComponentId
+            // The canonical config path names `<componentRoot>/release/Config.json`.
+            let componentRoot = Path.GetDirectoryName(Path.GetDirectoryName componentRecord.ConfigPath)
             let selectedProducer, selectedStage =
                 failure
                 |> Option.map (stageFailure componentId)
                 |> Option.defaultValue ("", "")
 
-            write root $"{componentId}/release/Config.json" (policySource componentId) |> ignore
-            write root $"{componentId}/release/Build.fsx" (stageScript "build" (scriptFails selectedProducer selectedStage componentId "build")) |> ignore
-            write root $"{componentId}/release/Pin.fsx" (stageScript "pins" (scriptFails selectedProducer selectedStage componentId "pins")) |> ignore
-            write root $"{componentId}/tests/distribution/Run.fsx" (stageScript "distribution" (scriptFails selectedProducer selectedStage componentId "distribution")) |> ignore
+            write root componentRecord.ConfigPath (policySource componentId) |> ignore
+            write root $"{componentRoot}/release/Build.fsx" (stageScript "build" (scriptFails selectedProducer selectedStage componentId "build")) |> ignore
+            write root $"{componentRoot}/release/Pin.fsx" (stageScript "pins" (scriptFails selectedProducer selectedStage componentId "pins")) |> ignore
+            write root $"{componentRoot}/tests/distribution/Run.fsx" (stageScript "distribution" (scriptFails selectedProducer selectedStage componentId "distribution")) |> ignore
 
             if componentId = "workflow" then
                 // The packaged gate is the coordination gate: it runs through the canonical root
@@ -409,8 +438,8 @@ let private writeFixture (root: string) (failure: StageFailure option) =
         // output is generated after the source commit, mirroring production order.
         let! head = runGitHead root
 
-        for componentId in componentIds do
-            let configPath = Path.Combine(root, componentId, "release", "Config.json")
+        for componentRecord in fixtureComponents do
+            let configPath = Path.Combine(root, componentRecord.ConfigPath)
             writeProducerArchive root (parsePolicy Fixture.canonicalToolchain configPath) head
     }
 
@@ -442,15 +471,20 @@ let private runCoordinationScriptDirectly (root: string) =
         return! capture 180000 info
     }
 
+// Only the Workflow coordination gate runs a fourth producer gate; every other component runs three.
+let private expectedStageOrder (componentId: string) =
+    if componentId = "workflow" then "build;pins;distribution;packaged;" else "build;pins;distribution;"
+
 let private prepareWritesPortableCandidateAndUsesExplicitProducerGates =
-    testCaseAsync "prepare writes portable candidates after each enrolled producer's explicit test gates" <| async {
-        for componentId in componentIds do
+    testCaseAsync "prepare writes portable candidates after each enrolled component's explicit test gates" <| async {
+        for componentRecord in fixtureComponents do
+            let componentId = componentRecord.ComponentId
             do!
                 withTemporaryRoot (fun root ->
                     async {
                         do! writeFixture root None
                         let outputPath = Path.Combine(root, "candidate-output")
-                        let! exitCode, output = runPrepare root $"{componentId}/release/Config.json" outputPath
+                        let! exitCode, output = runPrepare root componentRecord.ConfigPath outputPath
                         Expect.equal exitCode 0 $"{componentId} preparation succeeds: {output}"
                         let fixturePin = JsonNode.Parse(File.ReadAllText(Path.Combine(root, "global.json"))).AsObject()
                         let fixtureSdk = fixturePin["sdk"].AsObject()
@@ -464,10 +498,58 @@ let private prepareWritesPortableCandidateAndUsesExplicitProducerGates =
                         Expect.isTrue (File.Exists(Path.Combine(outputPath, "v7.8.9.zip"))) $"{componentId} emits the producer archive"
                         Expect.isFalse (File.Exists(Path.Combine(outputPath, "preparation.json"))) $"{componentId} does not emit a preparation receipt"
                         let stages = File.ReadAllText(Path.Combine(root, "prepare-stages.log"))
-                        let expected = if componentId = "workflow" then "build;pins;distribution;packaged;" else "build;pins;distribution;"
-                        Expect.equal stages expected $"{componentId} runs only its ordered producer gates"
+                        Expect.equal stages (expectedStageOrder componentId) $"{componentId} runs only its ordered producer gates"
                         Expect.isFalse (File.Exists(Path.Combine(root, "transaction-started"))) "preparation never starts publication"
                     })
+    }
+
+// The Resolver is the only nested participant, so preparation must derive its component root from
+// `infrastructure/resolver/release/Config.json` instead of assuming `<componentId>/release/Config.json`.
+let private prepareDerivesTheNestedResolverComponentRoot =
+    testCaseAsync "prepare derives the nested Resolver component root from its canonical config path" <| async {
+        do!
+            withTemporaryRoot (fun root ->
+                async {
+                    do! writeFixture root None
+                    let outputPath = Path.Combine(root, "candidate-output")
+                    let! exitCode, output = runPrepare root "infrastructure/resolver/release/Config.json" outputPath
+                    Expect.equal exitCode 0 $"the nested Resolver preparation succeeds: {output}"
+
+                    let summary = JsonNode.Parse(output.Trim()).AsObject()
+                    Expect.equal (summary["status"].GetValue<string>()) "prepared" "the Resolver reports preparation only"
+                    Expect.equal (summary["componentId"].GetValue<string>()) "resolver" "the Resolver candidate keeps its component identity"
+                    Expect.equal (summary["phase"].GetValue<string>()) "prepare" "the Resolver candidate reaches the prepare phase"
+                    Expect.isTrue
+                        (File.Exists(Path.Combine(outputPath, DistributionContract.manifestEntryName)))
+                        "the Resolver emits its standalone manifest into the candidate directory"
+                    Expect.isTrue (File.Exists(Path.Combine(outputPath, "v7.8.9.zip"))) "the Resolver emits its archive into the candidate directory"
+
+                    let nestedDist = Path.Combine(root, "infrastructure", "resolver", "dist")
+                    Expect.isTrue
+                        (File.Exists(Path.Combine(nestedDist, "v7.8.9.zip")))
+                        "the Resolver archive is prepared under its nested dist root"
+                    Expect.isTrue
+                        (File.Exists(Path.Combine(nestedDist, "resolver", DistributionContract.manifestEntryName)))
+                        "the Resolver standalone manifest is prepared under its nested dist root"
+                    Expect.isFalse
+                        (Directory.Exists(Path.Combine(root, "resolver")))
+                        "no flat component directory is invented for the nested Resolver"
+
+                    Expect.equal
+                        (File.ReadAllText(Path.Combine(root, "prepare-stages.log")))
+                        (expectedStageOrder "resolver")
+                        "the Resolver runs its ordered producer gates"
+
+                    let manifest =
+                        match DistributionContract.parse (File.ReadAllText(Path.Combine(outputPath, DistributionContract.manifestEntryName))) with
+                        | Ok value -> value
+                        | Error error -> failtestf "the Resolver candidate manifest does not parse: %s" (SharedFailure.ReleaseError.message error)
+
+                    Expect.equal manifest.Id "resolver" "the Resolver candidate manifest keeps its component identity"
+                    Expect.equal manifest.Launch.Kind DistributionContract.DotnetCli "the Resolver candidate declares the CLI launch kind"
+                    Expect.equal manifest.Launch.Arguments [] "the Resolver candidate declares no launch arguments"
+                    Expect.isFalse (File.Exists(Path.Combine(root, "transaction-started"))) "the Resolver preparation never starts publication"
+                })
     }
 
 let private preparationFailureStopsBeforeLaterStages =
@@ -479,12 +561,17 @@ let private preparationFailureStopsBeforeLaterStages =
               WorkflowPackagedFailure, "workflow", "tests[2]", "build;pins;distribution;packaged;" ]
 
         for failure, componentId, expectedPhase, expectedStages in scenarios do
+            let configPath =
+                fixtureComponents
+                |> List.find (fun componentRecord -> componentRecord.ComponentId = componentId)
+                |> fun componentRecord -> componentRecord.ConfigPath
+
             do!
                 withTemporaryRoot (fun root ->
                     async {
                         do! writeFixture root (Some failure)
                         let outputPath = Path.Combine(root, "candidate-output")
-                        let! exitCode, output = runPrepare root $"{componentId}/release/Config.json" outputPath
+                        let! exitCode, output = runPrepare root configPath outputPath
                         Expect.equal exitCode 4 $"{componentId}/{expectedPhase} returns the structured preparation failure"
                         let diagnostic = JsonNode.Parse(output.Trim()).AsObject()
                         Expect.equal (diagnostic["status"].GetValue<string>()) "failed" $"{componentId}/{expectedPhase} status"
@@ -679,6 +766,7 @@ let tests =
     testList
         "modern preparation boundary"
         [ prepareWritesPortableCandidateAndUsesExplicitProducerGates
+          prepareDerivesTheNestedResolverComponentRoot
           preparationFailureStopsBeforeLaterStages
           prepareRefusesPublicationAuthority
           prepareRunsTheCoordinationGateThroughTheCanonicalIsolationWrapper

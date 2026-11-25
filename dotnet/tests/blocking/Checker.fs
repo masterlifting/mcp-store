@@ -41,6 +41,7 @@ let private topLevelBridgeSites =
         [ "infrastructure/release/Runner.fs",
           [ "runPrepareMode argv |> Async.RunSynchronously"
             "runPublishMode argv |> Async.RunSynchronously" ]
+          "infrastructure/release/Toolchain.fs", [ "resolveLocal repositoryRoot |> Async.RunSynchronously" ]
           "dotnet/release/Build.fsx", [ "match run () |> Async.RunSynchronously with" ]
           "dotnet/release/Pin.fsx", [ "match run () |> Async.RunSynchronously with" ]
           "dotnet/tests/distribution/Run.fsx", [ "|> Async.RunSynchronously" ]
@@ -48,7 +49,10 @@ let private topLevelBridgeSites =
           "infrastructure/scripts/tests/Regression.fsx", [ "runTests () |> Async.RunSynchronously" ]
           "infrastructure/scripts/Validate.fs", [ "run args |> Async.RunSynchronously" ]
           "infrastructure/resolver/Main.fs", [ "match Async.RunSynchronously work with" ]
+          "infrastructure/resolver/release/Build.fsx", [ "match run () |> Async.RunSynchronously with" ]
+          "infrastructure/resolver/release/Pin.fsx", [ "match run () |> Async.RunSynchronously with" ]
           "infrastructure/resolver/tests/Probe.fs", [ "dispatched |> Option.map Async.RunSynchronously" ]
+          "infrastructure/resolver/tests/distribution/Run.fsx", [ "|> Async.RunSynchronously" ]
           "infrastructure/distribution/tests/Smoke.fsx", [ "|> Async.RunSynchronously" ]
           "dotnet/protocol/Host.fs", [ "McpHost.run service |> Async.RunSynchronously" ]
           "workflow/release/Build.fsx", [ "match run () |> Async.RunSynchronously with" ]

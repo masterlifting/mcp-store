@@ -36,6 +36,24 @@ descriptor, and build provenance are re-derived rather than re-implemented by ea
 caller. See `infrastructure/distribution/README.md` for the schema and its
 invariants.
 
+## Participants and launch kind
+
+`Participants.json` is an enrollment-only roster of `dotnet`, `workflow` and
+`resolver`, in that order so producer publication order is unchanged. Enrollment is a
+closed supported set, not open-ended, and the roster may not carry policy values
+such as `launchKind`. `resolver` is a release artifact, not an MCP producer: its
+`infrastructure/resolver/release/Config.json` declares the `dotnet-cli` launch kind
+with no arguments, while the producers declare `dotnet-exec`. The kind comes from the
+per-component policy, not from a hardcoded value. Component roots are derived from
+each participant's `configPath`, so a nested location such as `infrastructure/resolver/`
+needs no `<componentId>/release` layout.
+
+Each participant publishes into its own release container and tag, and the `resolver`
+container must exist before its first publication. Store's guarantee is asset-level:
+an asset is never overwritten and a same-version byte change is rejected. The
+containers are not GitHub-immutable releases, because the publisher refuses to publish
+into an immutable one. No Resolver artifact has been qualified or published yet.
+
 ## Toolchain owners
 
 One .NET toolchain version is authored: the SDK version in the root `global.json`

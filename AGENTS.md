@@ -6,6 +6,8 @@
 - `workflow/` owns the deterministic workflow/task-state MCP producer (`Mcp.Workflow`).
 - `telegram/` owns the Telegram MCP package (`telegram-mcp`). Telegram-only changes do not run the .NET release or Unix qualification workflows (`paths-ignore: ['telegram/**']`); that exclusion is not a Telegram CI.
 
+`infrastructure/resolver/` owns the Resolver, which is also a release participant (`resolver`) but a CLI release artifact rather than an MCP producer: its manifest uses the additive `dotnet-cli` launch kind (schema 2 is unchanged), and the Resolver refuses a `dotnet-cli` manifest as an MCP launch target. Release containers keep asset-level no-clobber; they are not GitHub-immutable releases.
+
 The official GitHub MCP is an external dependency and is not produced or installed by this repository.
 
 ## Boundaries

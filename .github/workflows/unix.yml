@@ -150,18 +150,23 @@ jobs:
           & dotnet "--info"
           if ($LASTEXITCODE -ne 0) { throw "dotnet --info failed (exit $LASTEXITCODE)" }
 
-      - name: pack both canonical producer distributions from the exact head
+      - name: pack every enrolled canonical distribution from the exact head
         shell: pwsh
-        # The resolver launch tests consume the canonical local distributions, so both packed products precede the Expecto gate.
+        # The resolver launch tests consume the canonical local distributions, so every packed product precedes the Expecto gate; the roster keeps the resolver last.
         run: |
           $ErrorActionPreference = "Stop"
           if (Test-Path variable:PSNativeCommandUseErrorActionPreference) { $PSNativeCommandUseErrorActionPreference = $false }
           $components = @(ConvertFrom-Json $env:RELEASE_COMPONENTS)
           if ($components.Count -eq 0) { throw "the projection declares no enrolled component" }
+          $configPaths = $env:RELEASE_CONFIG_PATHS | ConvertFrom-Json -AsHashtable
           foreach ($component in $components) {
-            & dotnet fsi --nologo "$component/release/Build.fsx"
+            # The canonical config path is the roster-registered map entry; the release directory is its parent, so a nested component root needs no derived literal.
+            if (-not $configPaths.Contains($component)) { throw "the projection declares no canonical config path for '$component'" }
+            $releaseDirectory = Split-Path -Parent ([string]$configPaths[$component])
+            if ((Split-Path -Leaf $releaseDirectory) -cne "release") { throw "the canonical config path '$($configPaths[$component])' for '$component' is not under a release directory" }
+            & dotnet fsi --nologo "$releaseDirectory/Build.fsx"
             if ($LASTEXITCODE -ne 0) { throw "$component distribution build failed (exit $LASTEXITCODE)" }
-            & dotnet fsi --nologo "$component/release/Pin.fsx"
+            & dotnet fsi --nologo "$releaseDirectory/Pin.fsx"
             if ($LASTEXITCODE -ne 0) { throw "$component consumer pin failed (exit $LASTEXITCODE)" }
           }
 

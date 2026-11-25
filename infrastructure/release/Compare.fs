@@ -65,7 +65,7 @@ let contractFromPolicy
               Runtime = policy.RuntimeVersion
               Platform = policy.Platform }
           Launch =
-            { Kind = launchKindDotnetExec
+            { Kind = policy.LaunchKind
               Entrypoint = policy.EntryDll
               Arguments = policy.LaunchArguments }
           EntryAllowlist = trustedArchiveMemberNames policy.PublishedFiles })
@@ -116,7 +116,7 @@ let private renderLaunch (launch: LaunchDescriptor) : string =
         |> List.map (fun argument -> $"{argument.Flag} {argument.Input} {LaunchArgumentType.wireName argument.Type}")
         |> String.concat "; "
 
-    $"{launch.Kind} {launch.Entrypoint} [{arguments}]"
+    $"{LaunchKind.wireName launch.Kind} {launch.Entrypoint} [{arguments}]"
 
 // The declared runtime prerequisite must match the packaged runtime configuration
 // bytes that `files` hashes, so the manifest never states an unverified runtime.

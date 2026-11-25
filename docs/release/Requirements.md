@@ -75,7 +75,7 @@ the metadata-asset-sha distinct-from-archive-sha invariant.
 | 41 | Fail closed on build/test/package failure, revision mismatch, metadata inconsistency, asset diff, ambiguous upload, unresolvable container | EV-TEST (`Evaluate.fsx::failedOnMissingManifest`, `failedOnArchiveMissing`, `failedOnArchiveImmutable`, `failedOnMetadataCorrupt`, `finalizeFailureClearsAllPublishedButRetainsRender`; `Runner.fsx::runnerDirtyTreeEmitsStructuredFailureJson`) | local-run, deterministic |
 | 42 | On ambiguous upload, observe remote before retry; never retry blindly | EV-TEST (`Publish.fsx::uploadCandidateAmbiguousPostMustObserveRemote`, `uploadCandidatePostTimeoutReadsBackVerifiedBytes`, `uploadCandidatePostServerErrorNoRetry`) | local-run simulated; live HTTP unverified hosted |
 | 43 | One producer's failure must not publish an unvalidated artifact for that producer | EV-TEST (`Evaluate.fsx::finalizeFailureClearsAllPublishedButRetainsRender`); the Runner CLI exercises the same helpers and never invents a fake extra API | local-run, deterministic |
-| 44 | Use existing component release containers/tags (`dotnet`, `workflow`) | EV-WF, EV-REMOTE | static YAML checked; live remote unverified |
+| 44 | Use existing component release containers/tags (`dotnet`, `workflow`); the Resolver is a third release artifact with its own `resolver` container/tag, which an explicitly confirmed operator action must create as a published, non-draft release before its first publication, and which is not GitHub-immutable | EV-WF, EV-REMOTE | static YAML checked for `dotnet` and `workflow`; `resolver` container not created or observed; live remote unverified |
 | 45 | Missing container: create via accepted tag policy or fail with actionable error | EV-WF, EV-TEST (`Evaluate.fsx::failedOnArchiveMissing`; `Publish.fsx::localMirrorObserver` Missing path) | local-run simulated; live HTTP unverified hosted |
 | 46 | Do not move/rewrite an existing component tag | EV-WF, EV-REVIEW | unverified hosted |
 | 47 | Run canonical producer pin preparation as part of release validation | EV-BUILD, EV-CMP (`Metadata.fsx::roundTripByteExactIdentical`) | local-run, deterministic |
@@ -126,7 +126,7 @@ or required test (#52/#71). None is executed in this slice.
 | V12 | Historical `v1.0.3` bootstrap comparison | Explicit decision: no-op or reviewed bump, never overwrite | EV-REMOTE, EV-CMP, EV-REVIEW | unverified |
 | V13 | Immutable-release setting incompatible | Fail closed with actionable message; tags unmoved | EV-REMOTE, EV-TEST | unverified |
 | V14 | Audit Telegram boundaries | Telegram source/workflows unchanged by the release transaction | EV-TEST, EV-REVIEW | unverified |
-| V15 | Workflow YAML not a second version/SDK table | Config values trace to `release/Config.fsx` only | EV-WF, EV-REVIEW | unverified |
+| V15 | Workflow YAML not a second version/SDK table | Per-component values for all three participants (`dotnet`, `workflow`, `resolver`) trace to their own `release/Config.json`, and the shared SDK to the root `global.json`; none is repeated in workflow YAML | EV-WF, EV-REVIEW | unverified |
 
 ## 3. Constraints carried into design (not yet frozen)
 

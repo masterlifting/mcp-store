@@ -36,6 +36,7 @@ type Request =
       EntryDll: string
       ArchiveName: string
       PublishedFiles: string list
+      LaunchKind: LaunchKind
       LaunchArguments: LaunchArgument list
       ExtraPublishProperties: string list
       Notice: string }
@@ -208,7 +209,7 @@ let private buildWith
                   Platform = request.Platform }
               Archive = request.ArchiveName
               Launch =
-                { Kind = launchKindDotnetExec
+                { Kind = request.LaunchKind
                   Entrypoint = request.EntryDll
                   Arguments = request.LaunchArguments }
               Runtime = runtime

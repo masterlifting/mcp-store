@@ -118,7 +118,8 @@ let releaseWorkflowAndRosterUseDynamicParticipants () =
 
     let expectedParticipants =
         [ "dotnet", "dotnet/release/Config.json"
-          "workflow", "workflow/release/Config.json" ]
+          "workflow", "workflow/release/Config.json"
+          "resolver", "infrastructure/resolver/release/Config.json" ]
 
     assertEqual "Participants.json registers exactly the supported component/config pairs" expectedParticipants participants
     assertTrue "Participants.json excludes Telegram" (participants |> List.forall (fun (id, _) -> not (containsIgnoreCase id "telegram")))
@@ -137,7 +138,7 @@ let releaseWorkflowAndRosterUseDynamicParticipants () =
         lines
         |> Array.exists (fun line ->
             let trimmed = line.Trim()
-            trimmed = "- dotnet" || trimmed = "- workflow")
+            expectedParticipants |> List.exists (fun (componentId, _) -> trimmed = $"- {componentId}"))
 
     assertTrue "release workflow has no hardcoded participant list" (not hardcodedParticipantList)
 
@@ -146,7 +147,7 @@ let releaseWorkflowAndRosterUseDynamicParticipants () =
         (Regex.IsMatch(preparationJob, "(?i)runs-on:\\s*windows-latest")
          && Regex.IsMatch(preparationJob, "(?i)contents:\\s*read")
          && Regex.IsMatch(preparationJob, "(?i)&\\s+\\$\\w+\\s+prepare\\b")
-         && Regex.IsMatch(preparationJob, "(?i)Join-Path\\s+\\(Get-Location\\)\\s+\"\\$\\w+/release/Config\\.json\""))
+         && Regex.IsMatch(preparationJob, "(?i)Join-Path\\s+\\(Get-Location\\)\\s+\\(\\[string\\]\\$configPaths\\[\\$component\\]\\)"))
     assertTrue
         "the publication job is the only writer and gates on the preparation job"
         (Regex.IsMatch(publicationJob, "(?i)contents:\\s*write")
@@ -159,8 +160,8 @@ let releaseWorkflowAndRosterUseDynamicParticipants () =
     let hardcodedPreparePath =
         lines
         |> Array.exists (fun line ->
-            containsIgnoreCase line "prepare \"dotnet/release/Config.json\""
-            || containsIgnoreCase line "prepare \"workflow/release/Config.json\"")
+            expectedParticipants
+            |> List.exists (fun (_, configPath) -> containsIgnoreCase line $"prepare \"{configPath}\""))
 
     assertTrue "release prepare path is not hardcoded to a participant" (not hardcodedPreparePath)
     assertTrue

@@ -11,6 +11,7 @@
     "Mcp.Dotnet.dll",
     "Mcp.Dotnet.runtimeconfig.json"
   ],
+  "launchKind": "dotnet-exec",
   "launchArguments": [
     { "flag": "--dotnet-host", "input": "dotnetHost", "type": "absolute-file" },
     { "flag": "--artifact-root", "input": "artifactRoot", "type": "absolute-directory" }

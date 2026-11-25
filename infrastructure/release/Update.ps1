@@ -30,7 +30,7 @@ $rosterPath = Join-Path $Root "infrastructure/release/Participants.json"
 
 # The exact policy field set the compiled reader also accepts; a drift here fails before any SDK install.
 $script:PolicyFields = @(
-    "componentId"; "version"; "entryDll"; "platform"; "archiveName"; "assetUri"; "publishedFiles"; "launchArguments")
+    "componentId"; "version"; "entryDll"; "platform"; "archiveName"; "assetUri"; "publishedFiles"; "launchKind"; "launchArguments")
 # The only toolchain-related field left in a component policy is the platform label: a RID the artifact is qualified for,
 # not a version and not byte-derivable. The SDK and runtime versions are not policy and are rejected as unknown fields.
 $script:ToolchainFields = @("platform")
@@ -38,6 +38,9 @@ $script:ToolchainFields = @("platform")
 # non-empty list of flag/input/type triples, a closed input-type set, and unique flags and input names.
 $script:LaunchArgumentFields = @("flag"; "input"; "type")
 $script:LaunchArgumentTypes = @("absolute-file"; "absolute-directory"; "sha256")
+# The closed launch-kind set, with a kind-specific argument rule: dotnet-exec needs at least one required argument,
+# dotnet-cli declares none. An unknown kind is rejected, matching the compiled reader.
+$script:LaunchKinds = @("dotnet-exec"; "dotnet-cli")
 
 function Read-Policy {
     param([Parameter(Mandatory = $true)][string]$ConfigPath)
@@ -69,9 +72,19 @@ function Read-Policy {
     }
 
     # Reject descriptors before SDK setup so bootstrap and compiled policy validation cannot disagree.
+    $launchKind = $document.launchKind
+    if ($launchKind -isnot [string] -or $script:LaunchKinds -cnotcontains $launchKind) {
+        throw "policy '$ConfigPath' launchKind '$launchKind' must be one of $($script:LaunchKinds -join ', ')"
+    }
     $launchArguments = $document.launchArguments
-    if ($null -eq $launchArguments -or $launchArguments -isnot [System.Array] -or $launchArguments.Count -eq 0) {
-        throw "policy '$ConfigPath' must declare at least one launchArguments entry"
+    if ($null -eq $launchArguments -or $launchArguments -isnot [System.Array]) {
+        throw "policy '$ConfigPath' launchArguments must be an array"
+    }
+    if ($launchKind -ceq "dotnet-exec" -and $launchArguments.Count -eq 0) {
+        throw "policy '$ConfigPath' must declare at least one launchArguments entry for 'dotnet-exec'"
+    }
+    if ($launchKind -ceq "dotnet-cli" -and $launchArguments.Count -ne 0) {
+        throw "policy '$ConfigPath' launchArguments must be empty for 'dotnet-cli'"
     }
     $argumentFlags = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
     $argumentInputs = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
@@ -201,6 +214,14 @@ if ($Project) {
     }
     # Later steps in the same job read the projection from the environment, so no step restates a participant list.
     $summary["RELEASE_COMPONENTS"] = $componentsJson
+    # The roster-ordered componentId -> canonical configPath map, so downstream CI never derives `<componentId>/release/Config.json`.
+    $configPaths = [ordered]@{}
+    foreach ($entry in $roster) { $configPaths[$entry.componentId] = "$($entry.configPath)" }
+    $configPathsJson = ConvertTo-Json -Compress -InputObject $configPaths
+    $summary["RELEASE_CONFIG_PATHS"] = $configPathsJson
+    if ($env:GITHUB_OUTPUT) {
+        Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "configPaths=$configPathsJson"
+    }
     if ($env:GITHUB_ENV) {
         Write-KeyValue -Pairs $summary -Target $env:GITHUB_ENV
     } else {

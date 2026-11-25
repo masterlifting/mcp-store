@@ -22,6 +22,7 @@ type Spec =
       Revision: string
       ArchiveName: string
       Entrypoint: string
+      Kind: LaunchKind
       RuntimeVersion: string }
 
 let repository = "https://github.com/masterlifting/mcp-store"
@@ -32,6 +33,7 @@ let dotnetSpec =
       Revision = "fc0aefa9db0fb7262ee6ca1b54bd6bbb752b8b01"
       ArchiveName = "v1.0.5.zip"
       Entrypoint = "Mcp.Dotnet.dll"
+      Kind = DotnetExec
       RuntimeVersion = "11.0.0" }
 
 let workflowSpec =
@@ -40,6 +42,17 @@ let workflowSpec =
       Revision = "3612e8e6dd4655543e6d4b9dc0edee9c24b82bf1"
       ArchiveName = "v1.1.0.zip"
       Entrypoint = "Mcp.Workflow.dll"
+      Kind = DotnetExec
+      RuntimeVersion = "11.0.0" }
+
+// The Resolver is a host-run CLI, so its valid publication carries the dotnet-cli kind and no launch arguments.
+let cliSpec =
+    { Component = "resolver"
+      Version = "1.0.0"
+      Revision = "0123456789abcdef0123456789abcdef01234567"
+      ArchiveName = "v1.0.0.zip"
+      Entrypoint = "Resolver.dll"
+      Kind = DotnetCli
       RuntimeVersion = "11.0.0" }
 
 let assetUri (spec: Spec) : string =
@@ -83,11 +96,14 @@ let manifest (spec: Spec) (revision: string) (members: (string * byte[]) list) :
           Platform = "win-x64" }
       Archive = spec.ArchiveName
       Launch =
-        { Kind = launchKindDotnetExec
+        { Kind = spec.Kind
           Entrypoint = spec.Entrypoint
           Arguments =
-            [ { Flag = "--dotnet-host"; Input = "dotnetHost"; Type = AbsoluteFile }
-              { Flag = "--artifact-root"; Input = "artifactRoot"; Type = AbsoluteDirectory } ] }
+            (match spec.Kind with
+             | DotnetExec ->
+                 [ { Flag = "--dotnet-host"; Input = "dotnetHost"; Type = AbsoluteFile }
+                   { Flag = "--artifact-root"; Input = "artifactRoot"; Type = AbsoluteDirectory } ]
+             | DotnetCli -> []) }
       Runtime =
         { Framework = runtimeFramework
           Version = spec.RuntimeVersion

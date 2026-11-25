@@ -72,8 +72,25 @@ let compose
         | Some error -> Error error
         | None -> Ok(List.ofSeq arguments)
 
+// A host-run command-line tool is not an MCP launch target: the resolver neither resolves nor
+// runs it, so a host cannot obtain the resolver by running the resolver. The refusal reuses
+// `IdentityMismatch` and is applied only to an authenticated, verified manifest.
+let requireMcpTarget (manifest: DistributionContract.DistributionManifest) : Result<unit, ReleaseError> =
+    match manifest.Launch.Kind with
+    | DistributionContract.DotnetExec -> Ok()
+    | DistributionContract.DotnetCli ->
+        Error(
+            IdentityMismatch(
+                "launch.kind",
+                DistributionContract.LaunchKind.wireName DistributionContract.DotnetExec,
+                DistributionContract.LaunchKind.wireName DistributionContract.DotnetCli
+            )
+        )
+
 let entrypoint
     (installDirectory: string)
     (manifest: DistributionContract.DistributionManifest)
     : Result<string, ReleaseError> =
-    DistributionContract.resolveUnderRoot installDirectory manifest.Launch.Entrypoint
+    match requireMcpTarget manifest with
+    | Error error -> Error error
+    | Ok () -> DistributionContract.resolveUnderRoot installDirectory manifest.Launch.Entrypoint

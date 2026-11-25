@@ -24,7 +24,7 @@ let render (pin: DistributionPin.Pin) (resolution: ResolverInstall.Resolution) :
     node["archiveName"] <- JsonValue.Create pin.ArchiveName
     node["archiveSha256"] <- JsonValue.Create pin.ArchiveSha256
     node["manifestSha256"] <- JsonValue.Create pin.ManifestSha256
-    node["kind"] <- JsonValue.Create manifest.Launch.Kind
+    node["kind"] <- JsonValue.Create(DistributionContract.LaunchKind.wireName manifest.Launch.Kind)
 
     let runtime = JsonObject()
     runtime["framework"] <- JsonValue.Create resolution.Runtime.Framework

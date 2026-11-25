@@ -13,6 +13,11 @@ Telegram is the Python producer and is tested from its `telegram/` boundary with
 `uv`. Telegram-only changes do not run the .NET release or Unix qualification
 workflows; that exclusion is not a Telegram CI.
 
+The Resolver is a third release participant but not an MCP producer: it is published
+through the same release transaction as a CLI-only artifact with the `dotnet-cli`
+launch kind, an additive kind inside manifest schema 2. A consumer must verify its pin
+and archive before first executing it, and the Resolver does not install itself.
+
 ## Installer and resolver
 
 `infrastructure/resolver/` owns the single harness-independent install,

@@ -99,7 +99,7 @@ let canonicalManifest (revision: string) (sdk: string) (payloadHashes: (string *
           Platform = canonicalPlatform }
       Archive = canonicalArchiveName
       Launch =
-        { Kind = launchKindDotnetExec
+        { Kind = DotnetExec
           Entrypoint = canonicalEntrypoint
           Arguments = canonicalLaunchArguments }
       Runtime =
@@ -127,7 +127,7 @@ let canonicalContract : ReleaseCompare.ComponentContract =
           Runtime = canonicalRuntime
           Platform = canonicalPlatform }
       Launch =
-        { Kind = launchKindDotnetExec
+        { Kind = DotnetExec
           Entrypoint = canonicalEntrypoint
           Arguments = canonicalLaunchArguments }
       EntryAllowlist = canonicalEntryAllowlist }
@@ -172,14 +172,17 @@ let policyManifestText
               Platform = policy.Platform }
           Archive = policy.ArchiveName
           Launch =
-            { Kind = launchKindDotnetExec
+            { Kind = policy.LaunchKind
               Entrypoint = policy.EntryDll
               Arguments = policy.LaunchArguments }
           Runtime =
             { Framework = runtimeFramework
               Version = policy.RuntimeVersion
               Config = runtimeConfigNameFor policy.EntryDll }
-          Files = payloadHashes |> List.map (fun (path, hash) -> { Path = path; Sha256 = hash }) }
+          Files =
+            payloadHashes
+            |> List.map (fun (path, hash) -> { Path = path; Sha256 = hash })
+            |> List.sortWith (fun left right -> String.CompareOrdinal(left.Path, right.Path)) }
 
     DistributionContract.render manifest
 
@@ -264,11 +267,14 @@ let copyToolchainOwners (root: string) =
         copyFromRepository root relativePath
 
 // The coherence guard also reads every roster participant's policy config under the root it is given.
-let copyCanonicalPolicy (root: string) (componentId: string) =
-    copyFromRepository root (Path.Combine(componentId, "release", "Config.json"))
+let copyCanonicalPolicy (root: string) (configPath: string) =
+    copyFromRepository root configPath
 
 let seedCoherenceRoot (root: string) =
     copyToolchainOwners root
 
-    for componentId in [ "dotnet"; "workflow" ] do
-        copyCanonicalPolicy root componentId
+    for configPath in
+        [ "dotnet/release/Config.json"
+          "workflow/release/Config.json"
+          "infrastructure/resolver/release/Config.json" ] do
+        copyCanonicalPolicy root configPath

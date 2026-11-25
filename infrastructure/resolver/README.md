@@ -15,8 +15,11 @@ adapter.
 ## Bootstrap
 
 The resolver is a framework-dependent `net11.0` executable. Provision
-`Resolver.dll`, `Resolver.deps.json`, and `Resolver.runtimeconfig.json` from a
-trusted build or release, then invoke it with an absolute .NET host:
+`Resolver.dll`, `Resolver.deps.json`, `Resolver.runtimeconfig.json`, and
+`FSharp.Core.dll` from a trusted build or release, then invoke it with an absolute
+.NET host. A release archive carries those four files plus `NOTICE.txt` and
+`distribution.json`, six flat members in all; the .NET host and runtime are a
+separate prerequisite, not part of that closure:
 
 ```text
 dotnet exec <absolute>/Resolver.dll <command> [options]
@@ -26,6 +29,15 @@ The resolver never uses an SDK, FSI, project file, or `global.json`; it launches
 its child with the same absolute-host model. That bootstrap trust decision
 (which bytes are provisioned, and how) belongs to the consumer or operator, not
 to this program.
+
+The resolver is itself published through the shared release transaction as a
+CLI-only artifact: its manifest uses the `dotnet-cli` launch kind, with entrypoint
+`Resolver.dll` and no arguments. Because the resolver is the trust root for every
+producer, a consumer must verify the pin, archive and member digests before first
+executing it, and it is never obtained or verified by running the resolver. The
+resolver therefore refuses a `dotnet-cli` manifest as a launch target in both `run`
+and `resolve`, before it stages anything, so it cannot install itself. No Resolver
+release has been published or qualified yet.
 
 ## CLI
 

@@ -394,8 +394,124 @@ let private typedInputTests =
                 Expect.isNone options.Root "an omitted root stays unclaimed"
             | other -> failtestf "expected a parsed run command, got %A" other ]
 
+let private storageFor (base': string) (pinValue: DistributionPin.Pin) : ResolverStorage.Storage =
+    match ResolverStorage.layout base' pinValue with
+    | Ok storage -> storage
+    | Error error -> failtestf "the fixture storage layout failed: %s" (ReleaseError.message error)
+
+// The lease is the coordination entry, so an exclusive open proves the refusal left no holder.
+let private leaseHeld (path: string) : bool =
+    try
+        use probe = new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None)
+        false
+    with :? IOException ->
+        true
+
+let private expectLaunchKindError (error: ReleaseError) : unit =
+    match error with
+    | IdentityMismatch (field, expected, actual) ->
+        Expect.equal field "launch.kind" "the refusal names the launch kind"
+        Expect.equal expected "dotnet-exec" "the refusal states the admitted kind"
+        Expect.equal actual "dotnet-cli" "the refusal states the published kind"
+    | other -> failtestf "expected a launch-kind refusal, got %s" (ReleaseError.message other)
+
+let private expectLaunchKindRefusal (result: Result<'a, ReleaseError>) : unit =
+    match result with
+    | Ok _ -> failtest "a dotnet-cli publication must never be admitted as an MCP launch target"
+    | Error error -> expectLaunchKindError error
+
+// Reaching the kind refusal proves the archive digest, manifest identity, membership, and member hashes verified first.
+let private cliRefusalTests =
+    testList
+        "dotnet-cli refusal"
+        [ testCase "the launch entrypoint guard refuses a dotnet-cli descriptor" <| fun _ ->
+            let descriptor = manifest cliSpec cliSpec.Revision (bodies cliSpec)
+
+            match ResolverLaunch.entrypoint tempDirectory descriptor with
+            | Ok path -> failtestf "the entrypoint guard admitted a dotnet-cli descriptor at '%s'" path
+            | Error error -> expectLaunchKindError error
+
+          testCaseAsync "resolve refuses a verified dotnet-cli publication before retention, staging, or snapshot"
+          <| async {
+              do!
+                  scopedAsync
+                      "cli-resolve"
+                      (fun base' ->
+                          async {
+                              let pinValue, archive = fixture cliSpec
+                              let storage = storageFor base' pinValue
+                              let downloads = ref 0
+
+                              let target: ResolverCli.Target =
+                                  { Pin = writePin base' pinValue
+                                    Root = Some base' }
+
+                              let! resolved = ResolverRun.resolve (serving archive downloads) target
+                              expectLaunchKindRefusal resolved
+                              Expect.equal downloads.Value 1 "the pinned archive is downloaded and verified before the kind refusal"
+                              Expect.isFalse (File.Exists storage.Retained) "a refused publication is never retained"
+
+                              Expect.isFalse
+                                  (Directory.Exists storage.Install)
+                                  "a refused publication is never installed"
+
+                              Expect.equal
+                                  (Directory.GetFileSystemEntries storage.Staging).Length
+                                  0
+                                  "a refused publication is never staged"
+
+                              Expect.isFalse (leaseHeld storage.Lease) "the refused resolve releases the shared lease"
+                          })
+          }
+
+          testCaseAsync "run refuses a verified dotnet-cli publication before starting a child" <| async {
+              do!
+                  scopedAsync
+                      "cli-run"
+                      (fun base' ->
+                          async {
+                              let pinValue, archive = fixture cliSpec
+                              let store = Path.Combine(base', "immutable storage root")
+                              let storage = storageFor store pinValue
+                              let workspace = Path.Combine(base', "workspace")
+                              Directory.CreateDirectory workspace |> ignore
+
+                              // A non-host regular file keeps a launch attempt observable as a start failure instead of a refusal.
+                              let hostFile = Path.Combine(base', "host.exe")
+                              File.WriteAllText(hostFile, "not a host")
+                              let downloads = ref 0
+
+                              let options: ResolverCli.Run =
+                                  { Pin = writePin base' pinValue
+                                    Root = Some store
+                                    Workspace = workspace
+                                    Host = hostFile
+                                    Inputs = [] }
+
+                              let! launched = ResolverRun.run (serving archive downloads) options
+                              expectLaunchKindRefusal launched
+                              Expect.equal downloads.Value 1 "the pinned archive is downloaded and verified before the kind refusal"
+
+                              Expect.isFalse
+                                  (File.Exists storage.Retained)
+                                  "a refused run never retains the archive"
+
+                              Expect.isFalse
+                                  (Directory.Exists storage.Install)
+                                  "a refused run never installs the payload"
+
+                              Expect.equal
+                                  (Directory.GetFileSystemEntries storage.Staging).Length
+                                  0
+                                  "a refused run never stages the payload"
+
+                              Expect.isFalse (leaseHeld storage.Lease) "the refused run releases the shared lease"
+                          })
+          } ]
+
 let tests =
     testList
         "launch"
         [ yield! producers |> List.map launchCase
-          typedInputTests ]
+          typedInputTests
+          cliRefusalTests ]

@@ -78,16 +78,21 @@ jobs:
 
       - name: pack each enrolled producer's canonical local distribution and consumer pin
         shell: pwsh
-        # The resolver launch gate installs the canonical local product bytes, so both producers must be packed first.
+        # The resolver launch gate installs the canonical local product bytes, so both producers must be packed first; the roster keeps the resolver last.
         run: |
           $ErrorActionPreference = "Stop"
           if (Test-Path variable:PSNativeCommandUseErrorActionPreference) { $PSNativeCommandUseErrorActionPreference = $false }
           $components = @(ConvertFrom-Json $env:RELEASE_COMPONENTS)
           if ($components.Count -eq 0) { throw "the projection declares no enrolled component" }
+          $configPaths = $env:RELEASE_CONFIG_PATHS | ConvertFrom-Json -AsHashtable
           foreach ($component in $components) {
-            & dotnet fsi --nologo "$component/release/Build.fsx"
+            # The canonical config path is the roster-registered map entry; the release directory is its parent, so a nested component root needs no derived literal.
+            if (-not $configPaths.Contains($component)) { throw "the projection declares no canonical config path for '$component'" }
+            $releaseDirectory = Split-Path -Parent ([string]$configPaths[$component])
+            if ((Split-Path -Leaf $releaseDirectory) -cne "release") { throw "the canonical config path '$($configPaths[$component])' for '$component' is not under a release directory" }
+            & dotnet fsi --nologo "$releaseDirectory/Build.fsx"
             if ($LASTEXITCODE -ne 0) { throw "$component distribution build failed (exit $LASTEXITCODE)" }
-            & dotnet fsi --nologo "$component/release/Pin.fsx"
+            & dotnet fsi --nologo "$releaseDirectory/Pin.fsx"
             if ($LASTEXITCODE -ne 0) { throw "$component consumer pin failed (exit $LASTEXITCODE)" }
           }
 
@@ -344,6 +349,9 @@ jobs:
       candidateArtifactId_workflow: ${{ steps.upload_workflow.outputs.artifact-id }}
       candidateArtifactDigest_workflow: ${{ steps.upload_workflow.outputs.artifact-digest }}
       candidateArchiveName_workflow: ${{ steps.prepare.outputs.archiveName_workflow }}
+      candidateArtifactId_resolver: ${{ steps.upload_resolver.outputs.artifact-id }}
+      candidateArtifactDigest_resolver: ${{ steps.upload_resolver.outputs.artifact-digest }}
+      candidateArchiveName_resolver: ${{ steps.prepare.outputs.archiveName_resolver }}
     steps:
       - name: checkout exact event SHA
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -372,7 +380,7 @@ jobs:
         shell: pwsh
         run: pwsh infrastructure/release/Update.ps1 -Verify
 
-      - name: build the release runner and both producer projects
+      - name: build the release runner and the producer projects
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -383,7 +391,7 @@ jobs:
           dotnet build workflow/Workflow.fsproj -c Release
           if ($LASTEXITCODE -ne 0) { throw "workflow producer build failed (exit $LASTEXITCODE)" }
 
-      - name: run both producers' distribution package gates (native exit preserved)
+      - name: run every enrolled distribution package gate (native exit preserved)
         shell: pwsh
         # Each participant's package gate is read from its own roster-registered component root and must pass before any candidate is uploaded.
         run: |
@@ -392,8 +400,14 @@ jobs:
             $PSNativeCommandUseErrorActionPreference = $false
           }
           $components = @(ConvertFrom-Json $env:RELEASE_COMPONENTS)
+          $configPaths = $env:RELEASE_CONFIG_PATHS | ConvertFrom-Json -AsHashtable
           foreach ($component in $components) {
-            $entrypoint = "$component/tests/distribution/Run.fsx"
+            if (-not $configPaths.Contains($component)) { throw "the projection declares no canonical config path for '$component'" }
+            # The component root is the parent of its release directory, which is the parent of the canonical config.
+            $releaseDirectory = Split-Path -Parent ([string]$configPaths[$component])
+            if ((Split-Path -Leaf $releaseDirectory) -cne "release") { throw "the canonical config path '$($configPaths[$component])' for '$component' is not under a release directory" }
+            $componentRoot = Split-Path -Parent $releaseDirectory
+            $entrypoint = "$componentRoot/tests/distribution/Run.fsx"
             if (-not (Test-Path -LiteralPath $entrypoint)) { throw "producer package gate is missing: $entrypoint" }
             Write-Host "::group::producer package gate $entrypoint"
             & dotnet fsi --nologo $entrypoint
@@ -433,9 +447,11 @@ jobs:
           if (-not (Test-Path -LiteralPath $runner -PathType Leaf)) { throw "compiled release runner not found at $runner" }
           $components = @(ConvertFrom-Json $env:RELEASE_COMPONENTS)
           if ($components.Count -eq 0) { throw "the projection declares no enrolled component" }
+          $configPaths = $env:RELEASE_CONFIG_PATHS | ConvertFrom-Json -AsHashtable
           foreach ($component in $components) {
             # The policy path is the roster-registered canonical config; the config reader itself is the compiled one.
-            $configPath = Join-Path (Get-Location) "$component/release/Config.json"
+            if (-not $configPaths.Contains($component)) { throw "the projection declares no canonical config path for '$component'" }
+            $configPath = Join-Path (Get-Location) ([string]$configPaths[$component])
             if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) { throw "canonical policy is missing for '$component': $configPath" }
             $candidate = Join-Path $env:CANDIDATE_ROOT $component
             $stdout = (& $runner prepare $configPath $candidate | Out-String)
@@ -479,6 +495,17 @@ jobs:
           path: |
             ${{ env.CANDIDATE_ROOT }}/workflow/${{ env.CANDIDATE_ARCHIVE_NAME_WORKFLOW }}
             ${{ env.CANDIDATE_ROOT }}/workflow/distribution.json
+          if-no-files-found: error
+
+      - name: upload the resolver candidate transport
+        id: upload_resolver
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          # Exactly the two direct members the publisher consumes: the producer archive and its distribution manifest.
+          name: release-candidate-resolver
+          path: |
+            ${{ env.CANDIDATE_ROOT }}/resolver/${{ env.CANDIDATE_ARCHIVE_NAME_RESOLVER }}
+            ${{ env.CANDIDATE_ROOT }}/resolver/distribution.json
           if-no-files-found: error
 
   publication:
@@ -529,6 +556,7 @@ jobs:
           RUNTIME_ARTIFACT_ID: ${{ needs.publisher.outputs.runtimeArtifactId }}
           CANDIDATE_ARTIFACT_ID_DOTNET: ${{ needs.preparation.outputs.candidateArtifactId_dotnet }}
           CANDIDATE_ARTIFACT_ID_WORKFLOW: ${{ needs.preparation.outputs.candidateArtifactId_workflow }}
+          CANDIDATE_ARTIFACT_ID_RESOLVER: ${{ needs.preparation.outputs.candidateArtifactId_resolver }}
         run: |
           $ErrorActionPreference = "Stop"
           function Assert-ArtifactId {
@@ -541,7 +569,8 @@ jobs:
           Assert-ArtifactId "publisher runtime" $env:RUNTIME_ARTIFACT_ID
           Assert-ArtifactId "dotnet candidate" $env:CANDIDATE_ARTIFACT_ID_DOTNET
           Assert-ArtifactId "workflow candidate" $env:CANDIDATE_ARTIFACT_ID_WORKFLOW
-          Write-Host "validated the three declared artifact ids before any transfer"
+          Assert-ArtifactId "resolver candidate" $env:CANDIDATE_ARTIFACT_ID_RESOLVER
+          Write-Host "validated the four declared artifact ids before any transfer"
 
       - name: download the declared publisher runtime transport
         id: downloadPublisher
@@ -570,6 +599,14 @@ jobs:
           # The exact numeric artifact id from this run; a single id extracts directly into the path below.
           artifact-ids: ${{ needs.preparation.outputs.candidateArtifactId_workflow }}
           path: ${{ runner.temp }}/candidate-workflow
+
+      - name: download the declared resolver candidate transport
+        id: downloadCandidateResolver
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          # The exact numeric artifact id from this run; a single id extracts directly into the path below.
+          artifact-ids: ${{ needs.preparation.outputs.candidateArtifactId_resolver }}
+          path: ${{ runner.temp }}/candidate-resolver
 
       - name: verify the declared transports and publish each enrolled component
         id: publish
@@ -632,6 +669,7 @@ jobs:
           if (-not ($inventoryEntries | Where-Object { "$($_.path)" -ceq "ReleaseRunner.exe" })) { throw "the declared runtime inventory carries no ReleaseRunner.exe" }
           $components = @(ConvertFrom-Json $env:RELEASE_COMPONENTS)
           if ($components.Count -eq 0) { throw "the projection declares no enrolled component" }
+          $configPaths = $env:RELEASE_CONFIG_PATHS | ConvertFrom-Json -AsHashtable
 
           # Complete membership, path and SHA-256 proof against the publisher job's own inventory, before any
           # downloaded file is executed. The verifier is read-only and reads no credential or platform state.
@@ -645,7 +683,8 @@ jobs:
           $firstFailure = 0
           foreach ($component in $components) {
             # The policy comes from this fresh trusted checkout, never from candidate data.
-            $configPath = Join-Path $workspace "$component/release/Config.json"
+            if (-not $configPaths.Contains($component)) { throw "the projection declares no canonical config path for '$component'" }
+            $configPath = Join-Path $workspace ([string]$configPaths[$component])
             if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) { throw "the trusted checkout carries no policy for '$component': $configPath" }
             $candidateArtifactId = Read-DeclaredOutput $candidates "candidateArtifactId_$component" "preparation"
             $candidateDigest = Read-DeclaredOutput $candidates "candidateArtifactDigest_$component" "preparation"

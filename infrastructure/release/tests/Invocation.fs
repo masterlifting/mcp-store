@@ -134,10 +134,11 @@ let private scratchRoot () =
     Fixture.copyToolchainOwners root
     File.Copy(Path.Combine(repoRoot, "infrastructure", "release", "Participants.json"), Path.Combine(roster, "Participants.json"))
 
-    for componentId in [ "dotnet"; "workflow" ] do
-        let policy = Path.Combine(root, componentId, "release")
-        Directory.CreateDirectory policy |> ignore
-        File.Copy(Path.Combine(repoRoot, componentId, "release", "Config.json"), Path.Combine(policy, "Config.json"))
+    for configPath in
+        [ "dotnet/release/Config.json"
+          "workflow/release/Config.json"
+          "infrastructure/resolver/release/Config.json" ] do
+        Fixture.copyCanonicalPolicy root configPath
 
     root
 

@@ -19,7 +19,8 @@ let private repoRoot = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..",
 
 let private currentParticipants =
     [ "dotnet", "dotnet/release/Config.json"
-      "workflow", "workflow/release/Config.json" ]
+      "workflow", "workflow/release/Config.json"
+      "resolver", "infrastructure/resolver/release/Config.json" ]
 
 let private withTemporaryRoot (action: string -> Async<unit>) : Async<unit> =
     async {
@@ -81,12 +82,18 @@ let private configText (componentId: string) (version: string) (entryDll: string
     let files = System.Text.Json.Nodes.JsonArray()
     files.Add(System.Text.Json.Nodes.JsonValue.Create entryDll) |> ignore
     node["publishedFiles"] <- files
+    // The launch kind is policy, not roster data: a CLI component declares no arguments.
+    let launchKind = if componentId = "resolver" then "dotnet-cli" else "dotnet-exec"
+    node["launchKind"] <- System.Text.Json.Nodes.JsonValue.Create launchKind
     let launchArguments = System.Text.Json.Nodes.JsonArray()
-    let argument = System.Text.Json.Nodes.JsonObject()
-    argument["flag"] <- System.Text.Json.Nodes.JsonValue.Create "--fixture-input"
-    argument["input"] <- System.Text.Json.Nodes.JsonValue.Create "fixtureInput"
-    argument["type"] <- System.Text.Json.Nodes.JsonValue.Create "absolute-file"
-    launchArguments.Add argument
+
+    if launchKind = "dotnet-exec" then
+        let argument = System.Text.Json.Nodes.JsonObject()
+        argument["flag"] <- System.Text.Json.Nodes.JsonValue.Create "--fixture-input"
+        argument["input"] <- System.Text.Json.Nodes.JsonValue.Create "fixtureInput"
+        argument["type"] <- System.Text.Json.Nodes.JsonValue.Create "absolute-file"
+        launchArguments.Add argument
+
     node["launchArguments"] <- launchArguments
     node.ToJsonString(System.Text.Json.JsonSerializerOptions(WriteIndented = true))
 
@@ -98,7 +105,8 @@ let private writeConfig root configPath componentId version entryDll platform =
 
 let private projectConfigEntries =
     [ "dotnet", "dotnet/release/Config.json", "Mcp.Dotnet.dll"
-      "workflow", "workflow/release/Config.json", "Mcp.Workflow.dll" ]
+      "workflow", "workflow/release/Config.json", "Mcp.Workflow.dll"
+      "resolver", "infrastructure/resolver/release/Config.json", "Resolver.dll" ]
 
 let private writeProjectConfigs root platform participants =
     for componentId, configPath, entryDll in projectConfigEntries do
@@ -155,7 +163,9 @@ let private updateProjectUsesRosterProjectionAndRejectsDrift =
 
                     let! exitCode, _, _, output = runUpdate root [ "-Project"; "-Root"; root ]
                     Expect.equal exitCode 0 "the controlled roster projects without F# evaluation"
-                    Expect.isTrue (output.Contains("components=[\"workflow\",\"dotnet\"]", StringComparison.Ordinal)) "component projection preserves authoritative roster order"
+                    Expect.isTrue
+                        (output.Contains("components=[\"resolver\",\"workflow\",\"dotnet\"]", StringComparison.Ordinal))
+                        "component projection preserves authoritative roster order"
 
                     let duplicate = [ "dotnet", "dotnet/release/Config.json"; "dotnet", "dotnet/release/Config.json" ]
                     writeRoster root duplicate None |> ignore
@@ -192,8 +202,8 @@ let private updateProjectUsesRosterProjectionAndRejectsDrift =
                         "duplicate PS diagnostic"
                     assertRejected "the PS boundary rejects an omitted participant" omittedResult
                     Expect.isTrue
-                        (containsDiagnostic "missing required componentId(s): workflow" (outputOf omittedResult))
-                        $"the missing PS participant is identified: {outputOf omittedResult}"
+                        (containsDiagnostic "missing required componentId(s): workflow, resolver" (outputOf omittedResult))
+                        $"the missing PS participants are identified: {outputOf omittedResult}"
                     assertRejected "the PS boundary rejects an extra participant" extraResult
                     Expect.isTrue
                         ((outputOf extraResult).Contains("unsupported componentId 'telegram'", StringComparison.Ordinal))
@@ -307,7 +317,7 @@ let private contains (fragment: string) (text: string) =
     text.Contains(fragment, StringComparison.Ordinal)
 
 let private checkedInRosterHasTheOnlySupportedParticipants =
-    testCaseAsync "the authoritative roster contains only dotnet and workflow" <| async {
+    testCaseAsync "the authoritative roster contains only dotnet, workflow and resolver" <| async {
         match! ReleaseEnrollment.loadRoster repoRoot with
         | Error error -> failwith (ReleaseError.message error)
         | Ok roster ->
@@ -342,7 +352,7 @@ let private rosterLoaderAndValidationRejectDuplicatesIncompleteMembershipAndPoli
                     | Ok roster ->
                         expectErrorContaining
                             "the composed roster validation rejects an omitted required participant"
-                            "missing required componentId(s): workflow"
+                            "missing required componentId(s): resolver, workflow"
                             (ReleaseEnrollment.validateRoster roster)
 
                     writeRoster root (currentParticipants @ [ "telegram", "telegram/release/Config.json" ]) None |> ignore
@@ -363,6 +373,7 @@ let private rosterLoaderAndValidationRejectDuplicatesIncompleteMembershipAndPoli
                           "entryAllowlist"
                           "publishedFiles"
                           "entryDll"
+                          "launchKind"
                           "launchArguments" ]
 
                     for field in forbiddenFields do
@@ -389,14 +400,15 @@ let private projectionValidationRejectsOmissionsExtrasAndPathDrift =
         let roster =
             { Entries =
                 [ { ComponentId = "dotnet"; ConfigPath = "dotnet/release/Config.json" }
-                  { ComponentId = "workflow"; ConfigPath = "workflow/release/Config.json" } ]
+                  { ComponentId = "workflow"; ConfigPath = "workflow/release/Config.json" }
+                  { ComponentId = "resolver"; ConfigPath = "infrastructure/resolver/release/Config.json" } ]
               SourcePath = "fixture/Participants.json" }
 
         let dotnetOnly = { roster with Entries = [ roster.Entries.Head ] }
 
         expectErrorContaining
             "direct validation rejects an omitted required inventory member"
-            "missing required componentId(s): workflow"
+            "missing required componentId(s): resolver, workflow"
             (ReleaseEnrollment.validateRoster dotnetOnly)
 
         let expanded =
@@ -447,7 +459,7 @@ let private genericIdentityAndMetadataUseProducerOwnedToolchains =
                       Runtime = runtime
                       Platform = platform }
                   Launch =
-                    { Kind = launchKindDotnetExec
+                    { Kind = DotnetExec
                       Entrypoint = entryDll
                       Arguments = [ { Flag = "--fixture-input"; Input = "fixtureInput"; Type = AbsoluteFile } ] }
                   EntryAllowlist = [] }

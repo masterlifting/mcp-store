@@ -241,6 +241,31 @@ let private runProducerScript (root: string) (phase: string) (scriptPath: string
                     return Error(ProcessFailed(phase, exitCode, stderr.Trim()))
     }
 
+// The component root is derived from the already roster-authorized canonical config path, never from the component id or an
+// arbitrary path: the config must be exactly `<componentRoot>/release/Config.json`, and the root must stay inside the repository.
+// The result is relative to the repository root, so the existing producer layout (`dotnet`, `workflow`) is unchanged and a
+// nested producer (`infrastructure/resolver`) resolves its own `release`, `tests` and `dist` directories.
+let componentRootFromConfigPath (root: string) (configPath: string) : Result<string, ReleaseError> =
+    let absoluteRoot = Path.GetFullPath root
+    let absoluteConfig = Path.GetFullPath(Path.Combine(absoluteRoot, configPath))
+    let releaseDirectory = Path.GetDirectoryName absoluteConfig
+
+    let malformed detail =
+        Error(MalformedArtifact(absoluteConfig, $"the policy path cannot name a component root: {detail}"))
+
+    if not (String.Equals(Path.GetFileName absoluteConfig, "Config.json", StringComparison.Ordinal)) then
+        malformed "the policy file must be named Config.json"
+    elif isNull releaseDirectory || not (String.Equals(Path.GetFileName releaseDirectory, "release", StringComparison.Ordinal)) then
+        malformed "the policy file must live in a directory named release"
+    else
+        let componentRoot = Path.GetDirectoryName releaseDirectory
+        let relative = if isNull componentRoot then ".." else Path.GetRelativePath(absoluteRoot, componentRoot)
+
+        if relative = "." || relative = ".." || relative.StartsWith(".." + string Path.DirectorySeparatorChar, StringComparison.Ordinal) || Path.IsPathRooted relative then
+            malformed "the component root must be a directory strictly inside the repository"
+        else
+            Ok relative
+
 // Explicit per-component test gate list (no dynamic discovery): paths are relative to the producer root unless the root runner is selected.
 let private producerScriptTests (componentId: string) : (string * ProducerScriptRunner) list =
     match componentId with
@@ -253,6 +278,7 @@ let private producerScriptTests (componentId: string) : (string * ProducerScript
 let private runProducerTests
     (root: string)
     (componentId: string)
+    (componentRoot: string)
     (configPath: string)
     (projection: ReleasePolicy.PolicyProjection)
     : Async<Result<unit, ReleaseError>> =
@@ -267,7 +293,7 @@ let private runProducerTests
                 let phase = if index = 1 then "tests" else sprintf "tests[%d]" index
                 let scriptPath =
                     match runner with
-                    | DotnetFsi -> Path.Combine(componentId, testsScript)
+                    | DotnetFsi -> Path.Combine(componentRoot, testsScript)
                     | RootRun -> testsScript
                 let! result = runProducerScript root phase scriptPath configPath runner
 
@@ -318,88 +344,92 @@ let private prepareInternal (root: string) (configPath: string) : Async<Result<P
                         | Error error -> return Error error
                         | Ok () ->
                             let componentId = projection.ComponentId
-                            let dist = Path.Combine(root, componentId, "dist")
-                            let distributionDirectory = Path.Combine(dist, componentId)
-                            let archivePath = Path.Combine(dist, projection.ArchiveName)
-                            let manifestPath = Path.Combine(distributionDirectory, DistributionContract.manifestEntryName)
-                            let configAbsolute = Path.GetFullPath(Path.Combine(root, configPath))
 
-                            let! buildResult = runProducerScript root "build" (Path.Combine(componentId, "release", "Build.fsx")) configPath DotnetFsi
-
-                            match buildResult with
+                            match componentRootFromConfigPath root configPath with
                             | Error error -> return Error error
-                            | Ok () ->
-                                let! pinsResult = runProducerScript root "pins" (Path.Combine(componentId, "release", "Pin.fsx")) configPath DotnetFsi
+                            | Ok componentRoot ->
+                                let dist = Path.Combine(root, componentRoot, "dist")
+                                let distributionDirectory = Path.Combine(dist, componentId)
+                                let archivePath = Path.Combine(dist, projection.ArchiveName)
+                                let manifestPath = Path.Combine(distributionDirectory, DistributionContract.manifestEntryName)
+                                let configAbsolute = Path.GetFullPath(Path.Combine(root, configPath))
 
-                                match pinsResult with
+                                let! buildResult = runProducerScript root "build" (Path.Combine(componentRoot, "release", "Build.fsx")) configPath DotnetFsi
+
+                                match buildResult with
                                 | Error error -> return Error error
                                 | Ok () ->
-                                    let! testsResult = runProducerTests root componentId configPath projection
+                                    let! pinsResult = runProducerScript root "pins" (Path.Combine(componentRoot, "release", "Pin.fsx")) configPath DotnetFsi
 
-                                    match testsResult with
+                                    match pinsResult with
                                     | Error error -> return Error error
                                     | Ok () ->
-                                        let! configShaResult = sha256OfFile configAbsolute
-                                        match configShaResult with
+                                        let! testsResult = runProducerTests root componentId componentRoot configPath projection
+
+                                        match testsResult with
                                         | Error error -> return Error error
-                                        | Ok configSha256 ->
-                                            let! archiveShaResult = sha256OfFile archivePath
-                                            match archiveShaResult with
+                                        | Ok () ->
+                                            let! configShaResult = sha256OfFile configAbsolute
+                                            match configShaResult with
                                             | Error error -> return Error error
-                                            | Ok archiveSha256 ->
-                                                let! archiveSizeResult = async { return fileSize archivePath }
-                                                match archiveSizeResult with
+                                            | Ok configSha256 ->
+                                                let! archiveShaResult = sha256OfFile archivePath
+                                                match archiveShaResult with
                                                 | Error error -> return Error error
-                                                | Ok archiveSize ->
-                                                    let! manifestShaResult = sha256OfFile manifestPath
-                                                    match manifestShaResult with
+                                                | Ok archiveSha256 ->
+                                                    let! archiveSizeResult = async { return fileSize archivePath }
+                                                    match archiveSizeResult with
                                                     | Error error -> return Error error
-                                                    | Ok standaloneManifestSha256 ->
-                                                        let! manifestSizeResult = async { return fileSize manifestPath }
-                                                        match manifestSizeResult with
+                                                    | Ok archiveSize ->
+                                                        let! manifestShaResult = sha256OfFile manifestPath
+                                                        match manifestShaResult with
                                                         | Error error -> return Error error
-                                                        | Ok standaloneManifestSize ->
-                                                            let! embeddedShaResult = embeddedManifestSha256 archivePath
-                                                            match embeddedShaResult with
+                                                        | Ok standaloneManifestSha256 ->
+                                                            let! manifestSizeResult = async { return fileSize manifestPath }
+                                                            match manifestSizeResult with
                                                             | Error error -> return Error error
-                                                            | Ok embeddedManifestSha256 ->
-                                                                let! headResult = BuildProvenance.committedHead root
-                                                                match headResult with
+                                                            | Ok standaloneManifestSize ->
+                                                                let! embeddedShaResult = embeddedManifestSha256 archivePath
+                                                                match embeddedShaResult with
                                                                 | Error error -> return Error error
-                                                                | Ok evaluatedHead ->
-                                                                    let manifestBytesEqual = standaloneManifestSha256 = embeddedManifestSha256
+                                                                | Ok embeddedManifestSha256 ->
+                                                                    let! headResult = BuildProvenance.committedHead root
+                                                                    match headResult with
+                                                                    | Error error -> return Error error
+                                                                    | Ok evaluatedHead ->
+                                                                        let manifestBytesEqual = standaloneManifestSha256 = embeddedManifestSha256
 
-                                                                    if not manifestBytesEqual then
-                                                                        return
-                                                                            Error(
-                                                                                MalformedArtifact(
-                                                                                    manifestPath,
-                                                                                    $"the standalone manifest SHA '{standaloneManifestSha256}' differs from the embedded manifest SHA '{embeddedManifestSha256}'; refusing to publish a candidate whose standalone and embedded manifests disagree"))
-                                                                    else
-                                                                        let! standaloneManifestText = BuildProvenance.readAllTextAsync manifestPath
+                                                                        if not manifestBytesEqual then
+                                                                            return
+                                                                                Error(
+                                                                                    MalformedArtifact(
+                                                                                        manifestPath,
+                                                                                        $"the standalone manifest SHA '{standaloneManifestSha256}' differs from the embedded manifest SHA '{embeddedManifestSha256}'; refusing to publish a candidate whose standalone and embedded manifests disagree"))
+                                                                        else
+                                                                            let! standaloneManifestText = BuildProvenance.readAllTextAsync manifestPath
 
-                                                                        match standaloneManifestText with
-                                                                        | Error error -> return Error error
-                                                                        | Ok manifestText ->
-                                                                            match validateStandaloneManifest projection evaluatedHead manifestText with
+                                                                            match standaloneManifestText with
                                                                             | Error error -> return Error error
-                                                                            | Ok () ->
-                                                                                let data : PreparedData =
-                                                                                    { Projection = projection
-                                                                                      ConfigPath = configPath
-                                                                                      ConfigSha256 = configSha256
-                                                                                      EvaluatedHead = evaluatedHead
-                                                                                      ArchivePath = archivePath
-                                                                                      ArchiveSize = archiveSize
-                                                                                      ArchiveSha256 = archiveSha256
-                                                                                      StandaloneManifestPath = manifestPath
-                                                                                      StandaloneManifestSha256 = standaloneManifestSha256
-                                                                                      StandaloneManifestSize = standaloneManifestSize
-                                                                                      EmbeddedManifestSha256 = embeddedManifestSha256
-                                                                                      ManifestBytesEqual = manifestBytesEqual
-                                                                                      EntryAllowlist = entryAllowlistFor projection }
+                                                                            | Ok manifestText ->
+                                                                                match validateStandaloneManifest projection evaluatedHead manifestText with
+                                                                                | Error error -> return Error error
+                                                                                | Ok () ->
+                                                                                    let data : PreparedData =
+                                                                                        { Projection = projection
+                                                                                          ConfigPath = configPath
+                                                                                          ConfigSha256 = configSha256
+                                                                                          EvaluatedHead = evaluatedHead
+                                                                                          ArchivePath = archivePath
+                                                                                          ArchiveSize = archiveSize
+                                                                                          ArchiveSha256 = archiveSha256
+                                                                                          StandaloneManifestPath = manifestPath
+                                                                                          StandaloneManifestSha256 = standaloneManifestSha256
+                                                                                          StandaloneManifestSize = standaloneManifestSize
+                                                                                          EmbeddedManifestSha256 = embeddedManifestSha256
+                                                                                          ManifestBytesEqual = manifestBytesEqual
+                                                                                          EntryAllowlist = entryAllowlistFor projection }
 
-                                                                                return Ok data
+                                                                                    return Ok data
     }
 
 // Prepare a data-only candidate directory containing exactly the archive and manifest.
