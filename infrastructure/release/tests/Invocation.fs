@@ -78,7 +78,7 @@ let updateProjectEmitsCanonicalSdkLiteral () = async {
         | Some value ->
             assertTrue
                 (sprintf "RELEASE_SDK matches canonical SDK literal: %s" value)
-                (value.Contains("11.0.100-rc.1.26425.128", StringComparison.Ordinal))
+                (value = "RELEASE_SDK=11.0.100")
         | None ->
             failed <- failed + 1
             failures.Add(sprintf "RELEASE_SDK line missing from Update.ps1 -Project output: %s" combined)

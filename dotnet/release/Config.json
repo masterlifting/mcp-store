@@ -1,12 +1,12 @@
 {
   "componentId": "dotnet",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "entryDll": "Mcp.Dotnet.dll",
-  "sdkVersion": "11.0.100-rc.1.26425.128",
-  "runtimeVersion": "11.0.0-rc.1.26425.128",
+  "sdkVersion": "11.0.100",
+  "runtimeVersion": "11.0.0",
   "platform": "win-x64",
-  "archiveName": "v1.0.6.zip",
-  "assetUri": "https://github.com/masterlifting/mcp-store/releases/download/dotnet/v1.0.6.zip",
+  "archiveName": "v1.0.7.zip",
+  "assetUri": "https://github.com/masterlifting/mcp-store/releases/download/dotnet/v1.0.7.zip",
   "publishedFiles": [
     "FSharp.Core.dll",
     "Mcp.Dotnet.deps.json",

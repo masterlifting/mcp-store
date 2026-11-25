@@ -25,7 +25,7 @@ let commandDirectory = Path.Combine(repoRoot, "workflow", "commands")
 // The frozen framework-dependent distribution has no apphost. Consumer
 // semantics resolve the pinned dotnet host and invoke
 // `dotnet exec <entry DLL>`.
-let requiredSdk = "11.0.100-rc.1.26425.128"
+let requiredSdk = "11.0.100"
 
 let releaseEntryDll =
     Path.Combine(repoRoot, "workflow", "bin", "Release", "net11.0", "Mcp.Workflow.dll")

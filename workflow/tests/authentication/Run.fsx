@@ -33,7 +33,7 @@ let isInsideDirectory (parent: string) (candidate: string) =
 
 let repoRoot = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "..", ".."))
 let childScript = Path.Combine(__SOURCE_DIRECTORY__, "Cases.fsx")
-let requiredSdk = "11.0.100-rc.1.26425.128"
+let requiredSdk = "11.0.100"
 
 
 let approvedBase =
