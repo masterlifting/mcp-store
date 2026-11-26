@@ -177,7 +177,8 @@ if ($unixText -match 'workflow_dispatch') {
 # One authored version for the .NET toolchain. The SDK selection is owned by `global.json`, the framework, the language
 # version by `Directory.Build.props`, and the runtime is derived from the pinned SDK. This runs at
 # step 2 of the publisher job, BEFORE the SDK is installed, so it only reads files: it must not run `dotnet`, which
-# fails under `rollForward: disable` on a runner without the exact SDK. The native evaluation lives in `Update.ps1 -Verify`.
+# fails under `rollForward: disable` on a runner without the exact SDK. `Update.ps1 -Verify` runs the one native evaluation
+# through `Toolchain.fsx`.
 function Assert-Toolchain {
     param([Parameter(Mandatory = $true)][string]$Name, [Parameter(Mandatory = $true)][scriptblock]$Check)
 
@@ -191,6 +192,16 @@ function Assert-Toolchain {
 
 # A missing owner fails closed; it is never skipped.
 Assert-Toolchain -Name "global.json is the strict SDK owner" -Check { $null = Get-OwnedSdkVersion -Root $Root }
+# The post-SDK query and its decoder live only in the shared F# evaluator; the PowerShell side holds no second copy.
+Assert-Toolchain -Name "the F# evaluator is the only post-SDK toolchain query" -Check {
+    $update = [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot "Update.ps1"))
+    $pre = [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot "Toolchain.ps1"))
+    $entry = [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot "Toolchain.fsx"))
+    if ($update -match 'dotnet\s+msbuild' -or $pre -match 'dotnet\s+msbuild') { throw "no PowerShell script may run its own MSBuild toolchain query" }
+    if ([regex]::Matches($update, 'dotnet fsi --nologo \(Join-Path \$PSScriptRoot "Toolchain\.fsx"\)').Count -ne 1) { throw "Update.ps1 must invoke Toolchain.fsx exactly once" }
+    if ([regex]::Matches($entry, 'Async\.RunSynchronously').Count -ne 1) { throw "Toolchain.fsx must hold exactly one synchronous entry bridge" }
+    if ($entry -notmatch 'ReleaseToolchain\.verifyLocal') { throw "Toolchain.fsx must use the shared ReleaseToolchain evaluator" }
+}
 
 $ignoredDirectories = @(".git", "bin", "obj", "node_modules", ".venv")
 function Get-RepositoryFiles {
@@ -388,7 +399,7 @@ Assert-JobCount -Job "publication" -Name "publish job keeps platform artifact re
 Assert-JobCount -Job "publication" -Name "publication installs the canonical SDK exactly once" -Pattern 'uses: actions/setup-dotnet@' -Expected 1
 Assert-JobCount -Job "publication" -Name "publication never builds" -Pattern 'dotnet build' -Expected 0
 Assert-JobCount -Job "publication" -Name "publication never restores" -Pattern 'dotnet restore' -Expected 0
-Assert-JobCount -Job "publication" -Name "publication never evaluates F#" -Pattern 'dotnet fsi' -Expected 0
+Assert-JobCount -Job "publication" -Name "no publication step evaluates F# beside the credential" -Pattern 'dotnet fsi' -Expected 0
 Assert-JobCount -Job "publication" -Name "publication never runs tests" -Pattern 'dotnet test' -Expected 0
 Assert-JobCount -Job "publication" -Name "publication never runs a project" -Pattern 'dotnet run' -Expected 0
 Assert-JobCount -Job "publication" -Name "publication rechecks the control plane" -Pattern 'git rev-parse HEAD' -Expected 2

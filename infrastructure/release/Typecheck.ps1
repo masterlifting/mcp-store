@@ -26,6 +26,7 @@ function Get-RosterTargets {
         $derived.Add("$componentRoot/tests/distribution/Run.fsx")
     }
 
+    $derived.Add("infrastructure/release/Toolchain.fsx")
     return $derived
 }
 

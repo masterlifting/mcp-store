@@ -70,10 +70,15 @@ One .NET toolchain version is authored: the SDK version in the root `global.json
 policy; it declares neither `sdkVersion` nor `runtimeVersion`, and either is rejected.
 There is no second SDK, TFM or runtime reader: after SDK setup the values come from native
 MSBuild evaluation of `Release.fsproj` at the repository root, with no parsing of
-`dotnet --info` and no runtime computed from the TFM string.
+`dotnet --info` and no runtime computed from the TFM string. The one evaluator is
+`Toolchain.fs`; `Toolchain.fsx` is its thin FSI entry with a single synchronous bridge,
+and preparation and packaging reuse the same module. The owner read takes only
+`sdk.version` (exact stable), `rollForward: disable` and `allowPrerelease: false`,
+rejects a repeated authoritative key and allows unrelated valid fields.
 
-`Update.ps1 -Verify`, run after the SDK is installed, performs that evaluation
-(`NETCoreSdkVersion`, `TargetFramework`, `LangVersion`, `BundledNETCoreAppTargetFramework`
+`Update.ps1 -Verify`, run after the SDK is installed, invokes `Toolchain.fsx`, which
+performs that evaluation and prints exactly four values that PowerShell validates before
+accepting them (`NETCoreSdkVersion`, `TargetFramework`, `LangVersion`, `BundledNETCoreAppTargetFramework`
 and the `KnownFrameworkReference` items). It fails closed unless the selected SDK equals
 the owner, the evaluated TFM and language version are plain `netX.Y` and `X.Y` tokens,
 the SDK-bundled TFM equals the evaluated one, and exactly one matching framework
@@ -83,8 +88,9 @@ prerelease never satisfies a stable value). Only after every check passes it wri
 verified handoff to `GITHUB_ENV`: `MCP_RELEASE_VERIFIED_SDK`,
 `MCP_RELEASE_VERIFIED_RUNTIME`, `MCP_RELEASE_VERIFIED_TARGET_FRAMEWORK` and
 `MCP_RELEASE_VERIFIED_LANGUAGE_VERSION`. `-Project` never writes this handoff.
-`publish` consumes the verified values, fails closed when they are missing or invalid and
-does not run SDK discovery, so no discovery process runs while the publication credential
+`publish` consumes the verified values, fails closed when they are missing or invalid,
+reads the on-disk owner independently and requires it to equal the verified SDK, and runs
+no discovery or evaluation, so no such process runs while the publication credential
 is present. `Check.ps1` asserts that `-Verify` precedes the publish invocation and the
 `GITHUB_TOKEN` step.
 
@@ -98,7 +104,7 @@ On the candidate path the manifest's declared `producer.runtime` must equal the 
 derived from the packaged bytes; observation of already published archives is unchanged.
 
 The pre-SDK toolchain projection is plain PowerShell over `global.json` and each
-producer's canonical `Config.json`, so nothing here evaluates F# before an SDK exists.
+producer's canonical `Config.json`, so `-Project` evaluates no F# before an SDK exists.
 It emits the SDK version, platform and per-component values but **no runtime version**,
 because the runtime is a property of the SDK, which does not exist yet. Once the SDK is
 available, producer F# scripts reuse the compiled `ReleasePolicy` parser;
@@ -110,7 +116,8 @@ parser can be built.
 - `Update.ps1 -Project` / `-Verify` — canonical toolchain projection and executing-toolchain check.
 - `Check.ps1 -Components <projection>` — cross-stage guard over `release.yml`, the pinned action transfers and the enrollment roster.
 - `Verify.ps1 -Root <dir> -InventoryJson <json>` / `-MembersJson <json>` — deterministic membership, path and SHA-256 proof of a downloaded artifact; it reads no network, token or receipt state, so it runs before anything from the verified set executes.
-- `Typecheck.ps1 -SdkVersion <sdk>` — strict FCS typecheck of the retained producer scripts.
+- `Toolchain.fsx` — credential-free FSI entry that prints the four verified toolchain values for `Update.ps1 -Verify`.
+- `Typecheck.ps1 -SdkVersion <sdk>` — strict FCS typecheck of the retained producer scripts and `Toolchain.fsx`.
 
 Preparation runs each component's `tests/distribution/Run.fsx` package gate (reported as phase
 `tests` on failure), and the publisher job builds the producers and the Resolver and runs

@@ -3,8 +3,8 @@
 # `Participants.json` is the only enrollment authority: the projection, the component list, the workflow loops and the
 # CLI paths derive from it, and `*/release/Config.json` stays the only value source for the per-component policy. The
 # shared toolchain comes from its owners: the SDK version from the root `global.json`, and the framework, language and
-# runtime facts from the native MSBuild evaluation, so `-Project` (which runs before any SDK exists) emits none of them
-# and `-Verify` hands over the verified values after the install. Nothing here evaluates F#.
+# runtime facts from the one F# evaluator (`Toolchain.fsx`), so `-Project` (which runs before any SDK exists) emits none of
+# them and evaluates no F#, and `-Verify` hands over the verified values after the install.
 
 [CmdletBinding(DefaultParameterSetName = "Project")]
 param(
@@ -226,34 +226,38 @@ if ($Component -and ($componentIds -notcontains $Component)) {
 
 $componentLabel = if ($Component) { $Component } else { "all roster participants" }
 
-# The native evaluation runs at the repository root so global.json selects the SDK and Directory.Build.props supplies the
-# framework and language version; the runtime is the selected SDK's own DefaultRuntimeFrameworkVersion for that framework.
-$releaseProject = Join-Path $Root "infrastructure/release/Release.fsproj"
+# One credential-free F# evaluation owns the native MSBuild query and its decoding; it compares the selected SDK with the
+# owner and prints exactly the four verified values, which are validated here before any is accepted.
+$verifiedNames = @("MCP_RELEASE_VERIFIED_SDK", "MCP_RELEASE_VERIFIED_RUNTIME", "MCP_RELEASE_VERIFIED_TARGET_FRAMEWORK", "MCP_RELEASE_VERIFIED_LANGUAGE_VERSION")
+$maxVerifiedBytes = 1024
 Push-Location $Root
 try {
-    $evaluationOutput = @(& dotnet msbuild $releaseProject -nologo -getProperty:NETCoreSdkVersion,TargetFramework,LangVersion,BundledNETCoreAppTargetFramework -getItem:KnownFrameworkReference)
-    if ($LASTEXITCODE -ne 0) { throw "the MSBuild evaluation of '$releaseProject' failed ($LASTEXITCODE); the pinned SDK cannot be selected" }
+    $evaluationOutput = @(& dotnet fsi --nologo (Join-Path $PSScriptRoot "Toolchain.fsx"))
+    if ($LASTEXITCODE -ne 0) { throw "the toolchain evaluation failed ($LASTEXITCODE): $($evaluationOutput -join ' ')" }
 } finally {
     Pop-Location
 }
-try {
-    $evaluation = ($evaluationOutput -join "`n") | ConvertFrom-Json -ErrorAction Stop
-} catch {
-    throw "the MSBuild evaluation of '$releaseProject' is not valid JSON: $($_.Exception.Message)"
+if (([string]::Join("`n", $evaluationOutput)).Length -gt $maxVerifiedBytes) { throw "the toolchain evaluation output exceeds the bounded maximum of $maxVerifiedBytes characters" }
+
+$transported = @{}
+foreach ($line in $evaluationOutput) {
+    $entry = [regex]::Match("$line", '\A(?<name>MCP_RELEASE_VERIFIED_[A-Z_]+)=(?<value>[0-9]+(\.[0-9]+)*(-[0-9A-Za-z]+(\.[0-9A-Za-z]+)*)?|net[0-9]+\.[0-9]+)\z')
+    if (-not $entry.Success -or $verifiedNames -cnotcontains $entry.Groups['name'].Value -or $transported.ContainsKey($entry.Groups['name'].Value)) {
+        throw "the toolchain evaluation printed an unexpected line"
+    }
+    $transported[$entry.Groups['name'].Value] = $entry.Groups['value'].Value
+}
+foreach ($name in $verifiedNames) {
+    if (-not $transported.ContainsKey($name)) { throw "the toolchain evaluation did not print $name" }
 }
 
-$selected = "$($evaluation.Properties.NETCoreSdkVersion)"
+$selected = $transported["MCP_RELEASE_VERIFIED_SDK"]
 if ($selected -cne $sdk) { throw "the selected SDK is '$selected' where the owner declares '$sdk'" }
-$targetFramework = "$($evaluation.Properties.TargetFramework)"
-if ($targetFramework -cnotmatch '\Anet[0-9]+\.[0-9]+\z') { throw "the evaluated TargetFramework '$targetFramework' is not a plain netX.Y moniker" }
-$languageVersion = "$($evaluation.Properties.LangVersion)"
-if ($languageVersion -cnotmatch '\A[0-9]+\.[0-9]+\z') { throw "the evaluated LangVersion '$languageVersion' is not a plain X.Y version" }
-$bundledFramework = "$($evaluation.Properties.BundledNETCoreAppTargetFramework)"
-if ($bundledFramework -cne $targetFramework) { throw "the SDK-bundled framework '$bundledFramework' differs from the evaluated TargetFramework '$targetFramework'" }
-
-$frameworkReferences = @($evaluation.Items.KnownFrameworkReference | Where-Object { $_.Identity -ceq "Microsoft.NETCore.App" -and $_.TargetFramework -ceq $targetFramework })
-if ($frameworkReferences.Count -ne 1) { throw "expected exactly one KnownFrameworkReference for Microsoft.NETCore.App and '$targetFramework'; found $($frameworkReferences.Count)" }
-$runtime = "$($frameworkReferences[0].DefaultRuntimeFrameworkVersion)"
+$runtime = $transported["MCP_RELEASE_VERIFIED_RUNTIME"]
+$targetFramework = $transported["MCP_RELEASE_VERIFIED_TARGET_FRAMEWORK"]
+$languageVersion = $transported["MCP_RELEASE_VERIFIED_LANGUAGE_VERSION"]
+if ($targetFramework -cnotmatch '\Anet[0-9]+\.[0-9]+\z') { throw "the verified TargetFramework '$targetFramework' is not a plain netX.Y moniker" }
+if ($languageVersion -cnotmatch '\A[0-9]+\.[0-9]+\z') { throw "the verified LangVersion '$languageVersion' is not a plain X.Y version" }
 
 # The payload is framework-dependent, so the host needs a COMPATIBLE runtime, not the exact derived patch: the same
 # major.minor with a patch at least the derived value. A prerelease never satisfies a stable derived value, because a host

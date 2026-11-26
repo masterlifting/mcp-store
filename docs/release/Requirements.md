@@ -49,13 +49,20 @@ Related current contracts:
   the release project derives it from the single
   `KnownFrameworkReference` for `Microsoft.NETCore.App` at the evaluated target
   framework. The runtime is not computed from the target-framework string.
-  The PowerShell verification step and F# preparation paths both use native
-  MSBuild evaluation.
+  One credential-free F# evaluator (`infrastructure/release/Toolchain.fs`)
+  owns that query and its decoding; the PowerShell verification step and the
+  F# preparation and packaging paths all use it, and PowerShell carries no
+  second copy.
 - Each component's `*/release/Config.json` owns only its per-component policy
   (`componentId`, version, entry DLL, platform RID, archive name, asset URI,
   published files, launch kind, and ordered launch arguments). A config that
   declares `sdkVersion` or `runtimeVersion` is rejected.
-- `Update.ps1 -Verify` runs after SDK installation. It fails closed unless the
+- `Update.ps1 -Verify` runs after SDK installation and invokes
+  `Toolchain.fsx`, the thin entry to the evaluator, before any credential step.
+  The evaluator reads only the `sdk.version`, `sdk.rollForward` and
+  `sdk.allowPrerelease` fields of `global.json` (exact stable version,
+  `disable`, `false`), rejects a repeated authoritative key and allows unrelated
+  valid fields. Verification fails closed unless the
   selected SDK equals the owner, the evaluated target framework and language
   version are plain tokens, the SDK-bundled framework matches, exactly one
   matching framework reference exists, the installed runtime is compatible
@@ -67,7 +74,9 @@ Related current contracts:
   `MCP_RELEASE_VERIFIED_TARGET_FRAMEWORK`, and
   `MCP_RELEASE_VERIFIED_LANGUAGE_VERSION`. `-Project` never writes them.
 - Publication consumes the verified values, fails closed when they are missing
-  or invalid, and performs no SDK discovery while the credential is present.
+  or invalid, independently reads the on-disk owner and requires it to equal the
+  verified SDK, and performs no SDK discovery or evaluation while the credential
+  is present.
   The isolated publisher stage imports no repository build files and receives
   only the verified target framework and language version.
 - Workflow YAML must not duplicate producer versions, the SDK version, or the

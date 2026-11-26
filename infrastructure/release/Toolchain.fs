@@ -53,6 +53,7 @@ let maxEvaluationBytes = 4 * 1024 * 1024
 let private versionToken =
     Regex(@"\A[0-9]+(\.[0-9]+)*(-[0-9A-Za-z]+(\.[0-9A-Za-z]+)*)?\z", RegexOptions.CultureInvariant)
 
+let private stableVersion = Regex(@"\A[0-9]+\.[0-9]+\.[0-9]+\z", RegexOptions.CultureInvariant)
 let private frameworkToken = Regex(@"\Anet[0-9]+\.[0-9]+\z", RegexOptions.CultureInvariant)
 let private languageToken = Regex(@"\A[0-9]+\.[0-9]+\z", RegexOptions.CultureInvariant)
 
@@ -100,9 +101,47 @@ let private checkBounded (path: string) (limit: int) (bytes: byte[]) : Result<un
         | Some offset -> malformed path $"the file contains an embedded NUL byte at offset {offset}"
         | None -> Ok()
 
-// `global.json` is read strictly: one `sdk` object with exactly `version`, `rollForward` and `allowPrerelease`, no
-// repeated key at any level, no unknown property, and the strict values. `JsonDocument` keeps repeated members, so the
-// duplicate rule is enforced here by enumeration.
+// Only the fields that select the exact stable SDK are authoritative: one `sdk` object holding one `version`, `rollForward`
+// and `allowPrerelease`. A repeated authoritative key is ambiguous and rejected; unrelated valid fields are allowed.
+// `JsonDocument` keeps repeated members, so the count is taken by enumeration.
+let private singleMember (element: JsonElement) (name: string) : Result<JsonElement, string> =
+    let found =
+        element.EnumerateObject()
+        |> Seq.filter (fun property -> String.Equals(property.Name, name, StringComparison.Ordinal))
+        |> Seq.map (fun property -> property.Value)
+        |> Seq.toList
+
+    match found with
+    | [ value ] -> Ok value
+    | [] -> Error $"the '{name}' member is missing"
+    | _ -> Error $"the authoritative key '{name}' is repeated"
+
+let private selectSdk (root: JsonElement) : Result<string, string> =
+    if root.ValueKind <> JsonValueKind.Object then
+        Error "the root must be an object"
+    else
+        singleMember root "sdk"
+        |> Result.bind (fun sdk ->
+            if sdk.ValueKind <> JsonValueKind.Object then
+                Error "the 'sdk' member must be an object"
+            else
+                singleMember sdk "version"
+                |> Result.bind (fun version ->
+                    singleMember sdk "rollForward"
+                    |> Result.bind (fun rollForward ->
+                        singleMember sdk "allowPrerelease"
+                        |> Result.bind (fun allowPrerelease ->
+                            if version.ValueKind <> JsonValueKind.String then
+                                Error "the 'sdk.version' value must be a string"
+                            elif not (stableVersion.IsMatch(version.GetString())) then
+                                Error $"the 'sdk.version' value '{version.GetString()}' is not a stable three-part version"
+                            elif rollForward.ValueKind <> JsonValueKind.String || rollForward.GetString() <> "disable" then
+                                Error "the 'sdk.rollForward' value must be exactly \"disable\""
+                            elif allowPrerelease.ValueKind <> JsonValueKind.False then
+                                Error "the 'sdk.allowPrerelease' value must be exactly false"
+                            else
+                                Ok(version.GetString())))))
+
 let parseGlobalJson (path: string) (bytes: byte[]) : Result<string, ReleaseError> =
     match checkBounded path maxOwnerBytes bytes with
     | Error error -> Error error
@@ -111,63 +150,12 @@ let parseGlobalJson (path: string) (bytes: byte[]) : Result<string, ReleaseError
             use document =
                 JsonDocument.Parse(
                     ReadOnlyMemory<byte>(bytes),
-                    JsonDocumentOptions(AllowTrailingCommas = false, CommentHandling = JsonCommentHandling.Disallow, MaxDepth = 4)
+                    JsonDocumentOptions(AllowTrailingCommas = false, CommentHandling = JsonCommentHandling.Disallow, MaxDepth = 16)
                 )
 
-            let root = document.RootElement
-
-            let members (element: JsonElement) =
-                let seen = Dictionary<string, JsonElement>(StringComparer.Ordinal)
-                let mutable failure: string option = None
-
-                for property in element.EnumerateObject() do
-                    if seen.ContainsKey property.Name then
-                        failure <- Some $"the key '{property.Name}' is repeated"
-                    else
-                        seen.Add(property.Name, property.Value)
-
-                match failure with
-                | Some detail -> Error detail
-                | None -> Ok seen
-
-            if root.ValueKind <> JsonValueKind.Object then
-                malformed path "the root must be an object"
-            else
-                match members root with
-                | Error detail -> malformed path detail
-                | Ok rootMembers ->
-                    match rootMembers.Keys |> Seq.tryFind (fun name -> name <> "sdk") with
-                    | Some name -> malformed path $"the unknown property '{name}' is not allowed"
-                    | None ->
-                        match rootMembers.TryGetValue "sdk" with
-                        | false, _ -> malformed path "the 'sdk' object is missing"
-                        | true, sdk when sdk.ValueKind <> JsonValueKind.Object -> malformed path "the 'sdk' member must be an object"
-                        | true, sdk ->
-                            match members sdk with
-                            | Error detail -> malformed path detail
-                            | Ok sdkMembers ->
-                                let expected = [ "version"; "rollForward"; "allowPrerelease" ]
-
-                                match sdkMembers.Keys |> Seq.tryFind (fun name -> not (List.contains name expected)) with
-                                | Some name -> malformed path $"the unknown 'sdk' property '{name}' is not allowed"
-                                | None ->
-                                    match expected |> List.tryFind (fun name -> not (sdkMembers.ContainsKey name)) with
-                                    | Some name -> malformed path $"the 'sdk' property '{name}' is missing"
-                                    | None ->
-                                        let version = sdkMembers["version"]
-                                        let rollForward = sdkMembers["rollForward"]
-                                        let allowPrerelease = sdkMembers["allowPrerelease"]
-
-                                        if version.ValueKind <> JsonValueKind.String then
-                                            malformed path "the 'sdk.version' value must be a string"
-                                        elif not (isVersionToken (version.GetString())) then
-                                            malformed path $"the 'sdk.version' value '{version.GetString()}' is not a plain version token"
-                                        elif rollForward.ValueKind <> JsonValueKind.String || rollForward.GetString() <> "disable" then
-                                            malformed path "the 'sdk.rollForward' value must be exactly \"disable\""
-                                        elif allowPrerelease.ValueKind <> JsonValueKind.False then
-                                            malformed path "the 'sdk.allowPrerelease' value must be exactly false"
-                                        else
-                                            Ok(version.GetString())
+            match selectSdk document.RootElement with
+            | Ok version -> Ok version
+            | Error detail -> malformed path detail
         with :? JsonException as error ->
             malformed path $"the file is not valid strict JSON: {error.Message}"
 
@@ -295,29 +283,50 @@ let evaluate (repositoryRoot: string) : Async<Result<Evaluation, ReleaseError>> 
             | Ok output -> return parseEvaluation (Path.Combine(repositoryRoot, evaluatedProjectPath)) output
     }
 
+// The evaluated facts once the native SDK is confirmed to be the exact version the owner selects.
+type Verified =
+    { Toolchain: Toolchain
+      TargetFramework: string
+      LangVersion: string }
+
+// Credential-free verification: one native evaluation compared with the on-disk owner.
+let verifyLocal (repositoryRoot: string) : Async<Result<Verified, ReleaseError>> =
+    async {
+        match readSdkVersion repositoryRoot with
+        | Error error -> return Error error
+        | Ok owner ->
+            match! evaluate repositoryRoot with
+            | Error error -> return Error error
+            | Ok evaluation ->
+                return
+                    toolchainFromEvaluation owner evaluation
+                    |> Result.map (fun toolchain ->
+                        { Toolchain = toolchain
+                          TargetFramework = evaluation.TargetFramework
+                          LangVersion = evaluation.LangVersion })
+    }
+
 // Local resolution for every entry point except publication. A verified handoff, when either value is present, must be
 // complete and agree with the evaluation.
 let resolveLocal (repositoryRoot: string) : Async<Result<Toolchain, ReleaseError>> =
     async {
-        match readVerified verifiedSdkVariable, readVerified verifiedRuntimeVariable, readSdkVersion repositoryRoot with
-        | Error error, _, _
-        | _, Error error, _
-        | _, _, Error error -> return Error error
-        | Ok handoffSdk, Ok handoffRuntime, Ok owner ->
+        match readVerified verifiedSdkVariable, readVerified verifiedRuntimeVariable with
+        | Error error, _
+        | _, Error error -> return Error error
+        | Ok handoffSdk, Ok handoffRuntime ->
             match handoffSdk, handoffRuntime with
             | Some _, None -> return Error(UsageRejected $"{verifiedRuntimeVariable} is not set while {verifiedSdkVariable} is")
             | None, Some _ -> return Error(UsageRejected $"{verifiedSdkVariable} is not set while {verifiedRuntimeVariable} is")
             | _ ->
-                match! evaluate repositoryRoot with
+                match! verifyLocal repositoryRoot with
                 | Error error -> return Error error
-                | Ok evaluation ->
-                    match toolchainFromEvaluation owner evaluation with
-                    | Error error -> return Error error
-                    | Ok toolchain ->
-                        match handoffSdk, handoffRuntime with
-                        | Some sdk, _ when not (String.Equals(sdk, toolchain.SdkVersion, StringComparison.Ordinal)) ->
-                            return Error(IdentityMismatch(verifiedSdkVariable, toolchain.SdkVersion, sdk))
-                        | _, Some runtime when not (String.Equals(runtime, toolchain.RuntimeVersion, StringComparison.Ordinal)) ->
-                            return Error(IdentityMismatch(verifiedRuntimeVariable, toolchain.RuntimeVersion, runtime))
-                        | _ -> return Ok toolchain
+                | Ok verified ->
+                    let toolchain = verified.Toolchain
+
+                    match handoffSdk, handoffRuntime with
+                    | Some sdk, _ when not (String.Equals(sdk, toolchain.SdkVersion, StringComparison.Ordinal)) ->
+                        return Error(IdentityMismatch(verifiedSdkVariable, toolchain.SdkVersion, sdk))
+                    | _, Some runtime when not (String.Equals(runtime, toolchain.RuntimeVersion, StringComparison.Ordinal)) ->
+                        return Error(IdentityMismatch(verifiedRuntimeVariable, toolchain.RuntimeVersion, runtime))
+                    | _ -> return Ok toolchain
     }

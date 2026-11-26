@@ -1,6 +1,6 @@
 # role: reusable module/helper
 # The pre-SDK owner read: only the exact stable SDK version in the root `global.json` is needed before any SDK exists.
-# The framework, language and runtime facts come from the native MSBuild evaluation that `Update.ps1 -Verify` runs after the install.
+# The framework, language and runtime facts come from the F# evaluator that `Update.ps1 -Verify` runs after the install.
 
 $script:ToolchainMaxOwnerBytes = 16 * 1024
 $script:ToolchainStableVersion = '\A[0-9]+\.[0-9]+\.[0-9]+\z'
