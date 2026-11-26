@@ -43,7 +43,7 @@ async {
     let config =
         match loaded with
         | Ok value -> value
-        | Error error -> failwith (ReleaseError.message error)
+        | Error error -> failwith (DistributionBuild.describeError error)
 
     let componentId = config.ComponentId
     let archiveName = config.ArchiveName

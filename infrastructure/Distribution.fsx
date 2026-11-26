@@ -59,6 +59,9 @@ let loadConfig (path: string) : Async<Result<PolicyProjection, ReleaseError>> =
         return policy
     }
 
+// Entrypoints that also load Testing.fsx see a second ReleaseError definition, so only this string crosses that boundary.
+let describeError (error: ReleaseError) : string = ReleaseError.message error
+
 let private listFiles (root: string) (searchOption: SearchOption) =
     Directory.EnumerateFiles(root, "*", searchOption)
     |> Seq.map (fun path -> Path.GetRelativePath(root, path).Replace('\\', '/'))
