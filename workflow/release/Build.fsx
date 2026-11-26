@@ -12,8 +12,6 @@ let root = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", ".."))
 let run () : Async<Result<DistributionBuild.DistributionResult, ReleaseError>> =
     releaseResult {
         let! config = DistributionBuild.loadConfig (Path.Combine(__SOURCE_DIRECTORY__, "Config.json"))
-        // The publication repository is derived from the fixed release asset URI so the manifest claim and the pin cannot drift.
-        let! sourceRepository = DistributionContract.sourceRepositoryFromAssetUri config.AssetUri
 
         return!
             DistributionBuild.build
@@ -25,7 +23,7 @@ let run () : Async<Result<DistributionBuild.DistributionResult, ReleaseError>> =
                   SdkVersion = config.SdkVersion
                   RuntimeVersion = config.RuntimeVersion
                   Platform = config.Platform
-                  SourceRepository = sourceRepository
+                  SourceRepository = DistributionContract.storeRepository
                   EntryDll = config.EntryDll
                   ArchiveName = config.ArchiveName
                   PublishedFiles = config.PublishedFiles

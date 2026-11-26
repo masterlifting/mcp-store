@@ -1,9 +1,10 @@
 // role: reusable module/helper
 // Strict reader for a producer's canonical Config.json policy plus the trusted
 // distribution contract derived from it. Pure: no processes or filesystem writes.
-// The per-component policy owns identity, entry point, platform, archive and launch descriptors. The SDK and runtime
-// versions are not policy: the caller passes the toolchain resolved from its owners (`ReleaseToolchain`), and a Config.json
-// that still declares either version is rejected as an unknown field.
+// The per-component policy owns identity, entry point, platform and launch descriptors; the archive name and asset URI derive
+// from the identity and the trusted Store repository, so a Config.json that declares either is rejected as an unknown field.
+// The SDK and runtime versions are not policy: the caller passes the toolchain resolved from its owners (`ReleaseToolchain`),
+// and a Config.json that declares either version is rejected the same way.
 module ReleasePolicy
 
 open System
@@ -35,8 +36,6 @@ let private requiredFields =
       "version"
       "entryDll"
       "platform"
-      "archiveName"
-      "assetUri"
       "publishedFiles"
       "launchKind"
       "launchArguments" ]
@@ -188,7 +187,7 @@ let parseBytes (toolchain: ReleaseToolchain.Toolchain) (sourcePath: string) (bou
                             []
 
                     let scalarFields =
-                        [ "componentId"; "version"; "entryDll"; "platform"; "archiveName"; "assetUri"; "launchKind" ]
+                        [ "componentId"; "version"; "entryDll"; "platform"; "launchKind" ]
 
                     let scalars = scalarFields |> List.map (fun field -> field, readString field)
 
@@ -224,10 +223,13 @@ let parseBytes (toolchain: ReleaseToolchain.Toolchain) (sourcePath: string) (bou
                             | Some kind -> readLaunchArguments kind
                             | None -> []
 
-                        match failure, launchKind with
-                        | Some detail, _ -> malformed sourcePath detail
-                        | None, None -> malformed sourcePath "field 'launchKind' is missing"
-                        | None, Some kind ->
+                        let identity = DistributionContract.validateIdentity (valueOf "componentId") (valueOf "version")
+
+                        match failure, launchKind, identity with
+                        | Some detail, _, _ -> malformed sourcePath detail
+                        | None, None, _ -> malformed sourcePath "field 'launchKind' is missing"
+                        | None, Some _, Error error -> Error error
+                        | None, Some kind, Ok () ->
                             Ok
                                 { ComponentId = valueOf "componentId"
                                   Version = valueOf "version"
@@ -235,8 +237,8 @@ let parseBytes (toolchain: ReleaseToolchain.Toolchain) (sourcePath: string) (bou
                                   SdkVersion = toolchain.SdkVersion
                                   RuntimeVersion = toolchain.RuntimeVersion
                                   Platform = valueOf "platform"
-                                  ArchiveName = valueOf "archiveName"
-                                  AssetUri = valueOf "assetUri"
+                                  ArchiveName = DistributionContract.archiveNameFor (valueOf "version")
+                                  AssetUri = DistributionContract.assetUriFor (valueOf "componentId") (valueOf "version")
                                   PublishedFiles = publishedFiles
                                   LaunchKind = kind
                                   LaunchArguments = launchArguments

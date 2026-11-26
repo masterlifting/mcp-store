@@ -255,20 +255,43 @@ let resolveUnderRoot (root: string) (relativePath: string) : Result<string, Rele
         | :? NotSupportedException as error -> Error(MalformedArtifact(relativePath, error.Message))
         | :? PathTooLongException as error -> Error(MalformedArtifact(relativePath, error.Message))
 
-// Canonical asset URIs encode the single repository a release is published from; a
-// source-repository claim is only meaningful when it names that repository.
-let sourceRepositoryFromAssetUri (assetUri: string) : Result<string, ReleaseError> =
-    let separator = "/releases/download/"
+// The single trusted Store repository authority: every release archive is published here, so the
+// source repository and the asset location derive from it rather than from authored values.
+let storeOwner = "masterlifting"
+let storeName = "mcp-store"
+let storeRepository = $"https://github.com/{storeOwner}/{storeName}"
 
-    if String.IsNullOrWhiteSpace assetUri then
-        Error(MalformedArtifact("assetUri", "field 'assetUri' must be a non-empty string"))
+let private maxComponentIdLength = 32
+let private maxVersionLength = 32
+
+let isComponentId (value: string) : bool =
+    not (String.IsNullOrEmpty value)
+    && value.Length <= maxComponentIdLength
+    && Char.IsAsciiLetterLower value[0]
+    && value |> Seq.forall (fun character -> Char.IsAsciiLetterLower character || Char.IsAsciiDigit character || character = '-')
+    && value[value.Length - 1] <> '-'
+
+let isVersion (value: string) : bool =
+    not (String.IsNullOrEmpty value)
+    && value.Length <= maxVersionLength
+    && Char.IsAsciiDigit value[0]
+    && Char.IsAsciiLetterOrDigit value[value.Length - 1]
+    && not (value.Contains "..")
+    && value |> Seq.forall (fun character -> Char.IsAsciiLetterOrDigit character || character = '.' || character = '-')
+
+// Derived names are total; a caller validates the identity first so no unvalidated value reaches a path or URI.
+let validateIdentity (componentId: string) (version: string) : Result<unit, ReleaseError> =
+    if not (isComponentId componentId) then
+        Error(MalformedArtifact("componentId", "the component id is not a bounded lowercase portable identifier"))
+    elif not (isVersion version) then
+        Error(MalformedArtifact("version", "the version is not a bounded portable version"))
     else
-        let index = assetUri.IndexOf(separator, StringComparison.Ordinal)
+        Ok()
 
-        if index <= 0 then
-            Error(MalformedArtifact("assetUri", $"assetUri '{assetUri}' is not a '<repository>/releases/download/<tag>/<asset>' URL"))
-        else
-            Ok(assetUri.Substring(0, index))
+let archiveNameFor (version: string) : string = $"v{version}.zip"
+
+let assetUriFor (componentId: string) (version: string) : string =
+    $"{storeRepository}/releases/download/{componentId}/{archiveNameFor version}"
 
 // Semantic validation of a parsed or directly constructed manifest: the same rules
 // a consumer relies on, independent of the JSON document that produced it.

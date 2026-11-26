@@ -30,7 +30,6 @@ type Producer =
       Platform: string
       EntryDll: string
       ArchiveName: string
-      AssetUri: string
       PublishedFiles: string list
       LaunchKind: string }
 
@@ -269,17 +268,15 @@ let assertDistributionContract (producer: Producer) (layout: Layout) : Async<uni
         let! pinsText = File.ReadAllTextAsync layout.PinsPath |> Async.AwaitTask
         let pin = JsonNode.Parse(pinsText).AsObject()
 
-        // The producer emitter writes the three optional provenance fields, so the generated pin carries all eleven keys.
+        // The archive name and asset location derive from the identity, so the pin carries only the six identity and digest fields.
         assertExactKeys
             "pin declares exactly the canonical release-metadata fields"
-            [ "schemaVersion"; "componentId"; "version"; "assetUri"; "archiveName"; "archiveSha256"; "manifestSha256"; "publishedRevision"; "producerSdk"; "producerRuntime"; "producerPlatform" ]
+            [ "schemaVersion"; "componentId"; "version"; "archiveSha256"; "manifestSha256"; "publishedRevision" ]
             (keysOf pin)
 
-        assertEqual "pin schemaVersion" 1 (pin["schemaVersion"].GetValue<int>())
+        assertEqual "pin schemaVersion" 2 (pin["schemaVersion"].GetValue<int>())
         assertString "pin componentId" producer.ComponentId pin["componentId"]
         assertString "pin version" producer.Version pin["version"]
-        assertString "pin assetUri" producer.AssetUri pin["assetUri"]
-        assertString "pin archiveName" producer.ArchiveName pin["archiveName"]
 
         let! archiveSha256 = sha256Async layout.ArchivePath
         let! manifestSha256 = sha256Async layout.ManifestPath
@@ -287,7 +284,4 @@ let assertDistributionContract (producer: Producer) (layout: Layout) : Async<uni
         assertEqual "pin manifestSha256" manifestSha256 (pin["manifestSha256"].GetValue<string>())
         assertEqual "pin publishedRevision equals the validated manifest revision" manifestRevision (pin["publishedRevision"].GetValue<string>())
         assertEqual "pin publishedRevision equals the committed HEAD" headRevision (pin["publishedRevision"].GetValue<string>())
-        assertString "pin producerSdk" producer.SdkVersion pin["producerSdk"]
-        assertString "pin producerRuntime" producer.RuntimeVersion pin["producerRuntime"]
-        assertString "pin producerPlatform" producer.Platform pin["producerPlatform"]
     }

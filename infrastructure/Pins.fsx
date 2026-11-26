@@ -46,11 +46,10 @@ let writeConsumerPins
         let! head = BuildProvenance.committedHead root
         let! manifestText = BuildProvenance.readAllTextAsync manifestPath
         let! manifest = DistributionContract.parse manifestText
-        let! sourceRepository = DistributionContract.sourceRepositoryFromAssetUri policy.AssetUri
         do! assertIdentity "id" policy.ComponentId manifest.Id
         do! assertIdentity "version" policy.Version manifest.Version
         do! assertIdentity "archive" policy.ArchiveName manifest.Archive
-        do! assertIdentity "sourceRepository" sourceRepository manifest.SourceRepository
+        do! assertIdentity "sourceRepository" DistributionContract.storeRepository manifest.SourceRepository
 
         do!
             (if manifest.Revision = head then
@@ -65,14 +64,9 @@ let writeConsumerPins
             { SchemaVersion = DistributionPin.schemaVersion
               ComponentId = policy.ComponentId
               Version = policy.Version
-              AssetUri = policy.AssetUri
-              ArchiveName = policy.ArchiveName
               ArchiveSha256 = archiveSha256
               ManifestSha256 = manifestSha256
-              PublishedRevision = manifest.Revision
-              ProducerSdk = Some policy.SdkVersion
-              ProducerRuntime = Some policy.RuntimeVersion
-              ProducerPlatform = Some policy.Platform }
+              PublishedRevision = manifest.Revision }
 
         do! BuildProvenance.writeJsonAsync outputPath (DistributionPin.toJsonNode pin)
         return policy.ArchiveName, archiveSha256, manifestSha256, manifest.Revision

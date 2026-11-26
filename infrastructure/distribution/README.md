@@ -82,8 +82,13 @@ Invariants enforced by `parse`/`validate`:
   installation-root selection, caching, and host discovery are not part of this
   contract.
 
-`sourceRepositoryFromAssetUri` derives the single publication repository from the
-fixed release asset URI so a source-repository claim and the pin cannot drift.
+`storeRepository` is the single trusted publication repository authority.
+`validateIdentity` accepts only a bounded lowercase portable component id and a
+bounded portable version; `archiveNameFor` (`v<version>.zip`) and `assetUriFor`
+(`<storeRepository>/releases/download/<componentId>/v<version>.zip`) derive the
+archive name and canonical HTTPS asset URI from that validated identity, so no
+authored archive name or asset URI exists and a source-repository claim and the
+pin cannot drift.
 
 `render`/`toJsonNode` produce the canonical bytes: fixed key order, sorted member
 files, and the shared indented formatting, so the standalone and embedded copies
@@ -93,31 +98,29 @@ of the manifest are byte-identical by construction.
 
 The canonical consumer pin, which is also the published
 `<component>-<version>-metadata.json` projection: one strict parser, one canonical
-renderer, and one whole-record comparison. Schema **v1** (this is the retained
-existing release-metadata schema, not the distribution schema).
+renderer, and one whole-record comparison. Schema **v2** (this is the
+release-metadata schema, not the distribution schema).
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "componentId": "dotnet",
-  "version": "1.0.5",
-  "assetUri": "…",
-  "archiveName": "v1.0.5.zip",
+  "version": "1.0.8",
   "archiveSha256": "<64 lowercase hex>",
   "manifestSha256": "<64 lowercase hex>",
-  "publishedRevision": "<40 lowercase hex>",
-  "producerSdk": "…",
-  "producerRuntime": "…",
-  "producerPlatform": "…"
+  "publishedRevision": "<40 lowercase hex>"
 }
 ```
 
 - `consumer-pins.json` is exactly one unwrapped record, not an object keyed by
   component ID. No keyed schema, compatibility alias, or dual reader exists.
-- `producerSdk`, `producerRuntime`, and `producerPlatform` are optional
-  informational fields: omission is permitted, a present explicit null or a
-  non-string is malformed, and an empty string is malformed.
-- Hashes and revisions use the same exact lowercase length checks as the manifest.
+- The six fields are required and exclusive: any other field, including the
+  former `assetUri`, `archiveName`, and `producer*` fields, is malformed, and any
+  other schema version is rejected. A schema 1 document fails closed.
+- The archive name and asset URI are derived members of the pin (see `Contract.fs`),
+  never serialized. Producer build provenance lives in the authenticated manifest.
+- `componentId` and `version` pass `validateIdentity`. Hashes and revisions use
+  the same exact lowercase length checks as the manifest.
 - `compare` participates every field in identity, so an existing remote asset or
   an existing pin cannot be silently reused for a different artifact. A
   revision-only no-op retains the **published** revision and hashes, never

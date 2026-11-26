@@ -12,28 +12,18 @@ let persistVerifiedProjection
     (metadataLocalPath: string)
     (componentId: string)
     (version: string)
-    (assetUri: string)
-    (archiveName: string)
     (verifiedArchiveSha: string)
     (verifiedManifestSha: string)
     (verifiedRevision: string)
-    (producerSdk: string option)
-    (producerRuntime: string option)
-    (producerPlatform: string option)
     : Async<Result<unit, ReleaseError>> =
     async {
         let projection =
             ReleaseMetadata.makeProjection
                 componentId
                 version
-                assetUri
-                archiveName
                 verifiedArchiveSha
                 verifiedManifestSha
                 verifiedRevision
-                producerSdk
-                producerRuntime
-                producerPlatform
 
         match! ReleaseMetadata.writeToFileAsync metadataLocalPath projection with
         | Ok _ -> return Ok()
@@ -181,14 +171,9 @@ let private execute
                                 resolution.Render.MetadataLocalPath
                                 resolution.Render.ComponentId
                                 resolution.Render.Version
-                                resolution.Render.AssetUri
-                                resolution.Render.ArchiveName
                                 verifiedArchiveSha
                                 verifiedManifestSha
                                 verifiedRevision
-                                resolution.Render.ProducerSdk
-                                resolution.Render.ProducerRuntime
-                                resolution.Render.ProducerPlatform
 
                         match persistResult with
                         | Error error ->
@@ -209,14 +194,9 @@ let private execute
                             ReleaseMetadata.makeProjection
                                 resolution.Render.ComponentId
                                 resolution.Render.Version
-                                resolution.Render.AssetUri
-                                resolution.Render.ArchiveName
                                 verifiedArchiveSha
                                 verifiedManifestSha
                                 verifiedRevision
-                                resolution.Render.ProducerSdk
-                                resolution.Render.ProducerRuntime
-                                resolution.Render.ProducerPlatform
 
                         let! uploadResult =
                             ReleasePublish.uploadMetadataBytes authValue locator recoveryProjection transport
@@ -258,14 +238,9 @@ let private execute
                         resolution.Render.MetadataLocalPath
                         resolution.Render.ComponentId
                         resolution.Render.Version
-                        resolution.Render.AssetUri
-                        resolution.Render.ArchiveName
                         verifiedArchiveSha
                         verifiedManifestSha
                         verifiedRevision
-                        resolution.Render.ProducerSdk
-                        resolution.Render.ProducerRuntime
-                        resolution.Render.ProducerPlatform
 
                 match persistResult with
                 | Error error -> return ReleaseEvaluate.finalizeFailure resolution.Render (ReleaseError.message error), 1

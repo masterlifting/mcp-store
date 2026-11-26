@@ -29,7 +29,7 @@ $rosterPath = Join-Path $Root "infrastructure/release/Participants.json"
 
 # The exact policy field set the compiled reader also accepts; a drift here fails before any SDK install.
 $script:PolicyFields = @(
-    "componentId"; "version"; "entryDll"; "platform"; "archiveName"; "assetUri"; "publishedFiles"; "launchKind"; "launchArguments")
+    "componentId"; "version"; "entryDll"; "platform"; "publishedFiles"; "launchKind"; "launchArguments")
 # The only toolchain-related field left in a component policy is the platform label: a RID the artifact is qualified for,
 # not a version and not byte-derivable. The SDK and runtime versions are not policy and are rejected as unknown fields.
 $script:ToolchainFields = @("platform")

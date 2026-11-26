@@ -75,23 +75,13 @@ let writeToFileAsync (path: string) (projection: ProducerMetadataProjection) : A
 let makeProjection
     (componentId: string)
     (version: string)
-    (assetUri: string)
-    (archiveName: string)
     (archiveSha256: string)
     (manifestSha256: string)
     (publishedRevision: string)
-    (producerSdk: string option)
-    (producerRuntime: string option)
-    (producerPlatform: string option)
     : ProducerMetadataProjection =
     { SchemaVersion = metadataSchemaVersion
       ComponentId = componentId
       Version = version
-      AssetUri = assetUri
-      ArchiveName = archiveName
       ArchiveSha256 = archiveSha256
       ManifestSha256 = manifestSha256
-      PublishedRevision = publishedRevision
-      ProducerSdk = producerSdk
-      ProducerRuntime = producerRuntime
-      ProducerPlatform = producerPlatform }
+      PublishedRevision = publishedRevision }

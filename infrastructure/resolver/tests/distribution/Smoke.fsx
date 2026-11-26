@@ -32,9 +32,11 @@ let readConfig () =
         | true, value when value.ValueKind = JsonValueKind.String -> value.GetString()
         | _ -> failwithf "resolver release policy '%s' is missing the string field '%s'" configPath name
 
-    read "componentId", read "archiveName", read "entryDll"
+    read "componentId", read "version", read "entryDll"
 
-let componentId, archiveName, entryDll = readConfig ()
+let componentId, version, entryDll = readConfig ()
+// The scripts load no contract module, so the pin-derived name is asserted against this value after the pin parses.
+let archiveName = $"v{version}.zip"
 let archivePath = Path.Combine(distributionRoot, archiveName)
 let pinPath = Path.Combine(distributionRoot, "consumer-pins.json")
 
@@ -140,6 +142,13 @@ async {
         let pinFields = expectCase "the generated pin parses" "Ok" (parsePin.Invoke(null, [| box pinText |]))
         let pin = pinFields.[0]
         let pinArchiveSha256 = pin.GetType().GetProperty("ArchiveSha256").GetValue(pin) :?> string
+
+        assertEqual "the pin derives the packaged archive name" archiveName (pin.GetType().GetProperty("ArchiveName").GetValue(pin) :?> string)
+
+        assertEqual
+            "the pin derives the canonical asset URI"
+            $"https://github.com/masterlifting/mcp-store/releases/download/{componentId}/{archiveName}"
+            (pin.GetType().GetProperty("AssetUri").GetValue(pin) :?> string)
 
         let actualArchiveSha256 =
             SHA256.HashData archiveBytes |> Convert.ToHexString |> fun value -> value.ToLowerInvariant()

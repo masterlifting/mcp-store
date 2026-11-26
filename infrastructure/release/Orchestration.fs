@@ -190,15 +190,6 @@ let renderResolution (resolution: ReleaseEvaluate.Resolution) : string =
     match render.BumpedVersion with
     | Some value -> node["bumpedVersion"] <- JsonValue.Create value
     | None -> ()
-    match render.ProducerSdk with
-    | Some value -> node["producerSdk"] <- JsonValue.Create value
-    | None -> ()
-    match render.ProducerRuntime with
-    | Some value -> node["producerRuntime"] <- JsonValue.Create value
-    | None -> ()
-    match render.ProducerPlatform with
-    | Some value -> node["producerPlatform"] <- JsonValue.Create value
-    | None -> ()
     node["publishedArchiveSha256"] <- JsonValue.Create(resolution.PublishedArchiveSha256 |> Option.toObj)
     node["publishedManifestSha256"] <- JsonValue.Create(resolution.PublishedManifestSha256 |> Option.toObj)
     node["publishedRevision"] <- JsonValue.Create(resolution.PublishedRevision |> Option.toObj)

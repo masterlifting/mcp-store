@@ -24,8 +24,9 @@ The Resolver CLI, storage, and failure contract are in
   `NOTICE.txt`, `Resolver.deps.json`, `Resolver.dll`,
   `Resolver.runtimeconfig.json`, and `distribution.json`.
 - The distribution manifest stays at schema 2. `dotnet-cli` is an additive
-  launch kind inside that schema, not a schema change. The consumer pin stays at
-  schema 1.
+  launch kind inside that schema, not a schema change. The consumer pin is
+  schema 2 with exactly six fields; its archive name and asset URI derive from
+  the identity and the trusted Store repository.
 - An unknown launch kind, unknown field, missing member, duplicate key, or
   malformed value fails closed. There is no permissive reader and no
   case-insensitive fallback.
@@ -61,8 +62,8 @@ runtime and does not discover a host.
 ## Trust and release handoff
 
 A consumer trusts a reviewed pin, not a file hash in isolation. The pin fixes
-the component, version, asset URI, archive name, archive digest, manifest digest,
-and published revision. The trust chain is the reviewed consumer pin, allowed
+the component, version, archive digest, manifest digest, and published revision;
+the archive name and HTTPS asset URI derive from the component and version. The trust chain is the reviewed consumer pin, allowed
 HTTPS origins, and verification of the manifest, archive members, and the exact
 archive closure before first execution.
 

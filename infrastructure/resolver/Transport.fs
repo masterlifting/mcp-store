@@ -10,8 +10,6 @@ open SharedFailure
 
 type Transport = { CreateClient: unit -> HttpClient }
 
-let private repositoryOwner = "masterlifting"
-let private repositoryName = "mcp-store"
 let private releaseHost = "github.com"
 
 // The asset CDN hosts GitHub redirects a release download to; nothing else is followed.
@@ -44,11 +42,12 @@ let private isApprovedRedirectTarget (uri: Uri) : bool =
 let private location (uri: Uri) : string =
     if isNull uri then "<null>" else $"{uri.Scheme}://{uri.Host}:{uri.Port}{uri.AbsolutePath}"
 
+// The location derives from the validated identity and the trusted Store repository, never from pin-supplied text.
 let assetUri (pin: DistributionPin.Pin) : Result<Uri, ReleaseError> =
     let expectedPath =
-        $"/{repositoryOwner}/{repositoryName}/releases/download/{pin.ComponentId}/{pin.ArchiveName}"
+        $"/{DistributionContract.storeOwner}/{DistributionContract.storeName}/releases/download/{pin.ComponentId}/{pin.ArchiveName}"
 
-    match ResolverPath.portablePath pin.ComponentId, ResolverPath.portablePath pin.ArchiveName with
+    match DistributionContract.validateIdentity pin.ComponentId pin.Version, ResolverPath.portablePath pin.ArchiveName with
     | Error error, _ -> Error error
     | _, Error error -> Error error
     | Ok (), Ok () ->

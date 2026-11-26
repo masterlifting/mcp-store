@@ -694,7 +694,7 @@ jobs:
                   # mere presence is not evidence. The candidate archive hash is deliberately not the compared value,
                   # because a revision-only-equivalent no-op legitimately publishes bytes whose hash differs from the
                   # current candidate, and the published revision is the remote archive's revision, not the event SHA.
-                  # The projection's toolchain fields are informational for consumer pinning and are not compared.
+                  # The projection carries exactly these six fields; the archive name and asset location derive from them.
                   # Each field also declares the JSON type the verified projection must carry. ConvertFrom-Json
                   # parses a JSON integer into Int32/Int64 and every other JSON type into its own CLR type, while
                   # string interpolation would render the JSON number 1.0, the JSON array [1], the JSON string "1"
@@ -702,16 +702,18 @@ jobs:
                   # projection's JSON type. The parsed type is proven before any value is compared; a field that is
                   # absent, JSON null or empty keeps the same "carries no" diagnostic as before.
                   $expectedFields = [ordered]@{
-                    schemaVersion     = @{ JsonType = "integer"; Value = 1 }
+                    schemaVersion     = @{ JsonType = "integer"; Value = 2 }
                     componentId       = @{ JsonType = "string"; Value = $component }
                     version           = @{ JsonType = "string"; Value = $componentVersion }
-                    assetUri          = @{ JsonType = "string"; Value = "$($document.assetUri)" }
-                    archiveName       = @{ JsonType = "string"; Value = "$($document.archiveName)" }
                     archiveSha256     = @{ JsonType = "string"; Value = $published.archiveSha256 }
                     manifestSha256    = @{ JsonType = "string"; Value = $published.manifestSha256 }
                     publishedRevision = @{ JsonType = "string"; Value = $published.revision }
                   }
                   $projectionFaults = @()
+                  $unexpectedFields = @($projection.PSObject.Properties.Name | Where-Object { $expectedFields.Keys -cnotcontains $_ })
+                  if ($unexpectedFields.Count -gt 0) {
+                    $projectionFaults += "the verified projection at '$expectedPath' carries unexpected field(s): $($unexpectedFields -join ', ')"
+                  }
                   foreach ($field in $expectedFields.Keys) {
                     $expected = $expectedFields[$field]
                     $expectedValue = "$($expected.Value)"
@@ -743,7 +745,7 @@ jobs:
                       $projectionFaults += "the verified projection '$field' is '$observedValue', not the verified '$expectedValue'"
                     }
                   }
-                  # The eight typed fields above prove the projection's declared content, not that these exact bytes are
+                  # The six typed fields above prove the projection's declared content, not that these exact bytes are
                   # the bytes the runner published: the runner's publishedMetadataSha256 is the remote-verified digest
                   # of the published metadata asset, so it is the only trusted statement about those bytes and this
                   # projection must hash to it. The bytes read once above are hashed as they are on disk; nothing is

@@ -102,8 +102,13 @@ Related current contracts:
   the clean source revision, the exact member inventory and per-member SHA-256,
   the runtime derived from the packaged runtime configuration, and the launch
   descriptor. The pin records the exact selected identity: component, version,
-  asset URI and name, archive and manifest digests, and `publishedRevision`.
-- The manifest schema stays at 2 and the pin schema at 1. `dotnet-cli` is an
+  archive and manifest digests, and `publishedRevision`. The archive name
+  (`v<version>.zip`) and canonical HTTPS asset URI derive from the validated
+  component and version and the single trusted Store repository; the policy
+  declares neither, and producer build provenance stays in the manifest only.
+- The manifest schema stays at 2 and the pin schema is 2. The pin reader accepts
+  only schema 2; a schema 1 document fails closed, including at an existing
+  version slot. `dotnet-cli` is an
   additive launch kind inside schema 2; `dotnet-exec` remains the MCP launch
   kind. An unknown kind, unknown field, duplicate key, missing member, or
   malformed value fails closed. No compatibility reader or migration path

@@ -30,7 +30,9 @@ contract first — `infrastructure/distribution/Contract.fs` (manifest types, st
 parser/renderer, semantic validation, bounded root resolution) and
 `infrastructure/distribution/Pin.fs` (canonical consumer pin / release metadata) —
 then `Policy.fs`, which parses a producer's canonical `Config.json` and nothing
-else. `ReleaseCompare.contractFromPolicy` projects that policy into the trusted
+else; the archive name and asset URI derive there from the validated component id and
+version and the trusted Store repository, so `Config.json` declares neither.
+`ReleaseCompare.contractFromPolicy` projects that policy into the trusted
 `ComponentContract` so identity, member allowlist, source repository, launch
 descriptor, and build provenance are re-derived rather than re-implemented by each
 caller. See `infrastructure/distribution/README.md` for the schema and its

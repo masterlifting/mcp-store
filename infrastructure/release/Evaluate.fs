@@ -19,9 +19,6 @@ type CandidateDto =
       AssetUri: string
       MetadataAssetName: string
       MetadataLocalPath: string
-      ProducerSdk: string option
-      ProducerRuntime: string option
-      ProducerPlatform: string option
       RepositoryOwner: string
       RepositoryName: string }
 
@@ -53,9 +50,6 @@ type Render =
       CandidateManifestSha256: string
       EvaluatedHead: string
       CandidateRevision: string
-      ProducerSdk: string option
-      ProducerRuntime: string option
-      ProducerPlatform: string option
       BumpedVersion: string option }
 
 type Resolution =
@@ -174,23 +168,15 @@ module VerifiedCandidate =
                       AssetUri = policy.AssetUri
                       MetadataAssetName = metadataAssetName
                       MetadataLocalPath = metadataLocalPath
-                      ProducerSdk = Some policy.SdkVersion
-                      ProducerRuntime = Some policy.RuntimeVersion
-                      ProducerPlatform = Some policy.Platform
                       RepositoryOwner = repositoryOwner
                       RepositoryName = repositoryName }
                 let projection =
                     ReleaseMetadata.makeProjection
                         policy.ComponentId
                         policy.Version
-                        policy.AssetUri
-                        archiveName
                         archiveSha
                         manifestSha
                         manifest.Revision
-                        (Some policy.SdkVersion)
-                        (Some policy.RuntimeVersion)
-                        (Some policy.Platform)
                 VerifiedCandidate(archiveBytesCopy, manifestBytesCopy, observation, archiveSha, manifestSha, archiveSize, manifestSize, embeddedBytes, embeddedSha, manifest.Revision, dto, projection)
             let fieldChecks =
                 fieldCheck "policy.componentId" policy.ComponentId
@@ -302,23 +288,15 @@ module VerifiedCandidate =
                           AssetUri = policy.AssetUri
                           MetadataAssetName = metadataAssetName
                           MetadataLocalPath = metadataLocalPath
-                          ProducerSdk = Some policy.SdkVersion
-                          ProducerRuntime = Some policy.RuntimeVersion
-                          ProducerPlatform = Some policy.Platform
                           RepositoryOwner = repositoryOwner
                           RepositoryName = repositoryName }
                     let projection =
                         ReleaseMetadata.makeProjection
                             policy.ComponentId
                             policy.Version
-                            policy.AssetUri
-                            archiveName
                             archiveSha
                             manifestSha
                             manifest.Revision
-                            (Some policy.SdkVersion)
-                            (Some policy.RuntimeVersion)
-                            (Some policy.Platform)
                     VerifiedCandidate
                         (innerBytesCopy,
                          manifestBytesCopy,
@@ -513,9 +491,6 @@ let private renderFrom (candidate: VerifiedCandidate) : Render =
       CandidateManifestSha256 = candidate.ManifestSha256
       EvaluatedHead = dto.EvaluatedHead
       CandidateRevision = candidate.EmbeddedRevision
-      ProducerSdk = dto.ProducerSdk
-      ProducerRuntime = dto.ProducerRuntime
-      ProducerPlatform = dto.ProducerPlatform
       BumpedVersion = None }
 
 // One classification site; metadata errors fail closed; verified absence is the only signal that permits a metadata-only recovery.
@@ -615,17 +590,12 @@ let private classifyInternal
                                 render
                                 $"the {dto.Contract.ComponentId} release container does not exist; refusing to silently create one")
                 | Ok (MetadataObserved (sha256, parsed)) ->
-                    let optToString = function | Some v -> v | None -> "<absent>"
-                    // Remote revision is checked against the remote embedded manifest, not the candidate HEAD; toolchain values participate in identity.
+                    // Remote revision is checked against the remote embedded manifest, not the candidate HEAD.
                     let mismatchedField : (string * string * string) option =
                             if parsed.ComponentId <> dto.Contract.ComponentId then
                                 Some ("componentId", dto.Contract.ComponentId, parsed.ComponentId)
                             elif parsed.Version <> dto.Contract.Version then
                                 Some ("version", dto.Contract.Version, parsed.Version)
-                            elif parsed.AssetUri <> dto.AssetUri then
-                                Some ("assetUri", dto.AssetUri, parsed.AssetUri)
-                            elif parsed.ArchiveName <> dto.Contract.ArchiveName then
-                                Some ("archiveName", dto.Contract.ArchiveName, parsed.ArchiveName)
                             elif parsed.ArchiveSha256 <> publishedObs.ArchiveSha256 then
                                 Some ("archiveSha256", publishedObs.ArchiveSha256, parsed.ArchiveSha256)
                             else
@@ -636,15 +606,7 @@ let private classifyInternal
                                     match ReleaseCompare.parseEmbeddedManifestEntry publishedObs with
                                     | Ok manifest when manifest.Revision <> parsed.PublishedRevision ->
                                         Some ("publishedRevision", manifest.Revision, parsed.PublishedRevision)
-                                    | _ ->
-                                        if parsed.ProducerSdk <> dto.ProducerSdk then
-                                            Some ("producerSdk", optToString dto.ProducerSdk, optToString parsed.ProducerSdk)
-                                        elif parsed.ProducerRuntime <> dto.ProducerRuntime then
-                                            Some ("producerRuntime", optToString dto.ProducerRuntime, optToString parsed.ProducerRuntime)
-                                        elif parsed.ProducerPlatform <> dto.ProducerPlatform then
-                                            Some ("producerPlatform", optToString dto.ProducerPlatform, optToString parsed.ProducerPlatform)
-                                        else
-                                            None
+                                    | _ -> None
 
                     match mismatchedField with
                     | Some (field, expected, actual) ->
