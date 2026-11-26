@@ -277,10 +277,11 @@ Support boundaries:
 - GitHub's changed-file comparison has documented limits: an empty diff does not
   run the workflow, and a very large diff can fall outside the evaluated range.
   The Telegram exclusion is therefore not an absolute claim.
-- The `resolver` release container and identity are unverified and unpublished.
-  No public release status is asserted.
-- Published-release HTTP download is unverified; local qualification hashes are
-  not publication identities.
+- Resolver 1.0.0 was published with Dotnet 1.0.7 and Workflow 3.0.1. Those
+  baseline assets were downloaded and independently verified.
+- The revised schema v2 releases are not yet published. Their published
+  downloads have not been verified, and local qualification hashes are not
+  publication identities.
 - Windows x64 is the release platform selection. Unix qualification is a
   read-only pull-request check and is not Unix release publication.
 

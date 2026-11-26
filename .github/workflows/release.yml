@@ -296,7 +296,10 @@ jobs:
           if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
             $PSNativeCommandUseErrorActionPreference = $false
           }
-          $runnerDirectory = Join-Path (Get-Location) "infrastructure/release/bin/Release/net11.0"
+          # The runner output directory is named by the framework `Update.ps1 -Verify` evaluated, never a literal moniker.
+          $targetFramework = $env:MCP_RELEASE_VERIFIED_TARGET_FRAMEWORK
+          if ($targetFramework -cnotmatch '\Anet[0-9]+\.[0-9]+\z') { throw "the verified TargetFramework '$targetFramework' is missing or not a plain netX.Y moniker" }
+          $runnerDirectory = Join-Path (Get-Location) "infrastructure/release/bin/Release/$targetFramework"
           $runner = Join-Path $runnerDirectory "ReleaseRunner.exe"
           if (-not (Test-Path -LiteralPath $runner -PathType Leaf)) { throw "compiled release runner not found at $runner" }
           $components = @(ConvertFrom-Json $env:RELEASE_COMPONENTS)

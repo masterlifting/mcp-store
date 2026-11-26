@@ -35,9 +35,11 @@ The Resolver CLI, storage, and failure contract are in
   `resolve` prints no snapshot and installs nothing; the lease is released on
   the refusal branch. A resolution snapshot reports the kind, so a CLI-only
   artifact is never presented as an MCP launch target.
-- The additive kind alone does not force a consumer re-pin, because no existing
-  manifest or pin changes shape. Consuming a new stable producer release still
-  requires each consumer to review and select that published pin.
+- The cutover is forward-only. The previously published Resolver 1.0.0 and the
+  historical pins, releases and running installations are untouched. Resolver
+  2.0.0 rejects v1 pins, and new consumption uses the six-field v2 pin. Each
+  consumer must review and select the published v2 pin for a new producer
+  release.
 
 ## Host and runtime prerequisites
 
@@ -120,8 +122,11 @@ transports. It is not enrolled in this .NET distribution transaction.
 
 ## Current status and support boundaries
 
-- The new Resolver release identity is unverified and unpublished. No public
-  Resolver artifact or public release status is claimed.
+- Resolver 1.0.0 was previously published (alongside Dotnet 1.0.7 and Workflow
+  3.0.1), and those baseline assets were independently verified. The revised
+  Dotnet, Workflow and Resolver 2.0.0 releases are not yet published or verified
+  by a real release. Only after that verification do they go to Harness #120,
+  and checkout-independent consumer acceptance remains outstanding.
 - Windows x64 is the release platform selection. Unix qualification is a
   read-only pull-request check, not Unix release publication.
 - A packaged Resolver smoke (`infrastructure/resolver/tests/distribution/Smoke.fsx`)
@@ -129,7 +134,8 @@ transports. It is not enrolled in this .NET distribution transaction.
   that the compiled verifier refuses the CLI-only archive as an MCP launch
   target, and that a changed archive fails its digest. It is not install, lease
   or consumer acceptance.
-- No published-release HTTP download has been verified.
+- Historical baseline downloads were verified; no download of a revised
+  (v2) published release has been verified.
 - Hosted GitHub Actions upload, immutable-release detection, and queue ordering
   behavior are not independently observed. The release workflow configures
   serialization and fails closed, but this document does not claim hosted
