@@ -127,7 +127,7 @@ let private runPublishMode (argv: string[]) =
         | Error(InvalidInput reason) -> emitFailure reason; return 4
         | Ok cli ->
             let root = Path.GetFullPath cli.WorkspaceRoot
-            let canonicalRepo = "masterlifting/mcp-store"
+            let canonicalRepo = $"{DistributionContract.storeOwner}/{DistributionContract.storeName}"
             if cli.Repo <> canonicalRepo then
                 emitFailure $"--repo must be '{canonicalRepo}'"
                 return 4
@@ -176,7 +176,7 @@ let private runPublishMode (argv: string[]) =
                                                 | Error error -> emitFailure (ReleaseError.message error); return 4
                                                 | Ok privateDirectory ->
                                                     let metadataPath = Path.Combine(privateDirectory, ReleaseMetadata.metadataAssetName policy.ComponentId policy.Version)
-                                                    return! runPublishPipelineWithTransportFactory (fun () -> ReleasePublish.defaultHttpTransport ()) policy snapshot cli.EventSha metadataPath "masterlifting" "mcp-store"
+                                                    return! runPublishPipelineWithTransportFactory (fun () -> ReleasePublish.defaultHttpTransport ()) policy snapshot cli.EventSha metadataPath DistributionContract.storeOwner DistributionContract.storeName
     }
 
 [<EntryPoint>]

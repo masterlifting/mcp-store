@@ -65,6 +65,15 @@ function Read-Policy {
     foreach ($name in @("componentId", "version", "entryDll") + $script:ToolchainFields) {
         if ([string]::IsNullOrWhiteSpace("$($document.$name)")) { throw "policy '$ConfigPath' has an empty '$name'" }
     }
+    # Same bounded ASCII identity grammar as the compiled contract, checked before the values reach any projection or output file.
+    $componentIdValue = $document.componentId
+    if ($componentIdValue -isnot [string] -or $componentIdValue.Length -gt 32 -or $componentIdValue -cnotmatch '\A[a-z](?:[a-z0-9-]*[a-z0-9])?\z') {
+        throw "policy '$ConfigPath' componentId is not a bounded lowercase portable identifier"
+    }
+    $versionValue = $document.version
+    if ($versionValue -isnot [string] -or $versionValue.Length -gt 32 -or $versionValue.Contains("..") -or $versionValue -cnotmatch '\A[0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?\z') {
+        throw "policy '$ConfigPath' version is not a bounded portable version"
+    }
     $publishedFiles = @($document.publishedFiles)
     if ($publishedFiles.Count -eq 0 -or @($publishedFiles | Where-Object { [string]::IsNullOrWhiteSpace("$_") }).Count -gt 0) {
         throw "policy '$ConfigPath' must declare at least one non-empty publishedFiles entry"

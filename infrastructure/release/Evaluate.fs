@@ -466,14 +466,18 @@ let validateCanonicalAssetUri
     (dto: CandidateDto)
     (contract: ReleaseCompare.ComponentContract)
     : Result<unit, ReleaseError> =
-    let expected =
-        $"https://github.com/{dto.RepositoryOwner}/{dto.RepositoryName}/releases/download/{contract.ComponentId}/{contract.ArchiveName}"
+    let expected = DistributionContract.assetUriFor contract.ComponentId contract.Version
 
     if String.IsNullOrEmpty dto.AssetUri then
         Error(
             MalformedArtifact(
                 "contract",
                 "assetUri is missing from the canonical DTO; the runner never reconstructs it from environment"))
+    elif
+        not (String.Equals(dto.RepositoryOwner, DistributionContract.storeOwner, StringComparison.Ordinal))
+        || not (String.Equals(dto.RepositoryName, DistributionContract.storeName, StringComparison.Ordinal))
+    then
+        Error(MalformedArtifact("contract", "the repository owner and name do not match the trusted Store repository"))
     elif dto.AssetUri <> expected then
         Error(MalformedArtifact("contract", $"assetUri '{dto.AssetUri}' does not match the expected canonical URL '{expected}'"))
     else
