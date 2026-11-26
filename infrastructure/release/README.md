@@ -1,8 +1,8 @@
 # `infrastructure/release`
 
 The compiled release runner separates producer preparation from publication. Producer
-build, packaging, and tests run only during preparation with publication credentials
-removed; publication validates data and then uses the existing single transaction.
+build, packaging, and the package gates run only during preparation with publication
+credentials removed; publication validates data and then uses the existing single transaction.
 
 ## CLI
 
@@ -62,7 +62,7 @@ One .NET toolchain version is authored: the SDK version in the root `global.json
 | Selection | Owner |
 | --- | --- |
 | SDK version | root `global.json` (`rollForward: disable`, `allowPrerelease: false`); the pre-SDK projection reads only what installation needs, and the SDK selected by the native resolver must equal it |
-| TFM, F# language version, `ExpectoVersion` | root `Directory.Build.props`; `Release.fsproj` carries no copy of the TFM or language version |
+| TFM, F# language version | root `Directory.Build.props`; `Release.fsproj` carries no copy of the TFM or language version |
 | runtime version | never authored; the evaluated SDK's `DefaultRuntimeFrameworkVersion` of the single `KnownFrameworkReference` for `Microsoft.NETCore.App` at the evaluated TFM |
 | `platform` | each component's `*/release/Config.json`: the RID the artifact is qualified for, not a version |
 
@@ -111,4 +111,8 @@ parser can be built.
 - `Check.ps1 -Components <projection>` — cross-stage guard over `release.yml`, the pinned action transfers and the enrollment roster.
 - `Verify.ps1 -Root <dir> -InventoryJson <json>` / `-MembersJson <json>` — deterministic membership, path and SHA-256 proof of a downloaded artifact; it reads no network, token or receipt state, so it runs before anything from the verified set executes.
 - `Typecheck.ps1 -SdkVersion <sdk>` — strict FCS typecheck of the retained producer scripts.
-- `Test.ps1` — the complete compiled release regression gate.
+
+The compiled release regression suite and `Test.ps1` are retired. Preparation runs each
+component's `tests/distribution/Run.fsx` package gate (reported as phase `tests` on failure), and
+the publisher job builds the producers and the Resolver and runs `Check.ps1` and `Typecheck.ps1`.
+Automated tests are added only with explicit, specific approval.

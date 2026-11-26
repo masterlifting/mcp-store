@@ -218,7 +218,11 @@ resolver provisions no runtime and does not substitute another revision.
 These are current, unverified, or unimplemented properties. Do not read this
 document as a claim beyond them.
 
-- **Runtime qualification is bounded to the executed targets.** The native
+- **Runtime qualification is bounded to the executed targets.** The automated
+  resolver behavior suite is retired, so the figures in this item are historical
+  observations of earlier revisions, not a current gate; only the package gate
+  (`tests/distribution/Run.fsx`: archive, manifest, pin and closure bytes) and the
+  native build remain automated. The native
   resolver suite passed 77/77 locally on Windows (with its Windows-specific
   platform gates). Hosted run
   [39319894447](https://github.com/masterlifting/mcp-store/actions/runs/39319894447)

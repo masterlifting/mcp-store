@@ -1,7 +1,7 @@
 # Release automation requirements and evidence matrix (GHI-24)
 
 Status: W5 narrow pass-1 regression appended; columns distinguish **local**
-(tests under `infrastructure/release/tests/` plus updated existing suites),
+(earlier tests under the since-removed `infrastructure/release/tests/` plus updated existing suites),
 **simulated** (loopback HttpListener or `localMirrorObserver` injecting the
 seam), **actual remote read** (none in this slice), and **unverified hosted**
 (GitHub Actions queue, real `api.github.com` uploads, immutable-release
@@ -15,6 +15,19 @@ issue snapshot (`.tasks/GHI-24/docs/original.md`), baseline and gap analysis
 `.tasks/` was untracked. They are no longer available at those paths; no replacement
 evidence location is asserted. If this file and the live issue conflict, the issue
 wins. Retained matrix entries are historical claims, not fresh verification.
+
+Current state (Store #46, PR #85 second review): the automated behavioral suites are
+removed — the compiled Expecto projects under `dotnet/`, `infrastructure/release/` and
+`infrastructure/resolver/`, the Workflow script suites, `infrastructure/release/Test.ps1`,
+the root `Run.ps1` wrapper, the distribution smoke and the scripts regression. Every
+`EV-TEST`, `Release.Tests`, `Bootstrap.fsx`, `Telegram.fsx` and "compiled-suite" citation
+below names evidence from those retired suites. Those citations are historical
+observations of earlier revisions, are unchanged, and are not a current gate. What
+remains automated is the three producer package gates (`tests/distribution/Run.fsx` of
+`dotnet`, `workflow` and `infrastructure/resolver`), the native Release builds,
+`infrastructure/release/Check.ps1` and `Typecheck.ps1`, and the release transaction's own
+artifact, provenance and no-clobber validation. Behavioral checks of the extracted MCP
+distributions are a manual smoke.
 
 Evidence IDs: `EV-BUILD` producer build/package validation; `EV-TEST`
 deterministic tests; `EV-WF` static/config validation of the root workflow;
@@ -41,7 +54,7 @@ the metadata-asset-sha distinct-from-archive-sha invariant.
 | 7 | Merged PR and direct push both fire; branch state is authority | EV-WF | unverified hosted |
 | 8 | No manual release step on normal path | EV-WF: neither workflow has `workflow_dispatch` (asserted by `Check.ps1`); because dispatch stays forbidden, a failed release is recovered by re-running the failed run from the GitHub Actions UI or by a follow-up push touching a non-Telegram path, since a Telegram-only or empty push no longer triggers the release; EV-TEST (`Telegram.fsx::releaseWorkflowMatrixNamesOnly`) | local-run, deterministic |
 | 9 | `workflow_dispatch` only if identical deterministic logic and cannot overwrite | EV-WF | unverified hosted |
-| 10 | Canonical per-producer config is single source of truth for the per-component policy (id/version/archive/URI/allowlist/platform). Reconciled (Store #46, revised after PR #85 review): the shared .NET toolchain is not per-component policy and is no longer in `*/release/Config.json`. The SDK version is authored once in the root `global.json`; the TFM, F# language version and `ExpectoVersion` are owned by the root `Directory.Build.props`; `Release.fsproj` carries no duplicate TFM or language version. After SDK setup the selected SDK, TFM, language version and runtime come from native MSBuild evaluation; the runtime is never authored but is the evaluated `DefaultRuntimeFrameworkVersion` of the unique `KnownFrameworkReference` for `Microsoft.NETCore.App` at the evaluated TFM. `platform` stays per component. A producer config that declares `sdkVersion` or `runtimeVersion` is rejected. The earlier strict whole-file reader, PowerShell mirror and documented `Release.fsproj` exception are superseded; evidence recorded before this revision describes that earlier model | EV-BUILD; EV-WF: `Check.ps1` owner assertions; EV-TEST (planned `Release.Tests` policy suites; `Bootstrap.fsx::updatePs1ProjectEmitsCanonicalValues` is earlier, pre-owner evidence). Not qualified in this row: compiled-suite, candidate-comparison and hosted results | local-run partial (native evaluation, `Update.ps1 -Project/-Verify` and `Check.ps1` observed locally); compiled-suite and hosted evidence not claimed |
+| 10 | Canonical per-producer config is single source of truth for the per-component policy (id/version/archive/URI/allowlist/platform). Reconciled (Store #46, revised after PR #85 review): the shared .NET toolchain is not per-component policy and is no longer in `*/release/Config.json`. The SDK version is authored once in the root `global.json`; the TFM and F# language version are owned by the root `Directory.Build.props`; `Release.fsproj` carries no duplicate TFM or language version. After SDK setup the selected SDK, TFM, language version and runtime come from native MSBuild evaluation; the runtime is never authored but is the evaluated `DefaultRuntimeFrameworkVersion` of the unique `KnownFrameworkReference` for `Microsoft.NETCore.App` at the evaluated TFM. `platform` stays per component. A producer config that declares `sdkVersion` or `runtimeVersion` is rejected. The earlier strict whole-file reader, PowerShell mirror and documented `Release.fsproj` exception are superseded; evidence recorded before this revision describes that earlier model | EV-BUILD; EV-WF: `Check.ps1` owner assertions; EV-TEST (planned `Release.Tests` policy suites; `Bootstrap.fsx::updatePs1ProjectEmitsCanonicalValues` is earlier, pre-owner evidence). Not qualified in this row: compiled-suite, candidate-comparison and hosted results | local-run partial (native evaluation, `Update.ps1 -Project/-Verify` and `Check.ps1` observed locally); compiled-suite and hosted evidence not claimed |
 | 11 | Workflow YAML must not duplicate producer versions | EV-WF; EV-TEST (`Bootstrap.fsx::bootstrapKeysAreStable`) | local-run, deterministic |
 | 12 | CI never auto-increments/invents a semantic version | EV-WF, EV-TEST (`Bootstrap.fsx::updatePs1ProjectRejectsDuplicateLiteral`) | local-run, deterministic |
 | 13 | Smallest deterministic metadata projection if SDK setup needs config. Reconciled (Store #46, revised after PR #85 review): the pre-SDK projection (`Update.ps1 -Project`) is plain PowerShell that reads only what installation needs from `global.json` and the per-component policy and emits the SDK version, platform, component list and per-component version and entry, but **no runtime version** and no verified handoff, because no SDK exists at that point. `Update.ps1 -Verify` runs after SDK installation, evaluates the SDK natively, derives the runtime, checks installed-runtime compatibility (same major.minor, patch at least the derived value, a prerelease never satisfying a stable value) and only then writes the verified SDK, runtime, TFM and language version to `GITHUB_ENV` | EV-WF, EV-TEST (`Bootstrap.fsx::bootstrapEntryEmitsCanonicalSummary` is earlier evidence; planned `Release.Tests` `Invocation` projection cases) | local-run partial (`-Project` and `-Verify` observed with SDK 11.0.100, runtime 11.0.0; the verified values carried TFM `net11.0` and language version `9.0`); compiled-suite evidence not claimed |
@@ -82,7 +95,7 @@ the metadata-asset-sha distinct-from-archive-sha invariant.
 | 48 | Workflow must not mutate any consumer repository | EV-WF, EV-REVIEW | unverified hosted |
 | 49 | Publish one consumer-neutral producer metadata projection | EV-BUILD, EV-TEST (`Metadata.fsx::makeProjection` round-trip, `writeToFileDeterministic`); EV-TEST (`Evaluate.fsx::observedMetadataAssetShaDiffersArchiveShaAndCarried` proves the metadata asset sha is verified separately from the archive sha) | local-run, deterministic |
 | 50 | Optional: expose metadata as Actions artifact/summary; no consumer-specific formats | EV-WF: YAML references `release-metadata-<component>` artifact | local-run, deterministic |
-| 51 | Deterministic tests/helpers without real publication for ordinary local runs | EV-TEST (`infrastructure/release/tests/*.fsx`, 9 entrypoint scripts and 272 assertions in Test.ps1; `Fixture.fsx` helper + `Historical.fsx` integration = 282 total assertions) | local-run, deterministic |
+| 51 | Deterministic tests/helpers without real publication for ordinary local runs (retired: the suites cited here are removed; the row records the earlier observation only) | EV-TEST (`infrastructure/release/tests/*.fsx`, 9 entrypoint scripts and 272 assertions in Test.ps1; `Fixture.fsx` helper + `Historical.fsx` integration = 282 total assertions) | local-run, deterministic |
 | 52 | Cover publish/no-op/bump-fail/validation-gate/ambiguous/two-component/shared-infra/concurrency/Telegram-exclusion | EV-TEST (publish/no-op/bump-fail/validation-gate/ambiguous/two-component/shared-infra-change/Telegram are covered; concurrency is YAML-static only) | local-run simulated; concurrency hosted unverified |
 | 53 | Keep decision logic deterministic and separate from the thin transport shell | EV-CMP (`Compare.fsx`, `Metadata.fsx`), EV-REVIEW | local-run, deterministic |
 | 54 | Merge/push to `main` auto-evaluates both producers | EV-WF, EV-REMOTE | unverified hosted |
@@ -168,3 +181,4 @@ when `MCP_RELEASE_HISTORICAL_ROOT` points at the locally downloaded v1.0.3
 archives; otherwise the test skips gracefully. The `Compare` decision
 matrix short-circuit + revision-only-equivalent path is the underlying
 contract covered by `Compare.fsx::revisionOnlyEquivalentDecision`.
+ivalentDecision`.

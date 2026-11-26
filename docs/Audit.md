@@ -1,5 +1,10 @@
 # Distribution audit — GHI-47
 
+Historical note (2026-11-26): this audit records observations of earlier revisions. The
+`Run.ps1` wrapper, the release suite runner and the test suites it cites are since
+removed (Store #46, PR #85 second review); the references below describe what existed
+then and are not current gates.
+
 ## Decision
 
 **Retain the existing ZIP/manifest/Resolver mechanism pending the #46 decision

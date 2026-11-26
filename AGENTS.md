@@ -12,23 +12,28 @@ The official GitHub MCP is an external dependency and is not produced or install
 
 ## Boundaries
 
-- Producer code, package metadata, manifests, release tooling, producer tests, and producer documentation live here.
+- Producer code, package metadata, manifests, release tooling, package gates, and producer documentation live here.
 - Consumer agents, orchestration, capability selection, launchers, and installed runtime layouts do not live here.
 - No migration/backward-compatibility aliases are maintained for retired Dotnet/Workflow product identities or persisted schemas.
 - Consumers own their integrations and consume published releases through `dotnet/dist/consumer-pins.json` and `workflow/dist/consumer-pins.json`.
 
 ## Validation
 
-- Dotnet: build `dotnet/Dotnet.fsproj` and `dotnet/tests/Tests.fsproj` in Release; the compiled Expecto suite is owned separately from its deferred FSI scripts.
-- Workflow: `dotnet build workflow/Workflow.fsproj -c Release` plus the F# script tests under `workflow/tests/`.
-- Telegram: from `telegram/`, use `uv run pytest`; deterministic tests must not require live credentials.
+- The repository carries no automated behavioral test suite. Do not add automated tests, test projects, test frameworks or test-only CI phases without explicit, specific approval for each addition.
+- Dotnet: build `dotnet/Dotnet.fsproj` in Release; run the package gate `dotnet fsi dotnet/tests/distribution/Run.fsx`.
+- Workflow: `dotnet build workflow/Workflow.fsproj -c Release`; run the package gate `dotnet fsi workflow/tests/distribution/Run.fsx`.
+- Resolver: `dotnet build infrastructure/resolver/Resolver.fsproj -c Release`; run the package gate `dotnet fsi infrastructure/resolver/tests/distribution/Run.fsx`.
+- The package gates run in clean-tree release preparation and verify archive, manifest, pin and byte contracts; they are not behavioral suites.
+- Release tooling: `pwsh infrastructure/release/Check.ps1 -Components '["dotnet","workflow","resolver"]'` and `pwsh infrastructure/release/Typecheck.ps1`.
+- Manual smoke: extract each MCP distribution and start it through the Resolver contract by hand; this is not automated.
+- Telegram: lint and format checks only (see below).
 
 ## Telegram package
 
 - Requires Python 3.10+ and uses `uv` (`telegram/pyproject.toml`, `telegram/uv.lock`).
-- From `telegram/`, run `uv sync`, then use `uv run pytest` for tests. Coverage: `uv run pytest --cov --cov-report=term-missing --cov-report=xml`.
+- From `telegram/`, run `uv sync`.
 - Checks: `uv run black --check .`, `uv run flake8 .`, and `uv run pre-commit run --all-files`.
-- Add or update deterministic tests for behavior changes; do not depend on live Telegram credentials.
+- The package has no automated tests; do not add any without explicit, specific approval.
 
 ## Security
 

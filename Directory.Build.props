@@ -1,10 +1,9 @@
 <Project>
-  <!-- The single owner of the target framework, the F# language version and the Expecto package version.
+  <!-- The single owner of the target framework and the F# language version.
        The publisher stage excludes repository-wide build props and receives the evaluated framework and language
        version from `Update.ps1 -Verify`. -->
   <PropertyGroup>
     <TargetFramework>net11.0</TargetFramework>
     <LangVersion>9.0</LangVersion>
-    <ExpectoVersion>10.2.3</ExpectoVersion>
   </PropertyGroup>
 </Project>

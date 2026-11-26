@@ -1,5 +1,5 @@
 # role: entrypoint/command
-# Strict, read-only FCS typecheck of the release-path scripts that no compiled project build covers; targets derive from the enrollment roster, and the compiled modules and compiled regression project are typed by their own builds.
+# Strict, read-only FCS typecheck of the release-path scripts that no compiled project build covers; targets derive from the enrollment roster, and the compiled modules are typed by their own builds.
 # The generated probe (with its SDK #r reference) is written under RUNNER_TEMP, outside the repository, so the in-repo analyzer's #r constraint is never violated; targets are read and type-checked as text only and are never evaluated.
 
 [CmdletBinding()]
@@ -30,10 +30,7 @@ function Get-RosterTargets {
 }
 
 if (-not $Targets -or $Targets.Count -eq 0) {
-    # The producer provenance contract is roster-independent and still needs the strict gate; the retired pre-SDK
-    # `Bootstrap.fsx` is no longer a target because the canonical projection is plain PowerShell over the policy JSON.
-    $fixed = @("dotnet/tests/provenance/Run.fsx")
-    $Targets = @(@($fixed) + @(Get-RosterTargets) | Sort-Object -Unique)
+    $Targets = @(@(Get-RosterTargets) | Sort-Object -Unique)
 }
 
 if (-not $Targets -or $Targets.Count -eq 0) {

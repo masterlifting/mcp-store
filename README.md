@@ -9,8 +9,10 @@ The clean-slate producer set contains exactly these MCP producers:
 | `Telegram` | `telegram/` | `telegram-mcp` Python package, `telegram` MCP server |
 
 Dotnet and Workflow publish deterministic framework-dependent distributions.
-Telegram is the Python producer and is tested from its `telegram/` boundary with
-`uv`. Telegram-only changes do not run the .NET release or Unix qualification
+Telegram is the Python producer and is linted from its `telegram/` boundary with
+`uv`. The repository carries no automated behavioral test suite; the producer package
+gates, native builds and release guards remain, and an extracted MCP is smoke-checked
+manually. Adding automated tests requires explicit, specific approval. Telegram-only changes do not run the .NET release or Unix qualification
 workflows; that exclusion is not a Telegram CI.
 
 The Resolver is a third release participant but not an MCP producer: it is published

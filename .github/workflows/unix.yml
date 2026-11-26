@@ -152,7 +152,7 @@ jobs:
 
       - name: pack every enrolled canonical distribution from the exact head
         shell: pwsh
-        # The resolver launch tests consume the canonical local distributions, so every packed product precedes the Expecto gate; the roster keeps the resolver last.
+        # Every enrolled distribution is packed from the exact head; the roster keeps the resolver last.
         run: |
           $ErrorActionPreference = "Stop"
           if (Test-Path variable:PSNativeCommandUseErrorActionPreference) { $PSNativeCommandUseErrorActionPreference = $false }
@@ -170,24 +170,9 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "$component consumer pin failed (exit $LASTEXITCODE)" }
           }
 
-      - name: build the compiled resolver and its test project
+      - name: build the compiled resolver
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           & dotnet build infrastructure/resolver/Resolver.fsproj -c Release
           if ($LASTEXITCODE -ne 0) { throw "resolver build failed (exit $LASTEXITCODE)" }
-          & dotnet build infrastructure/resolver/tests/Tests.fsproj -c Release
-          if ($LASTEXITCODE -ne 0) { throw "resolver test build failed (exit $LASTEXITCODE)" }
-
-      - name: run the full resolver Expecto suite with the native exit
-        shell: pwsh
-        # No filter, ignore list or result rewrite: the suite's own exit code is the qualification gate.
-        run: |
-          $ErrorActionPreference = "Stop"
-          if (Test-Path variable:PSNativeCommandUseErrorActionPreference) { $PSNativeCommandUseErrorActionPreference = $false }
-          $watch = [System.Diagnostics.Stopwatch]::StartNew()
-          & dotnet run --project infrastructure/resolver/tests/Tests.fsproj -c Release --no-build
-          $code = $LASTEXITCODE
-          $watch.Stop()
-          Write-Host "resolver suite exit=$code elapsed=$([math]::Round($watch.Elapsed.TotalSeconds, 3))s"
-          exit $code

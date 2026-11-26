@@ -137,14 +137,12 @@ The analyzer keeps static, typecheck, and integration concerns separate:
 The `validate` subcommand composes every static check followed by the
 typecheck lane.
 
-## Regression tests
+## Verification
 
-Run the deterministic analyzer and FSI-boundary regression suite from the
-repository root:
-
-```text
-dotnet fsi infrastructure/scripts/tests/Regression.fsx
-```
+The analyzer has no automated regression suite. Verify a change by building
+`infrastructure/scripts/Validation.fsproj` in Release and running the `validate`
+subcommand over the repository. Adding automated tests requires explicit,
+specific approval.
 
 ## Audit snapshot
 

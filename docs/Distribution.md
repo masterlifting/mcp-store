@@ -31,6 +31,15 @@ acceptance. It can prepare in parallel, but it validates against the actual
 published identities and must verify the trusted artifact identity and complete
 closure before executing anything from it.
 
+**Status update (2026-11-26, PR #85 second review).** The automated behavioral test
+suites referenced by earlier sections (the Expecto projects under `dotnet/`,
+`infrastructure/release/` and `infrastructure/resolver/`, the Workflow script suites,
+`infrastructure/release/Test.ps1`, the root `Run.ps1` wrapper and their CI phases) are
+removed. Test counts, proposed test work and `Run.ps1`/suite observations below are
+historical records of earlier revisions, not current gates. The three producer package
+gates (`tests/distribution/Run.fsx`), the native builds and the release guards remain;
+behavioral confirmation of an extracted MCP is a manual smoke.
+
 The closure defined for each Resolver version is a flat archive of exactly six
 members: `FSharp.Core.dll`, `NOTICE.txt`, `Resolver.deps.json`, `Resolver.dll`,
 `Resolver.runtimeconfig.json` and `distribution.json`. The manifest stays at

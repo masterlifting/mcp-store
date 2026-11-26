@@ -51,24 +51,13 @@ The server exposes the fixed tools `build`, `test`, and `details` over stdio.
 The implementation has no dependency on OpenCode APIs; OpenCode owns only its
 consumer descriptor, launcher, and tool-facing contracts.
 
-## Producer tests
+## Verification
 
-The deterministic F#-native implementation suite is an Expecto executable:
-
-```text
-dotnet run --project tests/Tests.fsproj --configuration Release
-```
-
-Run the command from this directory. It targets `net11.0`, references
-`Dotnet.fsproj` directly, and owns the dotnet build/test domain, authorization,
-process, quota, and MCP transport coverage.
-
-The repo-shared provenance guard has a focused check that does not require a clean
-tree:
-
-```text
-dotnet fsi dotnet/tests/provenance/Run.fsx
-```
+The producer has no automated behavioral test suite. Verify a change by building
+`dotnet/Dotnet.fsproj` in Release, running the package gate below, and, when a
+behavioral check is needed, a manual smoke: extract the packaged archive and start
+the MCP through the Resolver contract. Adding automated tests requires explicit,
+specific approval. The production MCP `test` tool is unrelated and remains.
 
 ## Producer packaging
 

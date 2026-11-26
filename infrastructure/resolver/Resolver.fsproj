@@ -11,9 +11,6 @@
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
   </PropertyGroup>
   <ItemGroup>
-    <InternalsVisibleTo Include="Resolver.Tests" />
-  </ItemGroup>
-  <ItemGroup>
     <Compile Include="../../infrastructure/Failure.fs" />
     <Compile Include="../distribution/Contract.fs" />
     <Compile Include="../distribution/Pin.fs" />

@@ -474,22 +474,7 @@ telegram_mcp/runtime.py    # shared MCP setup, account routing, validation, file
 telegram_mcp/runner.py     # application startup
 telegram_mcp/tools/        # tool modules grouped by domain
 sanitize.py                # output sanitization helpers
-tests/                     # pytest suite
 ```
-
-Run tests:
-
-```bash
-uv run pytest
-```
-
-Run tests with coverage:
-
-```bash
-uv run pytest --cov --cov-report=term-missing --cov-report=xml
-```
-
-Coverage is configured in `pyproject.toml` with an 80% minimum gate for deterministic unit-testable core modules. GitHub Actions runs the same coverage command and uploads `coverage.xml`.
 
 Run formatting checks:
 
@@ -497,6 +482,9 @@ Run formatting checks:
 uv run black --check .
 uv run flake8 .
 ```
+
+Automated tests are not part of this package. Do not add automated tests without
+explicit, specific approval.
 
 ## Security Notes
 
@@ -549,11 +537,13 @@ Telegram messages, display names, chat titles, and button labels are untrusted c
    - `uv sync`
    - `uv run pre-commit install --hook-type pre-commit --hook-type pre-push`
 3. Create a focused branch.
-4. Add or update tests when behavior changes.
-5. Run checks locally:
+4. Run checks locally:
    - `uv run pre-commit run --all-files`
    - `uv run pre-commit run --hook-stage pre-push --all-files`
-6. Open a pull request with a concise description.
+5. Open a pull request with a concise description.
+
+Automated tests are not part of this package. Do not add automated tests without
+explicit, specific approval.
 
 ## License
 

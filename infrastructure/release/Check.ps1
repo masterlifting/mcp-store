@@ -175,7 +175,7 @@ if ($unixText -match 'workflow_dispatch') {
 }
 
 # One authored version for the .NET toolchain. The SDK selection is owned by `global.json`, the framework, the language
-# version and the Expecto version by `Directory.Build.props`, and the runtime is derived from the pinned SDK. This runs at
+# version by `Directory.Build.props`, and the runtime is derived from the pinned SDK. This runs at
 # step 2 of the publisher job, BEFORE the SDK is installed, so it only reads files: it must not run `dotnet`, which
 # fails under `rollForward: disable` on a runner without the exact SDK. The native evaluation lives in `Update.ps1 -Verify`.
 function Assert-Toolchain {
@@ -230,20 +230,6 @@ Assert-Toolchain -Name "no project re-declares the owned framework or language v
         if ($content -match '<TargetFrameworks?[\s>]') { throw "$relative re-declares TargetFramework or TargetFrameworks; Directory.Build.props owns it" }
         if ($content -match '<LangVersion[\s>]') { throw "$relative re-declares LangVersion; Directory.Build.props owns it" }
         if ($content -imatch '<OtherFlags>[^<]*--langversion') { throw "$relative re-declares the language version through OtherFlags; Directory.Build.props owns it" }
-    }
-}
-Assert-Toolchain -Name "every test PackageReference takes the owned Expecto version" -Check {
-    foreach ($relative in @("dotnet/tests/Tests.fsproj", "infrastructure/release/tests/Tests.fsproj", "infrastructure/resolver/tests/Tests.fsproj")) {
-        $path = Join-Path $Root $relative
-        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "$relative is missing" }
-        [xml]$project = Get-Content -LiteralPath $path -Raw
-        $references = @($project.SelectNodes("//PackageReference"))
-        if ($references.Count -eq 0) { throw "$relative declares no PackageReference" }
-        foreach ($reference in $references) {
-            if ($reference.GetAttribute("Version") -cne '$(ExpectoVersion)' -or $null -ne $reference.SelectSingleNode("Version")) {
-                throw "$relative PackageReference '$($reference.GetAttribute('Include'))' must carry exactly Version=`"`$(ExpectoVersion)`""
-            }
-        }
     }
 }
 Assert-Toolchain -Name "no producer config declares a toolchain version" -Check {
@@ -358,6 +344,8 @@ Assert-Count -Name "no raw platform transport mode survives" -Pattern '(InstallR
 Assert-Count -Name "the retired orchestration mode is gone" -Pattern 'orchestrate' -Expected 0
 Assert-Count -Name "no retired publisher flag survives" -Pattern '(--role=|--component=|--trigger=|--builder-|--artifact-name|--transport-evidence)' -Expected 0
 Assert-Count -Name "no attempt-scoped job lookup survives" -Pattern 'check_run_id' -Expected 0
+# Behavioral test automation is retired; only the producer package gates and the compiled builds remain.
+Assert-Count -Name "no retired behavioral test phase survives" -Pattern '(Expecto|workflow/tests/|tests/Tests\.fsproj|Test\.ps1|Run\.ps1 -Script)' -Expected 0
 
 # Publisher job: it builds the trusted runtime from the project's own compile list and runs the release regression gates.
 Assert-JobCount -Job "publisher" -Name "publisher job is read-only" -Pattern '^ {6}contents: read\s*$' -Expected 1
@@ -374,21 +362,14 @@ Assert-JobCount -Job "publisher" -Name "publisher stages only compile items that
 Assert-JobCount -Job "publisher" -Name "publisher publishes the staged project in isolation" -Pattern 'dotnet publish \$stageProject' -Expected 1
 Assert-JobCount -Job "publisher" -Name "publisher suppresses repository-wide build imports" -Pattern 'p:ImportDirectoryBuildProps=false -p:ImportDirectoryBuildTargets=false' -Expected 2
 Assert-JobCount -Job "publisher" -Name "publisher restores from the cleared isolated source list" -Pattern 'dotnet restore \$stageProject --configfile' -Expected 1
-Assert-JobCount -Job "publisher" -Name "thirteen non-packaging Workflow entrypoints" -Pattern '^\s+"workflow/tests/(?:[A-Za-z0-9]+/)?[A-Za-z0-9]+\.fsx",?\s*$' -Expected 13
-Assert-JobCount -Job "publisher" -Name "publisher runs the producer Expecto gate" -Pattern 'dotnet run --project dotnet/tests/Tests\.fsproj' -Expected 1
-Assert-JobCount -Job "publisher" -Name "publisher builds the compiled release regression project" -Pattern 'dotnet build infrastructure/release/tests/Tests\.fsproj' -Expected 1
 Assert-JobCount -Job "publisher" -Name "publisher builds the compiled resolver project" -Pattern 'dotnet build infrastructure/resolver/Resolver\.fsproj -c Release' -Expected 1
-Assert-JobCount -Job "publisher" -Name "publisher builds the compiled resolver Expecto project" -Pattern 'dotnet build infrastructure/resolver/tests/Tests\.fsproj -c Release' -Expected 1
-Assert-JobCount -Job "publisher" -Name "publisher runs the resolver Expecto gate" -Pattern 'dotnet run --project infrastructure/resolver/tests/Tests\.fsproj' -Expected 1
 Assert-JobCount -Job "publisher" -Name "publisher builds each enrolled producer's canonical local distribution" -Pattern '^ {12}& dotnet fsi --nologo "\$releaseDirectory/Build\.fsx"\s*$' -Expected 1
 Assert-JobCount -Job "publisher" -Name "publisher writes each enrolled producer's canonical consumer pin" -Pattern '^ {12}& dotnet fsi --nologo "\$releaseDirectory/Pin\.fsx"\s*$' -Expected 1
 Assert-Before -Job "publisher" -Name "the canonical toolchain is verified before local packaging" -First 'run: pwsh infrastructure/release/Update.ps1 -Verify' -Second '& dotnet fsi --nologo "$releaseDirectory/Build.fsx"'
 Assert-Before -Job "publisher" -Name "the canonical toolchain is verified before the isolated stage is generated" -First 'run: pwsh infrastructure/release/Update.ps1 -Verify' -Second 'id: stage'
 Assert-JobCount -Job "publisher" -Name "the isolated stage takes the verified framework and language version" -Pattern '\$env:MCP_RELEASE_VERIFIED_(TARGET_FRAMEWORK|LANGUAGE_VERSION)' -Expected 2
 Assert-Before -Job "publisher" -Name "each producer is packed before its consumer pin" -First '& dotnet fsi --nologo "$releaseDirectory/Build.fsx"' -Second '& dotnet fsi --nologo "$releaseDirectory/Pin.fsx"'
-Assert-Before -Job "publisher" -Name "local packaging precedes the resolver launch gate" -First '& dotnet fsi --nologo "$releaseDirectory/Pin.fsx"' -Second 'dotnet run --project infrastructure/resolver/tests/Tests.fsproj'
 Assert-Before -Job "publisher" -Name "local packaging precedes the checkout build gates" -First '& dotnet fsi --nologo "$releaseDirectory/Pin.fsx"' -Second 'dotnet build dotnet/Dotnet.fsproj -c Release'
-Assert-JobCount -Job "publisher" -Name "publisher runs the complete compiled release gate" -Pattern '^ {8}run: pwsh infrastructure/release/Test\.ps1\s*$' -Expected 1
 Assert-JobCount -Job "publisher" -Name "publisher typechecks the retained release scripts" -Pattern 'Typecheck\.ps1 -SdkVersion' -Expected 1
 
 # Preparation job: both producers' package gates pass before either candidate transport is uploaded.
@@ -396,7 +377,6 @@ Assert-JobCount -Job "preparation" -Name "preparation job is read-only" -Pattern
 Assert-JobCount -Job "preparation" -Name "preparation checkout disables credential persistence" -Pattern 'persist-credentials: false\s*$' -Expected 1
 Assert-JobCount -Job "preparation" -Name "preparation runs each producer package gate" -Pattern '^ {12}\$entrypoint = "\$componentRoot/tests/distribution/Run\.fsx"\s*$' -Expected 1
 Assert-JobCount -Job "preparation" -Name "preparation derives each component root from its release directory" -Pattern '^ {12}\$componentRoot = Split-Path -Parent \$releaseDirectory\s*$' -Expected 1
-Assert-JobCount -Job "preparation" -Name "preparation runs the Workflow packaged coordination gate" -Pattern 'workflow/tests/coordination/Run\.fsx' -Expected 1
 Assert-JobCount -Job "preparation" -Name "preparation builds the release runner from the checkout" -Pattern 'dotnet build infrastructure/release/Release\.fsproj -c Release' -Expected 1
 Assert-JobCount -Job "preparation" -Name "preparation prepares each enrolled candidate through the canonical CLI" -Pattern '& \$runner prepare \$configPath \$candidate\s*\|' -Expected 1
 Assert-JobCount -Job "preparation" -Name "preparation writes each component's own archive key" -Pattern '^ {12}"archiveName_\$component=\$archiveName" >> \$env:GITHUB_OUTPUT\s*$' -Expected 1
