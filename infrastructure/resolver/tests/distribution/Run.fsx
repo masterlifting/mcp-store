@@ -10,19 +10,12 @@ open System
 open System.Diagnostics
 open System.IO
 open System.IO.Compression
+open SharedFailure
 open DistributionContract
 
 let repoRoot = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "..", "..", ".."))
 let resolverRoot = Path.Combine(repoRoot, "infrastructure", "resolver")
-let config = DistributionBuild.loadConfig (Path.Combine(resolverRoot, "release", "Config.json"))
 let dist = Path.Combine(resolverRoot, "dist")
-let componentId = config.ComponentId
-let archiveName = config.ArchiveName
-let distributionDirectory = Path.Combine(dist, componentId)
-let archivePath = Path.Combine(dist, archiveName)
-let manifestPath = Path.Combine(distributionDirectory, manifestEntryName)
-let pinsPath = Path.Combine(dist, "consumer-pins.json")
-let stalePublishPath = Path.Combine(distributionDirectory, "publish", "stale-output.txt")
 
 let runDotnet (arguments: string list) : Async<string> =
     async {
@@ -99,27 +92,42 @@ let archiveMembers (path: string) : string list =
     finally
         archive.Dispose()
 
-let producer: DistributionTestHelper.Producer =
-    { ComponentId = config.ComponentId
-      Version = config.Version
-      SdkVersion = config.SdkVersion
-      RuntimeVersion = config.RuntimeVersion
-      Platform = config.Platform
-      EntryDll = config.EntryDll
-      ArchiveName = config.ArchiveName
-      AssetUri = config.AssetUri
-      PublishedFiles = config.PublishedFiles
-      LaunchKind = LaunchKind.wireName config.LaunchKind }
-
-let layout: DistributionTestHelper.Layout =
-    { RepoRoot = repoRoot
-      DistributionDirectory = distributionDirectory
-      ArchivePath = archivePath
-      ManifestPath = manifestPath
-      PinsPath = pinsPath }
-
 // Concurrent pipe drains prevent a child script from blocking on redirected output.
 async {
+    let! loaded = DistributionBuild.loadConfig (Path.Combine(resolverRoot, "release", "Config.json"))
+
+    let config =
+        match loaded with
+        | Ok value -> value
+        | Error error -> failwith (ReleaseError.message error)
+
+    let componentId = config.ComponentId
+    let archiveName = config.ArchiveName
+    let distributionDirectory = Path.Combine(dist, componentId)
+    let archivePath = Path.Combine(dist, archiveName)
+    let manifestPath = Path.Combine(distributionDirectory, manifestEntryName)
+    let pinsPath = Path.Combine(dist, "consumer-pins.json")
+    let stalePublishPath = Path.Combine(distributionDirectory, "publish", "stale-output.txt")
+
+    let producer: DistributionTestHelper.Producer =
+        { ComponentId = config.ComponentId
+          Version = config.Version
+          SdkVersion = config.SdkVersion
+          RuntimeVersion = config.RuntimeVersion
+          Platform = config.Platform
+          EntryDll = config.EntryDll
+          ArchiveName = config.ArchiveName
+          AssetUri = config.AssetUri
+          PublishedFiles = config.PublishedFiles
+          LaunchKind = LaunchKind.wireName config.LaunchKind }
+
+    let layout: DistributionTestHelper.Layout =
+        { RepoRoot = repoRoot
+          DistributionDirectory = distributionDirectory
+          ArchivePath = archivePath
+          ManifestPath = manifestPath
+          PinsPath = pinsPath }
+
     let runRoot =
         Path.Combine(Path.GetTempPath(), "opencode", "resolver-distribution-" + Guid.NewGuid().ToString("N"))
 

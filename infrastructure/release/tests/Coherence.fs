@@ -20,8 +20,8 @@ let private withRoot (action: string -> Async<unit>) =
     async {
         let root = Path.Combine(Path.GetTempPath(), "mcp-release-coherence-" + Guid.NewGuid().ToString("N"))
         Directory.CreateDirectory root |> ignore
-        // The production guard resolves the toolchain owners, the documented project exception and every roster
-        // policy under the root it is given, so the scratch root carries those files verbatim.
+        // The production guard resolves the toolchain owners and project files under the root it is given,
+        // so the scratch root carries those files verbatim.
         Fixture.seedCoherenceRoot root
 
         try
@@ -815,7 +815,6 @@ let private coherenceGuardFailsClosedWhenAnOwnerIsMissing =
         let cases =
             [ "global.json", "global.json"
               "Directory.Build.props", "Directory.Build.props"
-              "infrastructure/release/Release.fsproj", "Release.fsproj"
               "dotnet/tests/Tests.fsproj", "dotnet/tests/Tests.fsproj"
               "infrastructure/release/tests/Tests.fsproj", "infrastructure/release/tests/Tests.fsproj"
               "infrastructure/resolver/tests/Tests.fsproj", "infrastructure/resolver/tests/Tests.fsproj" ]

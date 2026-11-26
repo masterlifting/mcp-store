@@ -9,6 +9,7 @@ module ReleasePins
 #load "release/Toolchain.fs"
 #load "release/Policy.fs"
 
+open System.IO
 open SharedFailure
 open BuildProvenance
 open DistributionContract
@@ -24,14 +25,23 @@ let private assertIdentity (field: string) (expected: string) (actual: string) :
 let writeConsumerPins
     (root: string)
     (configPath: string)
-    (manifestPath: string)
-    (archivePath: string)
+    (distRoot: string)
     (outputPath: string)
-    : Async<Result<string * string * string, ReleaseError>> =
+    (missingArtifactHint: string)
+    : Async<Result<string * string * string * string, ReleaseError>> =
     releaseResult {
         // The SDK and runtime versions come from their owners, never from the component policy.
         let! toolchain = ReleaseToolchain.resolveLocal root
         let! policy = ReleasePolicy.parse toolchain configPath
+        let manifestPath = Path.Combine(distRoot, policy.ComponentId, "distribution.json")
+        let archivePath = Path.Combine(distRoot, policy.ArchiveName)
+
+        do!
+            (if File.Exists archivePath && File.Exists manifestPath then
+                 Ok()
+             else
+                 Error(MissingArtifact missingArtifactHint))
+
         do! BuildProvenance.assertCleanTree root
         let! head = BuildProvenance.committedHead root
         let! manifestText = BuildProvenance.readAllTextAsync manifestPath
@@ -65,5 +75,5 @@ let writeConsumerPins
               ProducerPlatform = Some policy.Platform }
 
         do! BuildProvenance.writeJsonAsync outputPath (DistributionPin.toJsonNode pin)
-        return archiveSha256, manifestSha256, manifest.Revision
+        return policy.ArchiveName, archiveSha256, manifestSha256, manifest.Revision
     }

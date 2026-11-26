@@ -2,10 +2,9 @@
 # Pre-SDK projection and post-install verification of the canonical toolchain.
 # `Participants.json` is the only enrollment authority: the projection, the component list, the workflow loops and the
 # CLI paths derive from it, and `*/release/Config.json` stays the only value source for the per-component policy. The
-# shared toolchain comes from its owners: the SDK version from the root `global.json`, and the runtime version derived
-# from the pinned SDK itself, so `-Project` (which runs before any SDK exists) emits no runtime and `-Verify` resolves
-# and reports it after the install. Nothing here evaluates F#, so the projection runs before any SDK exists and the
-# verification needs no separate bootstrap script.
+# shared toolchain comes from its owners: the SDK version from the root `global.json`, and the framework, language and
+# runtime facts from the native MSBuild evaluation, so `-Project` (which runs before any SDK exists) emits none of them
+# and `-Verify` hands over the verified values after the install. Nothing here evaluates F#.
 
 [CmdletBinding(DefaultParameterSetName = "Project")]
 param(
@@ -146,17 +145,6 @@ function Get-Projection {
     return $result
 }
 
-function Get-InstalledSdk {
-    $lines = & dotnet --list-sdks
-    if ($LASTEXITCODE -ne 0) { throw "dotnet --list-sdks failed ($LASTEXITCODE)" }
-
-    foreach ($line in $lines) {
-        if ($line -match '^(?<version>\S+)\s+\[(?<root>.+)\]\s*$') {
-            [pscustomobject]@{ Version = $Matches['version']; Root = $Matches['root'] }
-        }
-    }
-}
-
 function Get-InstalledRuntime {
     $lines = & dotnet --list-runtimes
     if ($LASTEXITCODE -ne 0) { throw "dotnet --list-runtimes failed ($LASTEXITCODE)" }
@@ -189,7 +177,7 @@ $projection = Get-Projection -Participants $roster
 $sdk = Get-OwnedSdkVersion -Root $Root
 $platform = $projection["platform"]
 
-# `$summary` is shared by both modes; the runtime is a property of the installed SDK, so only -Verify adds it.
+# `$summary` is shared by both modes; the verified toolchain values belong to -Verify alone.
 $summary = [ordered]@{
     "RELEASE_SDK"      = $sdk
     "RELEASE_PLATFORM" = $platform
@@ -238,30 +226,34 @@ if ($Component -and ($componentIds -notcontains $Component)) {
 
 $componentLabel = if ($Component) { $Component } else { "all roster participants" }
 
-$installedSdks = @(Get-InstalledSdk)
-$observedSdks = @($installedSdks | ForEach-Object { $_.Version })
-if ($observedSdks -notcontains $sdk) {
-    throw "the canonical SDK '$sdk' is not installed; observed [$($observedSdks -join ', ')]"
-}
-
-# The pinned version resolves to exactly one root (fail closed otherwise), and the runtime is derived from that SDK's own
-# bundled facts with the same element, framework, uniqueness and size rules as the compiled reader.
-$sdkRoot = Select-ToolchainSdkRoot -Version $sdk -Installs $installedSdks
-$runtime = Get-DerivedRuntimeVersion -Root $Root -SdkRoot $sdkRoot
-
-# The SELECTED SDK must be the owner's: `dotnet --version` runs at the repository root so global.json applies, and
-# `Push-Location $Root` keeps a `-Root` override from desynchronising the working directory from the owner it reads.
+# The native evaluation runs at the repository root so global.json selects the SDK and Directory.Build.props supplies the
+# framework and language version; the runtime is the selected SDK's own DefaultRuntimeFrameworkVersion for that framework.
+$releaseProject = Join-Path $Root "infrastructure/release/Release.fsproj"
 Push-Location $Root
 try {
-    $selectedOutput = @(& dotnet --version)
-    if ($LASTEXITCODE -ne 0) { throw "dotnet --version failed ($LASTEXITCODE) at '$Root'; the pinned SDK cannot be selected" }
+    $evaluationOutput = @(& dotnet msbuild $releaseProject -nologo -getProperty:NETCoreSdkVersion,TargetFramework,LangVersion,BundledNETCoreAppTargetFramework -getItem:KnownFrameworkReference)
+    if ($LASTEXITCODE -ne 0) { throw "the MSBuild evaluation of '$releaseProject' failed ($LASTEXITCODE); the pinned SDK cannot be selected" }
 } finally {
     Pop-Location
 }
-$selected = "$($selectedOutput | Select-Object -First 1)".Trim()
-if ($selected -cne $sdk) {
-    throw "the selected SDK is '$selected' where the owner declares '$sdk'"
+try {
+    $evaluation = ($evaluationOutput -join "`n") | ConvertFrom-Json -ErrorAction Stop
+} catch {
+    throw "the MSBuild evaluation of '$releaseProject' is not valid JSON: $($_.Exception.Message)"
 }
+
+$selected = "$($evaluation.Properties.NETCoreSdkVersion)"
+if ($selected -cne $sdk) { throw "the selected SDK is '$selected' where the owner declares '$sdk'" }
+$targetFramework = "$($evaluation.Properties.TargetFramework)"
+if ($targetFramework -cnotmatch '\Anet[0-9]+\.[0-9]+\z') { throw "the evaluated TargetFramework '$targetFramework' is not a plain netX.Y moniker" }
+$languageVersion = "$($evaluation.Properties.LangVersion)"
+if ($languageVersion -cnotmatch '\A[0-9]+\.[0-9]+\z') { throw "the evaluated LangVersion '$languageVersion' is not a plain X.Y version" }
+$bundledFramework = "$($evaluation.Properties.BundledNETCoreAppTargetFramework)"
+if ($bundledFramework -cne $targetFramework) { throw "the SDK-bundled framework '$bundledFramework' differs from the evaluated TargetFramework '$targetFramework'" }
+
+$frameworkReferences = @($evaluation.Items.KnownFrameworkReference | Where-Object { $_.Identity -ceq "Microsoft.NETCore.App" -and $_.TargetFramework -ceq $targetFramework })
+if ($frameworkReferences.Count -ne 1) { throw "expected exactly one KnownFrameworkReference for Microsoft.NETCore.App and '$targetFramework'; found $($frameworkReferences.Count)" }
+$runtime = "$($frameworkReferences[0].DefaultRuntimeFrameworkVersion)"
 
 # The payload is framework-dependent, so the host needs a COMPATIBLE runtime, not the exact derived patch: the same
 # major.minor with a patch at least the derived value. A prerelease never satisfies a stable derived value, because a host
@@ -298,16 +290,20 @@ if ($runningPlatform -ne $platform) {
 
 Write-Host "verified executing toolchain sdk=$sdk runtime=$runtime platform=$platform for $componentLabel"
 
-$summary["RELEASE_RUNTIME"] = $runtime
+# The verified facts are emitted only here, after every check above has passed and before any credential step.
+$verified = [ordered]@{
+    "MCP_RELEASE_VERIFIED_SDK"              = $sdk
+    "MCP_RELEASE_VERIFIED_RUNTIME"          = $runtime
+    "MCP_RELEASE_VERIFIED_TARGET_FRAMEWORK" = $targetFramework
+    "MCP_RELEASE_VERIFIED_LANGUAGE_VERSION" = $languageVersion
+}
 
 if ($env:GITHUB_ENV) {
     Write-KeyValue -Pairs $summary -Target $env:GITHUB_ENV
-    # The SDK root is handed over only here, only after every check above has passed, and before any credential step, so
-    # the publication entry point reads it instead of running the muxer listing with the token in the environment.
-    Write-KeyValue -Pairs ([ordered]@{ $script:ToolchainSdkRootVariable = $sdkRoot }) -Target $env:GITHUB_ENV
+    Write-KeyValue -Pairs $verified -Target $env:GITHUB_ENV
 } else {
     Write-Host "GITHUB_ENV is not set; skipping environment write (local validation mode)"
-    Write-Host "$($script:ToolchainSdkRootVariable)=$sdkRoot"
+    Write-KeyValue -Pairs $verified
 }
 
 exit 0

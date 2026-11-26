@@ -35,7 +35,7 @@ let private fixtureComponents =
 let private repoRoot = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "..", ".."))
 
 // WHY: the canonical SDK version is the single authored owner in the root `global.json`, so the fixture
-//   pin is read from that owner instead of asking the host which SDK happens to be installed.
+//   pin is read from that owner instead of restated; native evaluation must select exactly that SDK.
 let private repositorySdkVersion =
     lazy
         (match ReleaseToolchain.readSdkVersion repoRoot with
@@ -72,12 +72,15 @@ let private write (root: string) (relativePath: string) (contents: string) =
     File.WriteAllText(path, contents)
     path
 
-// The fixture root receives the repository's toolchain owners and a verbatim copy of the canonical root
-// helper, so the coordination gate exercises the trusted redirection instead of a second,
-// test-owned implementation of it.
+// The fixture root receives the repository's toolchain owners, a minimal evaluable release project and a
+// verbatim copy of the canonical root helper, so the coordination gate exercises the trusted redirection
+// instead of a second, test-owned implementation of it. Native evaluation reads the framework and language
+// version from the copied Directory.Build.props, exactly like the canonical project.
 let private writeFixtureRuntime (root: string) =
     for relativePath in [ "global.json"; "Directory.Build.props" ] do
         File.Copy(Path.Combine(repoRoot, relativePath), Path.Combine(root, relativePath), true)
+
+    write root "infrastructure/release/Release.fsproj" "<Project Sdk=\"Microsoft.NET.Sdk\" />" |> ignore
 
     let source = Path.Combine(repoRoot, "Run.ps1")
 
@@ -135,6 +138,30 @@ let private parsePolicy (toolchain: ReleaseToolchain.Toolchain) configPath =
     |> function
         | Ok policy -> policy
         | Error error -> failwithf "fixture policy failed to parse: %s" (SharedFailure.ReleaseError.message error)
+
+// Native evaluation refuses to start beside a publication credential, so the in-process preparation fixtures run
+// credential-free; the dedicated authority probe owns the refusal case.
+let private withoutPublicationAuthority (action: unit -> Async<'a>) =
+    async {
+        let names = [ "GITHUB_TOKEN"; "MCP_RELEASE_DO_UPLOAD" ]
+        let previous = names |> List.map (fun name -> name, Environment.GetEnvironmentVariable name)
+
+        try
+            names |> List.iter (fun name -> Environment.SetEnvironmentVariable(name, null))
+            return! action ()
+        finally
+            for name, value in previous do
+                Environment.SetEnvironmentVariable(name, value)
+    }
+
+// Preparation now resolves the toolchain by native evaluation, so the fixture manifest must be written with the
+// same evaluated SDK and runtime or its producer identity would disagree with preparation.
+let private resolveFixtureToolchain (root: string) =
+    async {
+        match! withoutPublicationAuthority (fun () -> ReleaseToolchain.resolveLocal root) with
+        | Ok toolchain -> return toolchain
+        | Error error -> return failwithf "the fixture toolchain could not be resolved: %s" (SharedFailure.ReleaseError.message error)
+    }
 
 // The dist output is owned by the component root the canonical config path names, so the nested
 // Resolver writes `infrastructure/resolver/dist` instead of a flat `resolver/` directory.
@@ -437,23 +464,25 @@ let private writeFixture (root: string) (failure: StageFailure option) =
         // The packaged manifest must carry the committed HEAD, so the data-only dist
         // output is generated after the source commit, mirroring production order.
         let! head = runGitHead root
+        let! toolchain = resolveFixtureToolchain root
 
         for componentRecord in fixtureComponents do
             let configPath = Path.Combine(root, componentRecord.ConfigPath)
-            writeProducerArchive root (parsePolicy Fixture.canonicalToolchain configPath) head
+            writeProducerArchive root (parsePolicy toolchain configPath) head
     }
 
 let private runPrepare root configPath outputPath =
-    async {
-        let previous = Console.Out
-        use output = new StringWriter()
-        try
-            Console.SetOut output
-            let! exitCode = ReleaseOrchestration.prepare root configPath outputPath
-            return exitCode, output.ToString()
-        finally
-            Console.SetOut previous
-    }
+    withoutPublicationAuthority (fun () ->
+        async {
+            let previous = Console.Out
+            use output = new StringWriter()
+            try
+                Console.SetOut output
+                let! exitCode = ReleaseOrchestration.prepare root configPath outputPath
+                return exitCode, output.ToString()
+            finally
+                Console.SetOut previous
+        })
 
 // The coordination gate must refuse to run outside the canonical wrapper. The fixture proves that
 // refusal with a direct child that carries no isolation contract; the gate reads no key material.

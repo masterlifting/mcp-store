@@ -13,12 +13,10 @@ open DistributionContract
 
 let repoRoot = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "..", ".."))
 
-// The canonical toolchain expectation is resolved from its owners (`global.json` and the pinned SDK),
-// never restated as a copied literal. Product identity below stays an independent expectation.
-let canonicalToolchain =
-    match ReleaseToolchain.resolveLocalSynchronously repoRoot with
-    | Ok toolchain -> toolchain
-    | Error error -> failwithf "the canonical toolchain owner could not be resolved: %s" (ReleaseError.message error)
+// A synthetic fixture toolchain keeps policy and manifest fixtures independent of the installed SDK.
+// Live toolchain checks derive their expectations from the authored owner and native evaluation instead.
+let canonicalToolchain : ReleaseToolchain.Toolchain =
+    { SdkVersion = "6.5.4"; RuntimeVersion = "6.5.3" }
 
 // Canonical v2 fixture identity. Emission goes through the shared renderer so the
 // synthetic bytes are the exact contract the producers emit, never a parallel shape.

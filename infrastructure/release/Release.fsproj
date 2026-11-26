@@ -1,12 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <!-- Documented exception: the publisher stage excludes repository-wide build props, so the framework and language
-         version stay here. Check.ps1 fails when these two values differ from the root Directory.Build.props owner. -->
-    <TargetFramework>net11.0</TargetFramework>
     <OutputType>Exe</OutputType>
     <AssemblyName>ReleaseRunner</AssemblyName>
     <RootNamespace>Release</RootNamespace>
-    <LangVersion>9.0</LangVersion>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <DebugType>None</DebugType>

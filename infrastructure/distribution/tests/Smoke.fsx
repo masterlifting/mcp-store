@@ -242,7 +242,13 @@ let assertWorkspaceSdkIsHonored (workspace: string) : Async<unit> =
 
 let runProducer (runRoot: string) (producer: string) : Async<unit> =
     async {
-        let policy = loadConfig (Path.Combine(repoRoot, producer, "release", "Config.json"))
+        let! loaded = loadConfig (Path.Combine(repoRoot, producer, "release", "Config.json"))
+
+        let policy =
+            match loaded with
+            | Ok value -> value
+            | Error error -> failwith (ReleaseError.message error)
+
         let archivePath = Path.Combine(repoRoot, producer, "dist", policy.ArchiveName)
         let extractionRoot = Path.Combine(runRoot, "extraction root", policy.ComponentId)
         let workspace = Path.Combine(runRoot, "workspace root", policy.ComponentId)

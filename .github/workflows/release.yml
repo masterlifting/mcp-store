@@ -124,6 +124,13 @@ jobs:
             $generated.Add("    " + $property.OuterXml)
           }
           # The staged sources live under `src`, so the SDK's default glob must not add a second unordered item set.
+          # The stage imports no repository build props, so it takes the framework and language version `Update.ps1 -Verify` evaluated.
+          $targetFramework = $env:MCP_RELEASE_VERIFIED_TARGET_FRAMEWORK
+          $languageVersion = $env:MCP_RELEASE_VERIFIED_LANGUAGE_VERSION
+          if ($targetFramework -cnotmatch '\Anet[0-9]+\.[0-9]+\z') { throw "the verified TargetFramework '$targetFramework' is missing or not a plain netX.Y moniker" }
+          if ($languageVersion -cnotmatch '\A[0-9]+\.[0-9]+\z') { throw "the verified LangVersion '$languageVersion' is missing or not a plain X.Y version" }
+          $generated.Add("    <TargetFramework>$targetFramework</TargetFramework>")
+          $generated.Add("    <LangVersion>$languageVersion</LangVersion>")
           $generated.Add('    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>')
           $generated.Add('  </PropertyGroup>')
           $generated.Add('  <ItemGroup>')

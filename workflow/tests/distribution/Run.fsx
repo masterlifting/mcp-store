@@ -5,18 +5,11 @@
 open System
 open System.Diagnostics
 open System.IO
+open SharedFailure
 
 let repoRoot = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "..", ".."))
 let workflow = Path.Combine(repoRoot, "workflow")
-let config = DistributionBuild.loadConfig (Path.Combine(workflow, "release", "Config.json"))
 let dist = Path.Combine(workflow, "dist")
-let componentId = config.ComponentId
-let archiveName = config.ArchiveName
-let distributionDirectory = Path.Combine(dist, componentId)
-let archivePath = Path.Combine(dist, archiveName)
-let manifestPath = Path.Combine(distributionDirectory, "distribution.json")
-let pinsPath = Path.Combine(dist, "consumer-pins.json")
-let stalePublishPath = Path.Combine(distributionDirectory, "publish", "stale-output.txt")
 
 let runScript path : Async<string> =
     async {
@@ -38,41 +31,56 @@ let runScript path : Async<string> =
         return output
     }
 
-let producer: DistributionTestHelper.Producer =
-    { ComponentId = config.ComponentId
-      Version = config.Version
-      SdkVersion = config.SdkVersion
-      RuntimeVersion = config.RuntimeVersion
-      Platform = config.Platform
-      EntryDll = config.EntryDll
-      ArchiveName = config.ArchiveName
-      AssetUri = config.AssetUri
-      PublishedFiles = config.PublishedFiles
-      LaunchKind = DistributionContract.LaunchKind.wireName config.LaunchKind }
-
-// The helper checks manifest consistency only, so each entrypoint pins its own launch role.
-DistributionTestHelper.assertEqual
-    "the workflow package is an MCP launch target"
-    DistributionContract.DotnetExec
-    config.LaunchKind
-
-let layout: DistributionTestHelper.Layout =
-    { RepoRoot = repoRoot
-      DistributionDirectory = distributionDirectory
-      ArchivePath = archivePath
-      ManifestPath = manifestPath
-      PinsPath = pinsPath }
-
 // Concurrent pipe drains prevent a child script from blocking on redirected output.
 async {
+    let! loaded = DistributionBuild.loadConfig (Path.Combine(workflow, "release", "Config.json"))
+
+    let config =
+        match loaded with
+        | Ok value -> value
+        | Error error -> failwith (ReleaseError.message error)
+
+    let componentId = config.ComponentId
+    let archiveName = config.ArchiveName
+    let distributionDirectory = Path.Combine(dist, componentId)
+    let archivePath = Path.Combine(dist, archiveName)
+    let manifestPath = Path.Combine(distributionDirectory, "distribution.json")
+    let pinsPath = Path.Combine(dist, "consumer-pins.json")
+    let stalePublishPath = Path.Combine(distributionDirectory, "publish", "stale-output.txt")
+
+    let producer: DistributionTestHelper.Producer =
+        { ComponentId = config.ComponentId
+          Version = config.Version
+          SdkVersion = config.SdkVersion
+          RuntimeVersion = config.RuntimeVersion
+          Platform = config.Platform
+          EntryDll = config.EntryDll
+          ArchiveName = config.ArchiveName
+          AssetUri = config.AssetUri
+          PublishedFiles = config.PublishedFiles
+          LaunchKind = DistributionContract.LaunchKind.wireName config.LaunchKind }
+
+    // The helper checks manifest consistency only, so each entrypoint pins its own launch role.
+    DistributionTestHelper.assertEqual
+        "the workflow package is an MCP launch target"
+        DistributionContract.DotnetExec
+        config.LaunchKind
+
+    let layout: DistributionTestHelper.Layout =
+        { RepoRoot = repoRoot
+          DistributionDirectory = distributionDirectory
+          ArchivePath = archivePath
+          ManifestPath = manifestPath
+          PinsPath = pinsPath }
+
     let! generation =
         async {
-        Directory.CreateDirectory(Path.GetDirectoryName stalePublishPath) |> ignore
-        File.WriteAllText(stalePublishPath, "stale staging output")
-        let! _ = runScript (Path.Combine(workflow, "release", "Build.fsx"))
-        DistributionTestHelper.assertTrue "regeneration removes workflow staging output" (not (File.Exists stalePublishPath))
-        let! _ = runScript (Path.Combine(workflow, "release", "Pin.fsx"))
-        return ()
+            Directory.CreateDirectory(Path.GetDirectoryName stalePublishPath) |> ignore
+            File.WriteAllText(stalePublishPath, "stale staging output")
+            let! _ = runScript (Path.Combine(workflow, "release", "Build.fsx"))
+            DistributionTestHelper.assertTrue "regeneration removes workflow staging output" (not (File.Exists stalePublishPath))
+            let! _ = runScript (Path.Combine(workflow, "release", "Pin.fsx"))
+            return ()
         }
         |> Async.Catch
 

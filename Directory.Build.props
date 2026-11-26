@@ -1,9 +1,7 @@
 <Project>
   <!-- The single owner of the target framework, the F# language version and the Expecto package version.
-       The property set is closed: a new property is a coordinated edit of infrastructure/release/Toolchain.fs,
-       infrastructure/release/Toolchain.ps1 and every reader. infrastructure/release/Release.fsproj keeps its own
-       TargetFramework and LangVersion because the publisher stage excludes repository-wide build props; the
-       release coherence check fails when those two values differ from this file. -->
+       The publisher stage excludes repository-wide build props and receives the evaluated framework and language
+       version from `Update.ps1 -Verify`. -->
   <PropertyGroup>
     <TargetFramework>net11.0</TargetFramework>
     <LangVersion>9.0</LangVersion>

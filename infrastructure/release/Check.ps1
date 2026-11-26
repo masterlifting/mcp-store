@@ -176,8 +176,8 @@ if ($unixText -match 'workflow_dispatch') {
 
 # One authored version for the .NET toolchain. The SDK selection is owned by `global.json`, the framework, the language
 # version and the Expecto version by `Directory.Build.props`, and the runtime is derived from the pinned SDK. This runs at
-# step 2 of the publisher job, BEFORE the SDK is installed, so it only reads files: it must not run `dotnet --version`, which
-# fails under `rollForward: disable` on a runner without the exact SDK. The selected-SDK assertion lives in `Update.ps1 -Verify`.
+# step 2 of the publisher job, BEFORE the SDK is installed, so it only reads files: it must not run `dotnet`, which
+# fails under `rollForward: disable` on a runner without the exact SDK. The native evaluation lives in `Update.ps1 -Verify`.
 function Assert-Toolchain {
     param([Parameter(Mandatory = $true)][string]$Name, [Parameter(Mandatory = $true)][scriptblock]$Check)
 
@@ -191,8 +191,6 @@ function Assert-Toolchain {
 
 # A missing owner fails closed; it is never skipped.
 Assert-Toolchain -Name "global.json is the strict SDK owner" -Check { $null = Get-OwnedSdkVersion -Root $Root }
-Assert-Toolchain -Name "Directory.Build.props is the strict framework, language and Expecto owner" -Check { $null = Get-OwnedBuildProperties -Root $Root }
-$ownedProperties = Get-OwnedBuildProperties -Root $Root
 
 $ignoredDirectories = @(".git", "bin", "obj", "node_modules", ".venv")
 function Get-RepositoryFiles {
@@ -225,25 +223,14 @@ Assert-Toolchain -Name "exactly one Directory.Build.props and no competing build
 }
 
 $projectFiles = @($repositoryFiles | Where-Object { $_ -like "*.fsproj" })
-$releaseProject = Join-Path $Root "infrastructure/release/Release.fsproj"
 Assert-Toolchain -Name "no project re-declares the owned framework or language version" -Check {
     foreach ($project in $projectFiles) {
         $relative = & $relativeOf $project
-        if ($relative -ceq "infrastructure/release/Release.fsproj") { continue }
         $content = [System.IO.File]::ReadAllText($project)
         if ($content -match '<TargetFrameworks?[\s>]') { throw "$relative re-declares TargetFramework or TargetFrameworks; Directory.Build.props owns it" }
         if ($content -match '<LangVersion[\s>]') { throw "$relative re-declares LangVersion; Directory.Build.props owns it" }
         if ($content -imatch '<OtherFlags>[^<]*--langversion') { throw "$relative re-declares the language version through OtherFlags; Directory.Build.props owns it" }
     }
-}
-Assert-Toolchain -Name "the documented Release.fsproj exception equals the owner" -Check {
-    if (-not (Test-Path -LiteralPath $releaseProject -PathType Leaf)) { throw "infrastructure/release/Release.fsproj is missing" }
-    [xml]$release = Get-Content -LiteralPath $releaseProject -Raw
-    $frameworks = @($release.SelectNodes("//PropertyGroup/TargetFramework"))
-    $languages = @($release.SelectNodes("//PropertyGroup/LangVersion"))
-    if ($frameworks.Count -ne 1 -or $languages.Count -ne 1) { throw "Release.fsproj must declare exactly one TargetFramework and one LangVersion" }
-    if ($frameworks[0].InnerText -cne $ownedProperties.TargetFramework) { throw "Release.fsproj TargetFramework '$($frameworks[0].InnerText)' differs from the owner '$($ownedProperties.TargetFramework)'" }
-    if ($languages[0].InnerText -cne $ownedProperties.LangVersion) { throw "Release.fsproj LangVersion '$($languages[0].InnerText)' differs from the owner '$($ownedProperties.LangVersion)'" }
 }
 Assert-Toolchain -Name "every test PackageReference takes the owned Expecto version" -Check {
     foreach ($relative in @("dotnet/tests/Tests.fsproj", "infrastructure/release/tests/Tests.fsproj", "infrastructure/resolver/tests/Tests.fsproj")) {
@@ -396,6 +383,8 @@ Assert-JobCount -Job "publisher" -Name "publisher runs the resolver Expecto gate
 Assert-JobCount -Job "publisher" -Name "publisher builds each enrolled producer's canonical local distribution" -Pattern '^ {12}& dotnet fsi --nologo "\$releaseDirectory/Build\.fsx"\s*$' -Expected 1
 Assert-JobCount -Job "publisher" -Name "publisher writes each enrolled producer's canonical consumer pin" -Pattern '^ {12}& dotnet fsi --nologo "\$releaseDirectory/Pin\.fsx"\s*$' -Expected 1
 Assert-Before -Job "publisher" -Name "the canonical toolchain is verified before local packaging" -First 'run: pwsh infrastructure/release/Update.ps1 -Verify' -Second '& dotnet fsi --nologo "$releaseDirectory/Build.fsx"'
+Assert-Before -Job "publisher" -Name "the canonical toolchain is verified before the isolated stage is generated" -First 'run: pwsh infrastructure/release/Update.ps1 -Verify' -Second 'id: stage'
+Assert-JobCount -Job "publisher" -Name "the isolated stage takes the verified framework and language version" -Pattern '\$env:MCP_RELEASE_VERIFIED_(TARGET_FRAMEWORK|LANGUAGE_VERSION)' -Expected 2
 Assert-Before -Job "publisher" -Name "each producer is packed before its consumer pin" -First '& dotnet fsi --nologo "$releaseDirectory/Build.fsx"' -Second '& dotnet fsi --nologo "$releaseDirectory/Pin.fsx"'
 Assert-Before -Job "publisher" -Name "local packaging precedes the resolver launch gate" -First '& dotnet fsi --nologo "$releaseDirectory/Pin.fsx"' -Second 'dotnet run --project infrastructure/resolver/tests/Tests.fsproj'
 Assert-Before -Job "publisher" -Name "local packaging precedes the checkout build gates" -First '& dotnet fsi --nologo "$releaseDirectory/Pin.fsx"' -Second 'dotnet build dotnet/Dotnet.fsproj -c Release'
@@ -455,9 +444,9 @@ Assert-JobCount -Job "publication" -Name "publication uploads one metadata evide
 
 # Ordering: every transport arrives through the pinned action, and the downloaded member set is proven against the
 # independent declaration before anything from it executes.
-# The verification step resolves the SDK root and hands it over through MCP_RELEASE_SDK_ROOT, so it must run before the
-# runner's publish invocation (otherwise `publish` has no root) and before the step that declares the credential (otherwise
-# its muxer listing would run with the token in the environment). The token stays step-scoped: a job-level env block would
+# The verification step hands the verified SDK and runtime over through MCP_RELEASE_VERIFIED_*, so it must run before the
+# runner's publish invocation (otherwise `publish` has no handoff) and before the step that declares the credential (otherwise
+# its evaluation would run with the token in the environment). The token stays step-scoped: a job-level env block would
 # put it in every step, including the verification.
 Assert-Before -Job "publication" -Name "the toolchain is verified before the verified publisher is invoked" -First 'run: pwsh infrastructure/release/Update.ps1 -Verify' -Second '& $runner publish $configPath $candidateRoot'
 Assert-Before -Job "publication" -Name "the toolchain is verified before the step that declares the credential" -First 'run: pwsh infrastructure/release/Update.ps1 -Verify' -Second 'GITHUB_TOKEN: ${{ github.token }}'

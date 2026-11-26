@@ -44,8 +44,8 @@ let private runChild (root: string) (scrubEnvVars: string list) (executable: str
     }
 
 // Parse canonical producer policy without executing producer-authored code.
-// Preparation holds no publication credential, so it resolves the toolchain locally from its owners; a handed-over
-// MCP_RELEASE_SDK_ROOT must agree with that local resolution.
+// Preparation holds no publication credential, so it resolves the toolchain by native evaluation; a handed-over
+// verified SDK/runtime pair must agree with that evaluation.
 let private loadProducerConfig (root: string) (configPath: string) : Async<Result<ReleasePolicy.PolicyProjection, ReleaseError>> =
     async {
         let absolute = Path.GetFullPath(Path.Combine(root, configPath))

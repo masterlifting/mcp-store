@@ -41,7 +41,6 @@ let private topLevelBridgeSites =
         [ "infrastructure/release/Runner.fs",
           [ "runPrepareMode argv |> Async.RunSynchronously"
             "runPublishMode argv |> Async.RunSynchronously" ]
-          "infrastructure/release/Toolchain.fs", [ "resolveLocal repositoryRoot |> Async.RunSynchronously" ]
           "dotnet/release/Build.fsx", [ "match run () |> Async.RunSynchronously with" ]
           "dotnet/release/Pin.fsx", [ "match run () |> Async.RunSynchronously with" ]
           "dotnet/tests/distribution/Run.fsx", [ "|> Async.RunSynchronously" ]

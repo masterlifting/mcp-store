@@ -1,21 +1,17 @@
 // role: reusable module/helper
-// Strict reader for the shared .NET toolchain owners: the SDK version authored in the root `global.json`, the target
-// framework, F# language version and Expecto version authored in the root `Directory.Build.props`, and the runtime
-// version derived from the pinned SDK's own `Microsoft.NETCoreSdk.BundledVersions.props`.
-// The reader takes the SDK root as an explicit input and never discovers it. Discovery is a separate, process-spawning
-// step (`discoverSdkRoot`) that only credential-free entry points call; the publication entry point reads the root
-// handed over in `MCP_RELEASE_SDK_ROOT` and has no reachable path to the muxer listing.
-// The PowerShell mirror `Toolchain.ps1` applies the same rules; both must change together.
+// The shared .NET toolchain facts. The SDK, target framework, language version and the unique `Microsoft.NETCore.App`
+// framework reference are evaluated by the native MSBuild resolver on the release project, so no SDK root, listing or
+// bundled-versions file is discovered or parsed here. The only authored owner read is the SDK version in the root
+// `global.json`, used to confirm that the evaluated SDK is the exact stable selection.
+// Evaluation is a process-spawning step that only credential-free entry points call; the publication entry point
+// consumes the verified handoff and has no reachable path to a subprocess.
 module ReleaseToolchain
 
 open System
 open System.Collections.Generic
 open System.IO
-open System.Text
 open System.Text.Json
 open System.Text.RegularExpressions
-open System.Xml
-open System.Xml.Linq
 open SharedFailure
 open BuildProvenance
 
@@ -24,32 +20,35 @@ type Toolchain =
     { SdkVersion: string
       RuntimeVersion: string }
 
-// The closed property set of the root `Directory.Build.props`.
-type BuildProperties =
-    { TargetFramework: string
+// The values read from one native evaluation of the release project.
+type Evaluation =
+    { EvaluatedSdkVersion: string
+      TargetFramework: string
       LangVersion: string
-      ExpectoVersion: string }
-
-// One `dotnet --list-sdks` line.
-type SdkInstall = { Version: string; Root: string }
-
-// The facts read from one SDK's `Microsoft.NETCoreSdk.BundledVersions.props`.
-type BundledFacts =
-    { BundledTargetFramework: string
+      BundledTargetFramework: string
       DefaultRuntimeFrameworkVersion: string }
 
 let globalJsonName = "global.json"
-let buildPropsName = "Directory.Build.props"
-let bundledVersionsName = "Microsoft.NETCoreSdk.BundledVersions.props"
 
-// The single named channel through which the publication entry point receives the SDK root.
-let sdkRootVariable = "MCP_RELEASE_SDK_ROOT"
+// Written only by the credential-free verification step after its checks; both are required for publication.
+let verifiedSdkVariable = "MCP_RELEASE_VERIFIED_SDK"
+let verifiedRuntimeVariable = "MCP_RELEASE_VERIFIED_RUNTIME"
 
-// The closed `Directory.Build.props` property set. `Toolchain.ps1` carries the one PowerShell copy.
-let buildPropertyNames = [ "TargetFramework"; "LangVersion"; "ExpectoVersion" ]
+// The release project that native evaluation reads, relative to the trusted repository root.
+let evaluatedProjectPath = "infrastructure/release/Release.fsproj"
+
+let evaluationArguments : string list =
+    [ "msbuild"
+      evaluatedProjectPath
+      "-nologo"
+      "-getProperty:NETCoreSdkVersion,TargetFramework,LangVersion,BundledNETCoreAppTargetFramework"
+      "-getItem:KnownFrameworkReference" ]
+
+// Native evaluation must never run beside a publication credential.
+let private publicationAuthorityNames = [ "GITHUB_TOKEN"; "MCP_RELEASE_DO_UPLOAD" ]
 
 let maxOwnerBytes = 16 * 1024
-let maxBundledVersionsBytes = 4 * 1024 * 1024
+let maxEvaluationBytes = 4 * 1024 * 1024
 
 let private versionToken =
     Regex(@"\A[0-9]+(\.[0-9]+)*(-[0-9A-Za-z]+(\.[0-9A-Za-z]+)*)?\z", RegexOptions.CultureInvariant)
@@ -59,9 +58,9 @@ let private languageToken = Regex(@"\A[0-9]+\.[0-9]+\z", RegexOptions.CultureInv
 
 let private malformed path detail = Error(MalformedArtifact(path, detail))
 
-// A version that is joined into a path under the SDK root is accepted only in this exact shape: digits separated by
-// dots with an optional dot-separated alphanumeric prerelease label. `..`, either separator, an empty component, a
-// trailing dot, a drive prefix and a bare prerelease label never match.
+// A version that is handed over or compared is accepted only in this exact shape: digits separated by dots with an
+// optional dot-separated alphanumeric prerelease label. `..`, either separator, an empty component, a trailing dot, a
+// drive prefix and a bare prerelease label never match.
 let isVersionToken (value: string) : bool =
     not (isNull value) && versionToken.IsMatch value
 
@@ -172,258 +171,153 @@ let parseGlobalJson (path: string) (bytes: byte[]) : Result<string, ReleaseError
         with :? JsonException as error ->
             malformed path $"the file is not valid strict JSON: {error.Message}"
 
-let private loadXml (path: string) (bytes: byte[]) : Result<XDocument, ReleaseError> =
-    try
-        let settings = XmlReaderSettings()
-        settings.DtdProcessing <- DtdProcessing.Prohibit
-        settings.IgnoreComments <- true
-        settings.IgnoreProcessingInstructions <- true
-        settings.MaxCharactersInDocument <- 8000000L
-        use stream = new MemoryStream(bytes, false)
-        use reader = XmlReader.Create(stream, settings)
-        Ok(XDocument.Load reader)
-    with :? XmlException as error ->
-        malformed path $"the file is not well-formed XML: {error.Message}"
-
-// `Directory.Build.props` is the owner of exactly {TargetFramework, LangVersion, ExpectoVersion}: one property group of
-// plain text elements, no attribute, no repeated or unknown property and a well-formed value for each.
-let parseBuildProps (path: string) (bytes: byte[]) : Result<BuildProperties, ReleaseError> =
-    match checkBounded path maxOwnerBytes bytes with
-    | Error error -> Error error
-    | Ok() ->
-        match loadXml path bytes with
-        | Error error -> Error error
-        | Ok document ->
-            let root = document.Root
-
-            if isNull root || root.Name <> XName.Get "Project" then
-                malformed path "the root element must be an un-namespaced <Project>"
-            elif root.HasAttributes then
-                malformed path "the <Project> element must carry no attribute"
-            else
-                let groups = root.Elements() |> Seq.toList
-
-                match groups with
-                | [ group ] when group.Name = XName.Get "PropertyGroup" && not group.HasAttributes ->
-                    let properties = group.Elements() |> Seq.toList
-                    let values = Dictionary<string, string>(StringComparer.Ordinal)
-                    let mutable failure: string option = None
-
-                    for property in properties do
-                        let name = property.Name.LocalName
-
-                        if failure.IsNone then
-                            if property.Name.Namespace <> XNamespace.None || not (List.contains name buildPropertyNames) then
-                                failure <- Some $"the unknown property '{name}' is not allowed"
-                            elif values.ContainsKey name then
-                                failure <- Some $"the property '{name}' is repeated"
-                            elif property.HasAttributes || property.HasElements then
-                                failure <- Some $"the property '{name}' must be plain text"
-                            elif property.Value <> property.Value.Trim() || property.Value.Length = 0 then
-                                failure <- Some $"the property '{name}' must be a non-empty value without surrounding whitespace"
-                            else
-                                values.Add(name, property.Value)
-
-                    match failure with
-                    | Some detail -> malformed path detail
-                    | None ->
-                        match buildPropertyNames |> List.tryFind (fun name -> not (values.ContainsKey name)) with
-                        | Some name -> malformed path $"the property '{name}' is missing"
-                        | None ->
-                            let framework = values["TargetFramework"]
-                            let language = values["LangVersion"]
-                            let expecto = values["ExpectoVersion"]
-
-                            if not (frameworkToken.IsMatch framework) then
-                                malformed path $"the TargetFramework value '{framework}' is not a plain netX.Y moniker"
-                            elif not (languageToken.IsMatch language) then
-                                malformed path $"the LangVersion value '{language}' is not a plain X.Y version"
-                            elif not (isVersionToken expecto) then
-                                malformed path $"the ExpectoVersion value '{expecto}' is not a plain version token"
-                            else
-                                Ok
-                                    { TargetFramework = framework
-                                      LangVersion = language
-                                      ExpectoVersion = expecto }
-                | _ -> malformed path "the <Project> must contain exactly one attribute-free <PropertyGroup>"
-
-// The SDK-bundled facts. `KnownFrameworkReference` is matched by exact element name, `Include` and `TargetFramework`
-// together, because `KnownRuntimePack` carries the same `Include` and `TargetFramework` and a loose filter would match
-// twice. Exactly one reference must match and it must name a plain `DefaultRuntimeFrameworkVersion`. The SDK's own
-// `BundledNETCoreAppTargetFramework` must equal the owned framework, so a drifted framework fails closed instead of
-// silently selecting a different reference.
-let parseBundledVersions (path: string) (targetFramework: string) (bytes: byte[]) : Result<BundledFacts, ReleaseError> =
-    match checkBounded path maxBundledVersionsBytes bytes with
-    | Error error -> Error error
-    | Ok() ->
-        match loadXml path bytes with
-        | Error error -> Error error
-        | Ok document ->
-            let elements (name: string) =
-                document.Descendants() |> Seq.filter (fun element -> element.Name.LocalName = name) |> Seq.toList
-
-            let attribute (element: XElement) (name: string) =
-                match element.Attribute(XName.Get name) with
-                | null -> None
-                | value -> Some value.Value
-
-            let references =
-                elements "KnownFrameworkReference"
-                |> List.filter (fun element ->
-                    attribute element "Include" = Some "Microsoft.NETCore.App"
-                    && attribute element "TargetFramework" = Some targetFramework)
-
-            let bundledFrameworks = elements "BundledNETCoreAppTargetFramework"
-
-            match references, bundledFrameworks with
-            | [], _ ->
-                malformed path $"no KnownFrameworkReference for Microsoft.NETCore.App and '{targetFramework}' exists"
-            | _ :: _ :: _, _ ->
-                malformed path $"more than one KnownFrameworkReference for Microsoft.NETCore.App and '{targetFramework}' exists"
-            | [ reference ], [ bundled ] ->
-                match attribute reference "DefaultRuntimeFrameworkVersion" with
-                | None -> malformed path "the matching KnownFrameworkReference carries no DefaultRuntimeFrameworkVersion"
-                | Some value when not (isVersionToken value) ->
-                    malformed path $"the DefaultRuntimeFrameworkVersion value '{value}' is not a plain version token"
-                | Some value when bundled.Value <> targetFramework ->
-                    malformed path $"the SDK's BundledNETCoreAppTargetFramework '{bundled.Value}' differs from the owned target framework '{targetFramework}'"
-                | Some value ->
-                    Ok
-                        { BundledTargetFramework = bundled.Value
-                          DefaultRuntimeFrameworkVersion = value }
-            | [ _ ], _ ->
-                malformed path "the SDK must declare exactly one BundledNETCoreAppTargetFramework"
-
 let globalJsonPath (repositoryRoot: string) = Path.Combine(repositoryRoot, globalJsonName)
-let buildPropsPath (repositoryRoot: string) = Path.Combine(repositoryRoot, buildPropsName)
 
 // The authored SDK version, read without any SDK or process.
 let readSdkVersion (repositoryRoot: string) : Result<string, ReleaseError> =
     let path = globalJsonPath repositoryRoot
     readBounded path maxOwnerBytes |> Result.bind (parseGlobalJson path)
 
-let readBuildProperties (repositoryRoot: string) : Result<BuildProperties, ReleaseError> =
-    let path = buildPropsPath repositoryRoot
-    readBounded path maxOwnerBytes |> Result.bind (parseBuildProps path)
-
-// The toolchain from the owners and one explicit SDK root: the SDK version from `global.json`, the framework from
-// `Directory.Build.props`, and the runtime from the pinned SDK's bundled facts under that root. No process is spawned.
-let resolveWithRoot (repositoryRoot: string) (sdkRoot: string) : Result<Toolchain, ReleaseError> =
-    match readSdkVersion repositoryRoot, readBuildProperties repositoryRoot with
-    | Error error, _ -> Error error
-    | _, Error error -> Error error
-    | Ok sdkVersion, Ok properties ->
-        if String.IsNullOrWhiteSpace sdkRoot || not (Path.IsPathRooted sdkRoot) then
-            Error(UsageRejected $"the SDK root '{sdkRoot}' must be an absolute path")
-        else
-            // The version token is validated by the global.json reader, so this join cannot leave the SDK root.
-            let propsPath = Path.Combine(sdkRoot, sdkVersion, bundledVersionsName)
-
-            readBounded propsPath maxBundledVersionsBytes
-            |> Result.bind (parseBundledVersions propsPath properties.TargetFramework)
-            |> Result.map (fun facts ->
-                { SdkVersion = sdkVersion
-                  RuntimeVersion = facts.DefaultRuntimeFrameworkVersion })
-
-let private normalizeRoot (root: string) =
-    Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
-
-let private sameRoot (left: string) (right: string) =
-    let comparison =
-        if OperatingSystem.IsWindows() then StringComparison.OrdinalIgnoreCase else StringComparison.Ordinal
-
-    String.Equals(normalizeRoot left, normalizeRoot right, comparison)
-
-let private listingLine = Regex(@"^(?<version>\S+)\s+\[(?<root>.+)\]\s*$", RegexOptions.CultureInvariant)
-
-// Parses `dotnet --list-sdks` output; lines that are not an installation entry are ignored.
-let parseSdkListing (output: string) : SdkInstall list =
-    if String.IsNullOrEmpty output then
-        []
+// Decodes the JSON that `dotnet msbuild -getProperty -getItem` prints. Exactly one `KnownFrameworkReference` for
+// `Microsoft.NETCore.App` at the evaluated framework must exist and carry a plain `DefaultRuntimeFrameworkVersion`; the
+// SDK-bundled framework must equal the evaluated one, so a drifted framework fails closed.
+let parseEvaluation (source: string) (output: string) : Result<Evaluation, ReleaseError> =
+    if String.IsNullOrWhiteSpace output then
+        malformed source "the evaluation produced no output"
+    elif output.Length > maxEvaluationBytes then
+        malformed source $"the evaluation output exceeds the bounded maximum of {maxEvaluationBytes} characters"
     else
-        output.Split([| '\r'; '\n' |], StringSplitOptions.RemoveEmptyEntries)
-        |> Array.choose (fun line ->
-            let found = listingLine.Match(line.Trim())
+        try
+            use document = JsonDocument.Parse output
+            let root = document.RootElement
 
-            if found.Success then
-                Some { Version = found.Groups["version"].Value; Root = found.Groups["root"].Value }
-            else
-                None)
-        |> Array.toList
+            let text (element: JsonElement) (name: string) =
+                match element.TryGetProperty name with
+                | true, value when value.ValueKind = JsonValueKind.String -> Some(value.GetString())
+                | _ -> None
 
-// The pinned version must resolve to exactly one root. Appearing under no root or under more than one distinct root
-// fails closed: there is no preference order that could silently pick a different installation.
-let selectRoot (version: string) (installs: SdkInstall list) : Result<string, ReleaseError> =
-    let roots =
-        installs
-        |> List.filter (fun install -> String.Equals(install.Version, version, StringComparison.Ordinal))
-        |> List.map (fun install -> install.Root)
-        |> List.fold
-            (fun accumulated root -> if accumulated |> List.exists (sameRoot root) then accumulated else accumulated @ [ root ])
-            []
+            let objectMember (element: JsonElement) (name: string) =
+                match element.TryGetProperty name with
+                | true, value when value.ValueKind = JsonValueKind.Object -> Some value
+                | _ -> None
 
-    match roots with
-    | [ root ] -> Ok(normalizeRoot root)
-    | [] -> Error(RuntimeUnavailable("Microsoft.NET.Sdk", version, "the pinned SDK is not installed"))
-    | many ->
-        let listed = String.concat "; " many
+            match (if root.ValueKind = JsonValueKind.Object then objectMember root "Properties" else None) with
+            | None -> malformed source "the evaluation output has no Properties object"
+            | Some properties ->
+                let property name = text properties name |> Option.filter (String.IsNullOrWhiteSpace >> not)
 
-        Error(
-            RuntimeUnavailable(
-                "Microsoft.NET.Sdk",
-                version,
-                $"the pinned SDK is installed under more than one root [{listed}]; refusing to choose one"
-            )
-        )
+                match property "NETCoreSdkVersion", property "TargetFramework", property "LangVersion", property "BundledNETCoreAppTargetFramework" with
+                | Some sdk, Some framework, Some language, Some bundled ->
+                    let references =
+                        match objectMember root "Items" with
+                        | None -> []
+                        | Some items ->
+                            match items.TryGetProperty "KnownFrameworkReference" with
+                            | true, list when list.ValueKind = JsonValueKind.Array ->
+                                list.EnumerateArray()
+                                |> Seq.filter (fun item ->
+                                    item.ValueKind = JsonValueKind.Object
+                                    && text item "Identity" = Some "Microsoft.NETCore.App"
+                                    && text item "TargetFramework" = Some framework)
+                                |> Seq.toList
+                            | _ -> []
 
-// The root handed over by the credential-free verification step; the only channel the publication entry point reads.
-let sdkRootFromEnvironment () : Result<string, ReleaseError> =
-    match Environment.GetEnvironmentVariable sdkRootVariable with
-    | null -> Error(UsageRejected $"{sdkRootVariable} is not set; the verification step must hand over the SDK root")
-    | value when String.IsNullOrWhiteSpace value -> Error(UsageRejected $"{sdkRootVariable} is empty")
-    | value when not (Path.IsPathRooted value) -> Error(UsageRejected $"{sdkRootVariable} must be an absolute path")
-    | value -> Ok(normalizeRoot value)
+                    if not (isVersionToken sdk) then
+                        malformed source $"the evaluated SDK version '{sdk}' is not a plain version token"
+                    elif not (frameworkToken.IsMatch framework) then
+                        malformed source $"the evaluated TargetFramework '{framework}' is not a plain netX.Y moniker"
+                    elif not (languageToken.IsMatch language) then
+                        malformed source $"the evaluated LangVersion '{language}' is not a plain X.Y version"
+                    elif bundled <> framework then
+                        malformed source $"the SDK's BundledNETCoreAppTargetFramework '{bundled}' differs from the evaluated target framework '{framework}'"
+                    else
+                        match references with
+                        | [] -> malformed source $"no KnownFrameworkReference for Microsoft.NETCore.App and '{framework}' exists"
+                        | _ :: _ :: _ ->
+                            malformed source $"more than one KnownFrameworkReference for Microsoft.NETCore.App and '{framework}' exists"
+                        | [ reference ] ->
+                            match text reference "DefaultRuntimeFrameworkVersion" with
+                            | None -> malformed source "the matching KnownFrameworkReference carries no DefaultRuntimeFrameworkVersion"
+                            | Some value when not (isVersionToken value) ->
+                                malformed source $"the DefaultRuntimeFrameworkVersion value '{value}' is not a plain version token"
+                            | Some value ->
+                                Ok
+                                    { EvaluatedSdkVersion = sdk
+                                      TargetFramework = framework
+                                      LangVersion = language
+                                      BundledTargetFramework = bundled
+                                      DefaultRuntimeFrameworkVersion = value }
+                | _ -> malformed source "the evaluation output lacks NETCoreSdkVersion, TargetFramework, LangVersion or BundledNETCoreAppTargetFramework"
+        with :? JsonException as error ->
+            malformed source $"the evaluation output is not valid JSON: {error.Message}"
 
-// Publication resolution: the explicit handoff only. There is no muxer listing on this path, so a workflow edit that
-// drops the variable is an error here and never a silent fallback to discovery.
+// The toolchain from one evaluation: the evaluated SDK must be the exact version the owner selects.
+let toolchainFromEvaluation (ownerSdkVersion: string) (evaluation: Evaluation) : Result<Toolchain, ReleaseError> =
+    if not (String.Equals(evaluation.EvaluatedSdkVersion, ownerSdkVersion, StringComparison.Ordinal)) then
+        Error(IdentityMismatch("SDK version", ownerSdkVersion, evaluation.EvaluatedSdkVersion))
+    else
+        Ok
+            { SdkVersion = evaluation.EvaluatedSdkVersion
+              RuntimeVersion = evaluation.DefaultRuntimeFrameworkVersion }
+
+let private readVerified (name: string) : Result<string option, ReleaseError> =
+    match Environment.GetEnvironmentVariable name with
+    | null -> Ok None
+    | value when not (isVersionToken value) -> Error(UsageRejected $"{name} must be a plain version token")
+    | value -> Ok(Some value)
+
+// Publication resolution: the verified handoff only. A missing, partial or invalid handoff is an error and never a
+// fallback to evaluation, so no subprocess can run beside the publication credential. The owner SDK version is read from
+// the file and must equal the handed-over one.
 let resolvePublication (repositoryRoot: string) : Result<Toolchain, ReleaseError> =
-    sdkRootFromEnvironment () |> Result.bind (resolveWithRoot repositoryRoot)
-
-// Local resolution from an already captured listing. When the handoff is present it must agree with the local result.
-let resolveFromListing (repositoryRoot: string) (listing: string) (handoff: string option) : Result<Toolchain, ReleaseError> =
-    match readSdkVersion repositoryRoot with
-    | Error error -> Error error
-    | Ok version ->
-        match selectRoot version (parseSdkListing listing) with
+    match readVerified verifiedSdkVariable, readVerified verifiedRuntimeVariable with
+    | Error error, _
+    | _, Error error -> Error error
+    | Ok(Some sdk), Ok(Some runtime) ->
+        match readSdkVersion repositoryRoot with
         | Error error -> Error error
-        | Ok root ->
-            match handoff with
-            | Some value when not (String.IsNullOrWhiteSpace value) && not (sameRoot value root) ->
-                Error(IdentityMismatch(sdkRootVariable, root, normalizeRoot value))
-            | _ -> resolveWithRoot repositoryRoot root
+        | Ok owner when not (String.Equals(owner, sdk, StringComparison.Ordinal)) ->
+            Error(IdentityMismatch(verifiedSdkVariable, owner, sdk))
+        | Ok _ -> Ok { SdkVersion = sdk; RuntimeVersion = runtime }
+    | Ok None, _ -> Error(UsageRejected $"{verifiedSdkVariable} is not set; the verification step must hand over the verified toolchain")
+    | _, Ok None -> Error(UsageRejected $"{verifiedRuntimeVariable} is not set; the verification step must hand over the verified toolchain")
 
-// The only function in this module that spawns a process. It is called by credential-free entry points only (prepare,
-// the producer scripts, the compiled tests and the Unix lane); the publication entry point never reaches it.
-let discoverSdkListing (repositoryRoot: string) : Async<Result<string, ReleaseError>> =
+// Runs the native evaluation of the release project from the trusted repository root, with no build target.
+let evaluate (repositoryRoot: string) : Async<Result<Evaluation, ReleaseError>> =
     async {
-        let! token = Async.CancellationToken
-        return! BuildProvenance.runProcess repositoryRoot "dotnet" [ "--list-sdks" ] token
+        match publicationAuthorityNames |> List.tryFind (fun name -> not (String.IsNullOrEmpty(Environment.GetEnvironmentVariable name))) with
+        | Some name -> return Error(UsageRejected $"native evaluation refuses to start because '{name}' is set")
+        | None ->
+            let! token = Async.CancellationToken
+
+            match! BuildProvenance.runProcess repositoryRoot "dotnet" evaluationArguments token with
+            | Error error -> return Error error
+            | Ok output -> return parseEvaluation (Path.Combine(repositoryRoot, evaluatedProjectPath)) output
     }
 
-// Local resolution for every entry point except publication.
+// Local resolution for every entry point except publication. A verified handoff, when either value is present, must be
+// complete and agree with the evaluation.
 let resolveLocal (repositoryRoot: string) : Async<Result<Toolchain, ReleaseError>> =
     async {
-        match! discoverSdkListing repositoryRoot with
-        | Error error -> return Error error
-        | Ok listing ->
-            let handoff =
-                match Environment.GetEnvironmentVariable sdkRootVariable with
-                | null -> None
-                | value -> Some value
-
-            return resolveFromListing repositoryRoot listing handoff
+        match readVerified verifiedSdkVariable, readVerified verifiedRuntimeVariable, readSdkVersion repositoryRoot with
+        | Error error, _, _
+        | _, Error error, _
+        | _, _, Error error -> return Error error
+        | Ok handoffSdk, Ok handoffRuntime, Ok owner ->
+            match handoffSdk, handoffRuntime with
+            | Some _, None -> return Error(UsageRejected $"{verifiedRuntimeVariable} is not set while {verifiedSdkVariable} is")
+            | None, Some _ -> return Error(UsageRejected $"{verifiedSdkVariable} is not set while {verifiedRuntimeVariable} is")
+            | _ ->
+                match! evaluate repositoryRoot with
+                | Error error -> return Error error
+                | Ok evaluation ->
+                    match toolchainFromEvaluation owner evaluation with
+                    | Error error -> return Error error
+                    | Ok toolchain ->
+                        match handoffSdk, handoffRuntime with
+                        | Some sdk, _ when not (String.Equals(sdk, toolchain.SdkVersion, StringComparison.Ordinal)) ->
+                            return Error(IdentityMismatch(verifiedSdkVariable, toolchain.SdkVersion, sdk))
+                        | _, Some runtime when not (String.Equals(runtime, toolchain.RuntimeVersion, StringComparison.Ordinal)) ->
+                            return Error(IdentityMismatch(verifiedRuntimeVariable, toolchain.RuntimeVersion, runtime))
+                        | _ -> return Ok toolchain
     }
-
-// Standalone entry bridge: FSI scripts and the release test fixture need one synchronous boundary.
-let resolveLocalSynchronously (repositoryRoot: string) : Result<Toolchain, ReleaseError> =
-    resolveLocal repositoryRoot |> Async.RunSynchronously

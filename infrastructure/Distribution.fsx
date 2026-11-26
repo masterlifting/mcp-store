@@ -52,13 +52,12 @@ let private repositoryRoot = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__,
 
 // Build and pin entrypoints share the compiled publisher's bounded policy parser. The SDK and runtime versions come from
 // their owners (`global.json` and the pinned SDK), resolved locally in this credential-free context, never from the policy.
-let loadConfig (path: string) : PolicyProjection =
-    match ReleaseToolchain.resolveLocalSynchronously repositoryRoot with
-    | Error error -> raise (InvalidDataException(ReleaseError.message error))
-    | Ok toolchain ->
-        match ReleasePolicy.parse toolchain path with
-        | Ok policy -> policy
-        | Error error -> raise (InvalidDataException(ReleaseError.message error))
+let loadConfig (path: string) : Async<Result<PolicyProjection, ReleaseError>> =
+    releaseResult {
+        let! toolchain = ReleaseToolchain.resolveLocal repositoryRoot
+        let! policy = ReleasePolicy.parse toolchain path
+        return policy
+    }
 
 let private listFiles (root: string) (searchOption: SearchOption) =
     Directory.EnumerateFiles(root, "*", searchOption)

@@ -143,8 +143,8 @@ let private runPublishMode (argv: string[]) =
                     match ReleaseEnrollment.validateRoster roster, ReleaseEnrollment.validateConfigPathAgainstRoster configPath root roster with
                     | Error error, _ | _, Error error -> emitFailure (ReleaseError.message error); return 4
                     | Ok (), Ok () ->
-                        // Publication reads the SDK root handed over through MCP_RELEASE_SDK_ROOT only. This entry point
-                        // has no reachable path to the SDK listing, which would otherwise run with the token in the environment.
+                        // Publication reads the verified SDK and runtime handed over by the verification step only. This entry
+                        // point has no reachable path to native evaluation, which would otherwise run with the token in the environment.
                         let policyResult =
                             ReleaseToolchain.resolvePublication root
                             |> Result.bind (fun toolchain -> ReleasePolicy.parseBytes toolchain configPath (File.ReadAllBytes configPath))

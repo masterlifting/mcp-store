@@ -61,33 +61,38 @@ One .NET toolchain version is authored: the SDK version in the root `global.json
 
 | Selection | Owner |
 | --- | --- |
-| SDK version | root `global.json`, read strictly: one `sdk` object, exactly `version`, `rollForward` and `allowPrerelease`, no duplicate or unknown key, bounded size, version accepted only as a plain version token |
-| runtime version | never authored; derived from the pinned SDK's `Microsoft.NETCoreSdk.BundledVersions.props` — `DefaultRuntimeFrameworkVersion` of the single `KnownFrameworkReference` for `Microsoft.NETCore.App` whose `TargetFramework` is the owned TFM |
-| TFM, F# language version, `ExpectoVersion` | root `Directory.Build.props` (closed property set) |
+| SDK version | root `global.json` (`rollForward: disable`, `allowPrerelease: false`); the pre-SDK projection reads only what installation needs, and the SDK selected by the native resolver must equal it |
+| TFM, F# language version, `ExpectoVersion` | root `Directory.Build.props`; `Release.fsproj` carries no copy of the TFM or language version |
+| runtime version | never authored; the evaluated SDK's `DefaultRuntimeFrameworkVersion` of the single `KnownFrameworkReference` for `Microsoft.NETCore.App` at the evaluated TFM |
 | `platform` | each component's `*/release/Config.json`: the RID the artifact is qualified for, not a version |
 
 `*/release/Config.json` therefore remains the single source only for the per-component
 policy; it declares neither `sdkVersion` nor `runtimeVersion`, and either is rejected.
-`Toolchain.fs` is the one compiled reader (loaded by the scripts like `Policy.fs`) and
-`Toolchain.ps1` is its PowerShell mirror, shared by `Check.ps1` and `Update.ps1`; both
-apply the same rules. The reader takes the SDK root as an explicit input and never
-discovers it. A pinned version found under more than one SDK root fails closed.
+There is no second SDK, TFM or runtime reader: after SDK setup the values come from native
+MSBuild evaluation of `Release.fsproj` at the repository root, with no parsing of
+`dotnet --info` and no runtime computed from the TFM string.
 
-`Release.fsproj` is the one documented exception: it keeps `TargetFramework` and
-`LangVersion` because the publisher stage deliberately excludes repository-wide build
-props. `Check.ps1` fails closed when either value differs from `Directory.Build.props`.
+`Update.ps1 -Verify`, run after the SDK is installed, performs that evaluation
+(`NETCoreSdkVersion`, `TargetFramework`, `LangVersion`, `BundledNETCoreAppTargetFramework`
+and the `KnownFrameworkReference` items). It fails closed unless the selected SDK equals
+the owner, the evaluated TFM and language version are plain `netX.Y` and `X.Y` tokens,
+the SDK-bundled TFM equals the evaluated one, and exactly one matching framework
+reference exists. It then checks that an installed `Microsoft.NETCore.App` is compatible
+with the derived runtime (same major.minor, patch at least the derived value; a
+prerelease never satisfies a stable value). Only after every check passes it writes the
+verified handoff to `GITHUB_ENV`: `MCP_RELEASE_VERIFIED_SDK`,
+`MCP_RELEASE_VERIFIED_RUNTIME`, `MCP_RELEASE_VERIFIED_TARGET_FRAMEWORK` and
+`MCP_RELEASE_VERIFIED_LANGUAGE_VERSION`. `-Project` never writes this handoff.
+`publish` consumes the verified values, fails closed when they are missing or invalid and
+does not run SDK discovery, so no discovery process runs while the publication credential
+is present. `Check.ps1` asserts that `-Verify` precedes the publish invocation and the
+`GITHUB_TOKEN` step.
 
-`Update.ps1 -Verify`, run after the SDK is installed, compares the selected SDK
-(`dotnet --version` at the repository root) with the owner, resolves the root, derives
-the runtime and checks that an installed `Microsoft.NETCore.App` is compatible (same
-major.minor, patch at least the derived value; a prerelease never satisfies a stable
-value). Only after those checks pass it writes `MCP_RELEASE_SDK_ROOT` to `GITHUB_ENV`.
-The `publish` entry point reads only that variable and has no path to the SDK listing,
-so SDK discovery spawns no process while the publication credential is present;
-`prepare` and the other entry points resolve the root locally and must agree with the
-variable when it is set. `Check.ps1` asserts that `-Verify` precedes the publish
-invocation and the `GITHUB_TOKEN` step, and does not run `dotnet --version` itself
-because the SDK is installed after it.
+The isolated publisher stage imports no repository build files. The workflow generates
+its project from the ordered `<Compile Include>` items of `Release.fsproj`, injects only
+the verified `TargetFramework` and `LangVersion` values (validated again as plain tokens),
+keeps the stage outside the checkout and restores and publishes with
+`ImportDirectoryBuildProps` and `ImportDirectoryBuildTargets` set to `false`.
 
 On the candidate path the manifest's declared `producer.runtime` must equal the runtime
 derived from the packaged bytes; observation of already published archives is unchanged.
