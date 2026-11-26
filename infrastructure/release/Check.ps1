@@ -6,22 +6,30 @@
 param(
     [string]$Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path,
     [string]$Workflow = "",
+    [string]$UnixWorkflow = "",
     [string]$Components = ""
 )
 
 $ErrorActionPreference = "Stop"
 
 . (Join-Path $PSScriptRoot "Roster.ps1")
+. (Join-Path $PSScriptRoot "Toolchain.ps1")
 
 $roster = Get-ReleaseRoster -Root $Root
 $componentIds = @($roster | ForEach-Object { $_.componentId })
 $workflowPath = if ($Workflow) { $Workflow } else { Join-Path $Root ".github\workflows\release.yml" }
+$unixWorkflowPath = if ($UnixWorkflow) { $UnixWorkflow } else { Join-Path $Root ".github\workflows\unix.yml" }
 
 if (-not (Test-Path -LiteralPath $workflowPath)) {
     throw "release workflow not found: $workflowPath"
 }
 
+if (-not (Test-Path -LiteralPath $unixWorkflowPath)) {
+    throw "unix qualification workflow not found: $unixWorkflowPath"
+}
+
 $text = Get-Content -LiteralPath $workflowPath -Raw
+$unixText = Get-Content -LiteralPath $unixWorkflowPath -Raw
 $checked = 0
 
 function Assert-Count {
@@ -91,10 +99,158 @@ function Assert-Before {
     }
 }
 
-# The workflow trigger stays push-to-main only: a path filter or a manual dispatch would let an unevaluated revision release.
-Assert-Count -Name "push to main is the only trigger" -Pattern '^on:\r?\n  push:\r?\n    branches:\r?\n      - main\s*$' -Expected 1
-Assert-Count -Name "no path filter can skip packaged bytes" -Pattern '^ {4}paths:' -Expected 0
+# Telegram is a verified non-input to the .NET release, so the only filter allowed is the exact Telegram exclusion; no filter may skip a
+# .NET-affecting revision. This is the enforcing point for BOTH workflows (the unix.yml pre-merge subset is advisory).
+function Get-TriggerBlock {
+    param([Parameter(Mandatory = $true)][string]$Text, [Parameter(Mandatory = $true)][string]$Label)
+
+    $lines = @($Text -split '\r?\n' | ForEach-Object { $_.TrimEnd() })
+    $start = [array]::IndexOf($lines, 'on:')
+    if ($start -lt 0) {
+        throw "cross-stage coherence failed [trigger block]: $Label declares no top-level on: block"
+    }
+
+    $block = New-Object System.Collections.Generic.List[string]
+    for ($index = $start + 1; $index -lt $lines.Count; $index++) {
+        $line = $lines[$index]
+        if ([string]::IsNullOrWhiteSpace($line) -or $line.TrimStart().StartsWith('#')) { continue }
+        if (-not $line.StartsWith(' ')) { break }
+        $block.Add($line)
+    }
+
+    return $block.ToArray()
+}
+
+function Assert-TriggerShape {
+    param(
+        [Parameter(Mandatory = $true)][string]$Label,
+        [Parameter(Mandatory = $true)][string]$Text,
+        [Parameter(Mandatory = $true)][string]$Event,
+        [Parameter(Mandatory = $true)][string[]]$Expected
+    )
+
+    $script:checked = $script:checked + 1
+    $block = @(Get-TriggerBlock -Text $Text -Label $Label)
+    $faults = New-Object System.Collections.Generic.List[string]
+
+    $events = @($block | Where-Object { $_ -match '^  [^\s#][^:]*:' } | ForEach-Object { ($_ -replace '^  ([^:]+):.*$', '$1') })
+    if (($events -join ',') -cne $Event) {
+        $faults.Add("no event other than '$Event' is allowed under on: (found [$($events -join ', ')])")
+    }
+    foreach ($key in @('paths', 'branches-ignore', 'tags', 'tags-ignore')) {
+        if (@($block | Where-Object { $_ -match ('^\s+' + $key + ':') }).Count -ne 0) {
+            $faults.Add("the '$key' filter is forbidden")
+        }
+    }
+
+    $index = [array]::IndexOf($block, '    paths-ignore:')
+    if (@($block | Where-Object { $_ -match '^\s+paths-ignore:' }).Count -ne 1 -or $index -lt 0) {
+        $faults.Add('exactly one paths-ignore block is required')
+    }
+    else {
+        $items = @()
+        for ($next = $index + 1; $next -lt $block.Count; $next++) {
+            if ($block[$next].StartsWith('      ')) { $items += $block[$next] } else { break }
+        }
+        if ($items.Count -ne 1 -or $items[0] -cne "      - 'telegram/**'") {
+            $faults.Add("paths-ignore must carry exactly the one item 'telegram/**'")
+        }
+    }
+
+    if (($block -join "`n") -cne ($Expected -join "`n")) {
+        $faults.Add('the trigger block is not the exact expected shape')
+    }
+
+    if ($faults.Count -ne 0) {
+        throw "cross-stage coherence failed [exact trigger shape] in ${Label}: $($faults -join '; ')"
+    }
+}
+
+Assert-TriggerShape -Label $workflowPath -Text $text -Event 'push' -Expected @('  push:', '    branches:', '      - main', '    paths-ignore:', "      - 'telegram/**'")
+Assert-TriggerShape -Label $unixWorkflowPath -Text $unixText -Event 'pull_request' -Expected @('  pull_request:', '    paths-ignore:', "      - 'telegram/**'")
 Assert-Count -Name "no manual dispatch bypasses the push gate" -Pattern 'workflow_dispatch' -Expected 0
+$script:checked = $script:checked + 1
+if ($unixText -match 'workflow_dispatch') {
+    throw "cross-stage coherence failed [no manual dispatch in the qualification workflow]: $unixWorkflowPath declares workflow_dispatch"
+}
+
+# One authored version for the .NET toolchain. The SDK selection is owned by `global.json`, the framework, the language
+# version by `Directory.Build.props`, and the runtime is derived from the pinned SDK. This runs at
+# step 2 of the publisher job, BEFORE the SDK is installed, so it only reads files: it must not run `dotnet`, which
+# fails under `rollForward: disable` on a runner without the exact SDK. `Update.ps1 -Verify` runs the one native evaluation
+# through `Toolchain.fsx`.
+function Assert-Toolchain {
+    param([Parameter(Mandatory = $true)][string]$Name, [Parameter(Mandatory = $true)][scriptblock]$Check)
+
+    $script:checked = $script:checked + 1
+    try {
+        & $Check
+    } catch {
+        throw "cross-stage coherence failed [$Name]: $($_.Exception.Message)"
+    }
+}
+
+# A missing owner fails closed; it is never skipped.
+Assert-Toolchain -Name "global.json is the strict SDK owner" -Check { $null = Get-OwnedSdkVersion -Root $Root }
+# The post-SDK query and its decoder live only in the shared F# evaluator; the PowerShell side holds no second copy.
+Assert-Toolchain -Name "the F# evaluator is the only post-SDK toolchain query" -Check {
+    $update = [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot "Update.ps1"))
+    $pre = [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot "Toolchain.ps1"))
+    $entry = [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot "Toolchain.fsx"))
+    if ($update -match 'dotnet\s+msbuild' -or $pre -match 'dotnet\s+msbuild') { throw "no PowerShell script may run its own MSBuild toolchain query" }
+    if ([regex]::Matches($update, 'dotnet fsi --nologo \(Join-Path \$PSScriptRoot "Toolchain\.fsx"\)').Count -ne 1) { throw "Update.ps1 must invoke Toolchain.fsx exactly once" }
+    if ([regex]::Matches($entry, 'Async\.RunSynchronously').Count -ne 1) { throw "Toolchain.fsx must hold exactly one synchronous entry bridge" }
+    if ($entry -notmatch 'ReleaseToolchain\.verifyLocal') { throw "Toolchain.fsx must use the shared ReleaseToolchain evaluator" }
+}
+
+$ignoredDirectories = @(".git", "bin", "obj", "node_modules", ".venv")
+function Get-RepositoryFiles {
+    $pending = New-Object System.Collections.Generic.Stack[string]
+    $pending.Push($Root)
+    while ($pending.Count -gt 0) {
+        $directory = $pending.Pop()
+        foreach ($entry in [System.IO.Directory]::EnumerateFileSystemEntries($directory)) {
+            $name = [System.IO.Path]::GetFileName($entry)
+            if ([System.IO.Directory]::Exists($entry)) {
+                if ($ignoredDirectories -cnotcontains $name -and -not ((Get-Item -LiteralPath $entry -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint)) { $pending.Push($entry) }
+            } else {
+                $entry
+            }
+        }
+    }
+}
+
+$repositoryFiles = @(Get-RepositoryFiles)
+$relativeOf = { param($path) [System.IO.Path]::GetRelativePath($Root, $path).Replace('\', '/') }
+Assert-Toolchain -Name "exactly one Directory.Build.props and no competing build or package owner" -Check {
+    $found = @($repositoryFiles | ForEach-Object { & $relativeOf $_ })
+    $props = @($found | Where-Object { ([System.IO.Path]::GetFileName($_)) -ieq "Directory.Build.props" })
+    if ($props.Count -ne 1 -or $props[0] -cne "Directory.Build.props") { throw "the repository must contain exactly one root Directory.Build.props; found [$($props -join ', ')]" }
+    $competing = @($found | Where-Object {
+            $leaf = [System.IO.Path]::GetFileName($_)
+            ($leaf -like "Directory.Build.*" -and $_ -cne "Directory.Build.props") -or $leaf -ieq "Directory.Packages.props" -or $leaf -ieq "NuGet.config"
+        })
+    if ($competing.Count -gt 0) { throw "no Directory.Build.targets, nested Directory.Build.*, Directory.Packages.props or NuGet.config may exist; found [$($competing -join ', ')]" }
+}
+
+$projectFiles = @($repositoryFiles | Where-Object { $_ -like "*.fsproj" })
+Assert-Toolchain -Name "no project re-declares the owned framework or language version" -Check {
+    foreach ($project in $projectFiles) {
+        $relative = & $relativeOf $project
+        $content = [System.IO.File]::ReadAllText($project)
+        if ($content -match '<TargetFrameworks?[\s>]') { throw "$relative re-declares TargetFramework or TargetFrameworks; Directory.Build.props owns it" }
+        if ($content -match '<LangVersion[\s>]') { throw "$relative re-declares LangVersion; Directory.Build.props owns it" }
+        if ($content -imatch '<OtherFlags>[^<]*--langversion') { throw "$relative re-declares the language version through OtherFlags; Directory.Build.props owns it" }
+    }
+}
+Assert-Toolchain -Name "no producer config declares a toolchain version" -Check {
+    foreach ($entry in $roster) {
+        $names = @((Get-Content -LiteralPath (Join-Path $Root $entry.configPath) -Raw | ConvertFrom-Json).PSObject.Properties.Name)
+        foreach ($forbidden in @("sdkVersion", "runtimeVersion")) {
+            if ($names -ccontains $forbidden) { throw "$($entry.configPath) declares '$forbidden'; the toolchain owners supply it" }
+        }
+    }
+}
 
 # Exactly the three frozen jobs exist; no bootstrap, builder or legacy test/prepare/publish job survives.
 Assert-Count -Name "the publisher job exists" -Pattern '^ {2}publisher:\s*$' -Expected 1
@@ -108,9 +264,24 @@ Assert-Count -Name "only the publication job depends on both other jobs" -Patter
 Assert-Count -Name "no matrix leg survives" -Pattern 'matrix\.' -Expected 0
 Assert-Count -Name "no matrix strategy survives" -Pattern '^ {4}strategy:' -Expected 0
 Assert-Count -Name "no cross-job participation fallback" -Pattern 'fromJSON\(needs\.' -Expected 0
-Assert-Count -Name "no hardcoded participant list" -Pattern '^\s*-\s*(dotnet|workflow)\s*$' -Expected 0
-Assert-Count -Name "no participant literal in a CLI or policy path" -Pattern '(dotnet|workflow)/release/Config\.json' -Expected 0
-Assert-Count -Name "both jobs address the policy by the looped participant" -Pattern '\$component/release/Config\.json' -Expected 2
+# The participant and policy-path literals are derived from the roster, so a later roster change cannot leave a stale literal list here.
+$participantAlternation = ($componentIds | ForEach-Object { [regex]::Escape($_) }) -join '|'
+$configPathAlternation = ($roster | ForEach-Object { [regex]::Escape("$($_.configPath)") }) -join '|'
+Assert-Count -Name "no hardcoded participant list" -Pattern ('^\s*-\s*(' + $participantAlternation + ')\s*$') -Expected 0
+Assert-Count -Name "no participant literal in a CLI or policy path" -Pattern ('(' + $configPathAlternation + ')') -Expected 0
+Assert-Count -Name "no derived <componentId>/release path survives" -Pattern '\$component/release/' -Expected 0
+Assert-Count -Name "no derived <componentId>/tests path survives" -Pattern '\$component/tests/' -Expected 0
+# Every path is read from the projected componentId -> configPath map, which is the one canonical map `Update.ps1 -Project` emits from the roster.
+Assert-Count -Name "every path consumer reads the projected config-path map" -Pattern '\$env:RELEASE_CONFIG_PATHS \| ConvertFrom-Json -AsHashtable' -Expected 3
+Assert-JobCount -Job "publisher" -Name "publisher reads the projected config-path map" -Pattern '\$env:RELEASE_CONFIG_PATHS \| ConvertFrom-Json -AsHashtable' -Expected 1
+Assert-JobCount -Job "preparation" -Name "preparation reads the projected config-path map" -Pattern '\$env:RELEASE_CONFIG_PATHS \| ConvertFrom-Json -AsHashtable' -Expected 1
+Assert-JobCount -Job "publication" -Name "publication reads the projected config-path map" -Pattern '\$env:RELEASE_CONFIG_PATHS \| ConvertFrom-Json -AsHashtable' -Expected 1
+Assert-Count -Name "each path consumer fails closed on a missing map entry" -Pattern 'the projection declares no canonical config path for' -Expected 3
+Assert-Count -Name "every config path is addressed by the looped participant's map entry" -Pattern '\[string\]\$configPaths\[\$component\]\)' -Expected 3
+Assert-JobCount -Job "publisher" -Name "publisher derives the release directory from the map entry" -Pattern '^ {12}\$releaseDirectory = Split-Path -Parent \(\[string\]\$configPaths\[\$component\]\)\s*$' -Expected 1
+Assert-JobCount -Job "preparation" -Name "preparation derives no release directory outside the canonical prepare" -Pattern '\$releaseDirectory' -Expected 0
+Assert-JobCount -Job "preparation" -Name "preparation addresses the candidate policy by the map entry" -Pattern '^ {12}\$configPath = Join-Path \(Get-Location\) \(\[string\]\$configPaths\[\$component\]\)\s*$' -Expected 1
+Assert-JobCount -Job "publication" -Name "publication addresses the trusted policy by the map entry" -Pattern '^ {12}\$configPath = Join-Path \$workspace \(\[string\]\$configPaths\[\$component\]\)\s*$' -Expected 1
 
 # Every job projects the canonical toolchain before the SDK exists and verifies the executing toolchain afterwards.
 Assert-Count -Name "each job projects the canonical toolchain" -Pattern '^ {8}run: pwsh infrastructure/release/Update\.ps1 -Project\s*$' -Expected 3
@@ -121,18 +292,18 @@ Assert-Count -Name "the coherence guard reads no step-local output file" -Patter
 Assert-Count -Name "every SDK install is fed by the canonical projection" -Pattern '^ {10}dotnet-version: \$\{\{ steps\.project\.outputs\.sdk \}\}\s*$' -Expected 3
 Assert-Count -Name "SDK installs never name a literal version" -Pattern 'dotnet-version: (?!\$\{\{)' -Expected 0
 # One projection drives every job's participant list, so a hand-edited roster cannot drift from the enrolled components.
-Assert-Count -Name "every stage reads the projection instead of a literal participant list" -Pattern 'ConvertFrom-Json \$env:RELEASE_COMPONENTS' -Expected 5
+Assert-Count -Name "every stage reads the projection instead of a literal participant list" -Pattern 'ConvertFrom-Json \$env:RELEASE_COMPONENTS' -Expected 4
 Assert-JobCount -Job "publisher" -Name "publisher reads the projected components" -Pattern 'ConvertFrom-Json \$env:RELEASE_COMPONENTS' -Expected 1
-Assert-JobCount -Job "preparation" -Name "preparation reads the projected components" -Pattern 'ConvertFrom-Json \$env:RELEASE_COMPONENTS' -Expected 2
+Assert-JobCount -Job "preparation" -Name "preparation reads the projected components" -Pattern 'ConvertFrom-Json \$env:RELEASE_COMPONENTS' -Expected 1
 Assert-JobCount -Job "publication" -Name "publication reads the projected components" -Pattern 'ConvertFrom-Json \$env:RELEASE_COMPONENTS' -Expected 2
 
 # Every action reference must be a reviewed 40-hex commit; a floating tag would let an upstream change reach the publication boundary.
-Assert-Count -Name "all action references are pinned commits" -Pattern 'uses: [A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+@[0-9a-f]{40} ' -Expected 13
+Assert-Count -Name "all action references are pinned commits" -Pattern 'uses: [A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+@[0-9a-f]{40} ' -Expected 15
 Assert-Count -Name "no floating or short action reference" -Pattern 'uses: [A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+@(?![0-9a-f]{40})' -Expected 0
 Assert-Count -Name "checkout uses the reviewed pinned commit" -Pattern 'uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1' -Expected 3
 Assert-Count -Name "SDK setup uses the reviewed pinned commit" -Pattern 'uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68' -Expected 3
-Assert-Count -Name "the platform upload action is the reviewed pinned commit" -Pattern 'uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9' -Expected 4
-Assert-Count -Name "the platform download action is the reviewed pinned commit" -Pattern 'uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333' -Expected 3
+Assert-Count -Name "the platform upload action is the reviewed pinned commit" -Pattern 'uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9' -Expected 5
+Assert-Count -Name "the platform download action is the reviewed pinned commit" -Pattern 'uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333' -Expected 4
 Assert-Count -Name "no floating artifact download reference exists" -Pattern 'uses: actions/download-artifact@(?![0-9a-f]{40} )' -Expected 0
 Assert-Count -Name "no artifact is selected by a zip wildcard" -Pattern '\*\.zip' -Expected 0
 Assert-Count -Name "no arbitrary artifact name lookup exists" -Pattern 'artifact-name' -Expected 0
@@ -184,6 +355,8 @@ Assert-Count -Name "no raw platform transport mode survives" -Pattern '(InstallR
 Assert-Count -Name "the retired orchestration mode is gone" -Pattern 'orchestrate' -Expected 0
 Assert-Count -Name "no retired publisher flag survives" -Pattern '(--role=|--component=|--trigger=|--builder-|--artifact-name|--transport-evidence)' -Expected 0
 Assert-Count -Name "no attempt-scoped job lookup survives" -Pattern 'check_run_id' -Expected 0
+# Behavioral test automation is retired; only the producer package gates and the compiled builds remain.
+Assert-Count -Name "no retired behavioral test phase survives" -Pattern '(Expecto|workflow/tests/|tests/Tests\.fsproj|Test\.ps1|Run\.ps1 -Script)' -Expected 0
 
 # Publisher job: it builds the trusted runtime from the project's own compile list and runs the release regression gates.
 Assert-JobCount -Job "publisher" -Name "publisher job is read-only" -Pattern '^ {6}contents: read\s*$' -Expected 1
@@ -200,38 +373,41 @@ Assert-JobCount -Job "publisher" -Name "publisher stages only compile items that
 Assert-JobCount -Job "publisher" -Name "publisher publishes the staged project in isolation" -Pattern 'dotnet publish \$stageProject' -Expected 1
 Assert-JobCount -Job "publisher" -Name "publisher suppresses repository-wide build imports" -Pattern 'p:ImportDirectoryBuildProps=false -p:ImportDirectoryBuildTargets=false' -Expected 2
 Assert-JobCount -Job "publisher" -Name "publisher restores from the cleared isolated source list" -Pattern 'dotnet restore \$stageProject --configfile' -Expected 1
-Assert-JobCount -Job "publisher" -Name "thirteen non-packaging Workflow entrypoints" -Pattern '^\s+"workflow/tests/(?:[A-Za-z0-9]+/)?[A-Za-z0-9]+\.fsx",?\s*$' -Expected 13
-Assert-JobCount -Job "publisher" -Name "publisher runs the producer Expecto gate" -Pattern 'dotnet run --project dotnet/tests/Tests\.fsproj' -Expected 1
-Assert-JobCount -Job "publisher" -Name "publisher builds the compiled release regression project" -Pattern 'dotnet build infrastructure/release/tests/Tests\.fsproj' -Expected 1
 Assert-JobCount -Job "publisher" -Name "publisher builds the compiled resolver project" -Pattern 'dotnet build infrastructure/resolver/Resolver\.fsproj -c Release' -Expected 1
-Assert-JobCount -Job "publisher" -Name "publisher builds the compiled resolver Expecto project" -Pattern 'dotnet build infrastructure/resolver/tests/Tests\.fsproj -c Release' -Expected 1
-Assert-JobCount -Job "publisher" -Name "publisher runs the resolver Expecto gate" -Pattern 'dotnet run --project infrastructure/resolver/tests/Tests\.fsproj' -Expected 1
-Assert-JobCount -Job "publisher" -Name "publisher builds each enrolled producer's canonical local distribution" -Pattern '^ {12}& dotnet fsi --nologo "\$component/release/Build\.fsx"\s*$' -Expected 1
-Assert-JobCount -Job "publisher" -Name "publisher writes each enrolled producer's canonical consumer pin" -Pattern '^ {12}& dotnet fsi --nologo "\$component/release/Pin\.fsx"\s*$' -Expected 1
-Assert-Before -Job "publisher" -Name "the canonical toolchain is verified before local packaging" -First 'run: pwsh infrastructure/release/Update.ps1 -Verify' -Second '& dotnet fsi --nologo "$component/release/Build.fsx"'
-Assert-Before -Job "publisher" -Name "each producer is packed before its consumer pin" -First '& dotnet fsi --nologo "$component/release/Build.fsx"' -Second '& dotnet fsi --nologo "$component/release/Pin.fsx"'
-Assert-Before -Job "publisher" -Name "local packaging precedes the resolver launch gate" -First '& dotnet fsi --nologo "$component/release/Pin.fsx"' -Second 'dotnet run --project infrastructure/resolver/tests/Tests.fsproj'
-Assert-Before -Job "publisher" -Name "local packaging precedes the checkout build gates" -First '& dotnet fsi --nologo "$component/release/Pin.fsx"' -Second 'dotnet build dotnet/Dotnet.fsproj -c Release'
-Assert-JobCount -Job "publisher" -Name "publisher runs the complete compiled release gate" -Pattern '^ {8}run: pwsh infrastructure/release/Test\.ps1\s*$' -Expected 1
+Assert-JobCount -Job "publisher" -Name "publisher builds each enrolled producer's canonical local distribution" -Pattern '^ {12}& dotnet fsi --nologo "\$releaseDirectory/Build\.fsx"\s*$' -Expected 1
+Assert-JobCount -Job "publisher" -Name "publisher writes each enrolled producer's canonical consumer pin" -Pattern '^ {12}& dotnet fsi --nologo "\$releaseDirectory/Pin\.fsx"\s*$' -Expected 1
+Assert-Before -Job "publisher" -Name "the canonical toolchain is verified before local packaging" -First 'run: pwsh infrastructure/release/Update.ps1 -Verify' -Second '& dotnet fsi --nologo "$releaseDirectory/Build.fsx"'
+Assert-Before -Job "publisher" -Name "the canonical toolchain is verified before the isolated stage is generated" -First 'run: pwsh infrastructure/release/Update.ps1 -Verify' -Second 'id: stage'
+Assert-JobCount -Job "publisher" -Name "the isolated stage takes the verified framework and language version" -Pattern '\$env:MCP_RELEASE_VERIFIED_(TARGET_FRAMEWORK|LANGUAGE_VERSION)' -Expected 2
+Assert-Before -Job "publisher" -Name "each producer is packed before its consumer pin" -First '& dotnet fsi --nologo "$releaseDirectory/Build.fsx"' -Second '& dotnet fsi --nologo "$releaseDirectory/Pin.fsx"'
+Assert-Before -Job "publisher" -Name "local packaging precedes the checkout build gates" -First '& dotnet fsi --nologo "$releaseDirectory/Pin.fsx"' -Second 'dotnet build dotnet/Dotnet.fsproj -c Release'
 Assert-JobCount -Job "publisher" -Name "publisher typechecks the retained release scripts" -Pattern 'Typecheck\.ps1 -SdkVersion' -Expected 1
 
-# Preparation job: both producers' package gates pass before either candidate transport is uploaded.
+# Preparation job: each candidate's package gate runs inside the canonical prepare (build, pin, gate) before any transport is uploaded.
 Assert-JobCount -Job "preparation" -Name "preparation job is read-only" -Pattern '^ {6}contents: read\s*$' -Expected 1
 Assert-JobCount -Job "preparation" -Name "preparation checkout disables credential persistence" -Pattern 'persist-credentials: false\s*$' -Expected 1
-Assert-JobCount -Job "preparation" -Name "preparation runs each producer package gate" -Pattern '^ {12}\$entrypoint = "\$component/tests/distribution/Run\.fsx"\s*$' -Expected 1
-Assert-JobCount -Job "preparation" -Name "preparation runs the Workflow packaged coordination gate" -Pattern 'workflow/tests/coordination/Run\.fsx' -Expected 1
+Assert-JobCount -Job "preparation" -Name "preparation runs no standalone package gate outside the canonical prepare" -Pattern '(tests/distribution/Run\.fsx|producer package gate)' -Expected 0
 Assert-JobCount -Job "preparation" -Name "preparation builds the release runner from the checkout" -Pattern 'dotnet build infrastructure/release/Release\.fsproj -c Release' -Expected 1
 Assert-JobCount -Job "preparation" -Name "preparation prepares each enrolled candidate through the canonical CLI" -Pattern '& \$runner prepare \$configPath \$candidate\s*\|' -Expected 1
 Assert-JobCount -Job "preparation" -Name "preparation writes each component's own archive key" -Pattern '^ {12}"archiveName_\$component=\$archiveName" >> \$env:GITHUB_OUTPUT\s*$' -Expected 1
 Assert-JobCount -Job "preparation" -Name "preparation publishes each component's archive name in the job environment" -Pattern 'CANDIDATE_ARCHIVE_NAME_\$\(\(\$component\)\.ToUpperInvariant\(\)\)' -Expected 1
 Assert-JobCount -Job "preparation" -Name "preparation accepts only the exact two-member candidate directory" -Pattern 'where exactly the archive' -Expected 1
-# Publication job: it installs the canonical SDK, verifies every downloaded member and publishes without building anything.
+# The resolver smoke reads the final regenerated distribution, so it follows every candidate preparation and precedes every upload; it never runs where a credential or publication exists.
+Assert-JobCount -Job "preparation" -Name "preparation runs the resolver packaged smoke exactly once" -Pattern '^ {10}& dotnet fsi --nologo infrastructure/resolver/tests/distribution/Smoke\.fsx\s*$' -Expected 1
+Assert-JobCount -Job "preparation" -Name "preparation propagates the resolver smoke native exit" -Pattern '^ {10}\$smokeCode = \$LASTEXITCODE\s*$' -Expected 1
+Assert-JobCount -Job "preparation" -Name "preparation exits with the resolver smoke native code" -Pattern '^ {12}exit \$smokeCode\s*$' -Expected 1
+Assert-JobCount -Job "preparation" -Name "preparation proves the resolver candidate archive equals the distribution archive the smoke reads" -Pattern 'differs from the distribution archive' -Expected 1
+Assert-Before -Job "preparation" -Name "every candidate is prepared before the resolver smoke" -First 'id: prepare' -Second '& dotnet fsi --nologo infrastructure/resolver/tests/distribution/Smoke.fsx'
+Assert-Before -Job "preparation" -Name "the resolver smoke precedes every candidate upload" -First '& dotnet fsi --nologo infrastructure/resolver/tests/distribution/Smoke.fsx' -Second 'uses: actions/upload-artifact@'
+Assert-JobCount -Job "publisher" -Name "the publisher job runs no resolver smoke" -Pattern 'Smoke\.fsx' -Expected 0
+Assert-JobCount -Job "publication" -Name "the publication job runs no resolver smoke" -Pattern 'Smoke\.fsx' -Expected 0
+# Publication job text: it installs the canonical SDK, runs the pre-credential toolchain verification, verifies every downloaded member and carries no direct build, restore, test or run invocation.
 Assert-JobCount -Job "publication" -Name "publish job alone holds write authority" -Pattern '^ {6}contents: write\s*$' -Expected 1
 Assert-JobCount -Job "publication" -Name "publish job keeps platform artifact read" -Pattern '^ {6}actions: read\s*$' -Expected 1
 Assert-JobCount -Job "publication" -Name "publication installs the canonical SDK exactly once" -Pattern 'uses: actions/setup-dotnet@' -Expected 1
 Assert-JobCount -Job "publication" -Name "publication never builds" -Pattern 'dotnet build' -Expected 0
 Assert-JobCount -Job "publication" -Name "publication never restores" -Pattern 'dotnet restore' -Expected 0
-Assert-JobCount -Job "publication" -Name "publication never evaluates F#" -Pattern 'dotnet fsi' -Expected 0
+Assert-JobCount -Job "publication" -Name "the publication job text carries no direct dotnet fsi invocation" -Pattern 'dotnet fsi' -Expected 0
 Assert-JobCount -Job "publication" -Name "publication never runs tests" -Pattern 'dotnet test' -Expected 0
 Assert-JobCount -Job "publication" -Name "publication never runs a project" -Pattern 'dotnet run' -Expected 0
 Assert-JobCount -Job "publication" -Name "publication rechecks the control plane" -Pattern 'git rev-parse HEAD' -Expected 2
@@ -239,13 +415,14 @@ Assert-JobCount -Job "publication" -Name "publication proves the ancestry throug
 # The pinned action treats a blank `artifact-ids` value as "every artifact in this run", so the three declared ids are
 # proven non-empty, positive decimal ids before any transfer action is entered.
 Assert-JobCount -Job "publication" -Name "publication validates the declared artifact ids exactly once" -Pattern '^ {8}id: validateArtifacts\s*$' -Expected 1
-Assert-JobCount -Job "publication" -Name "publication guards all three declared artifact ids" -Pattern '^ {10}Assert-ArtifactId ' -Expected 3
+Assert-JobCount -Job "publication" -Name "publication guards all four declared artifact ids" -Pattern '^ {10}Assert-ArtifactId ' -Expected 4
 Assert-JobCount -Job "publication" -Name "the artifact id guard embeds no workflow expression in its own body" -Pattern 'Assert-ArtifactId [^\r\n]*\$\{\{' -Expected 0
 Assert-JobCount -Job "publication" -Name "the runtime id guard reads the publisher job's own declared output" -Pattern '^ {10}RUNTIME_ARTIFACT_ID: \$\{\{ needs\.publisher\.outputs\.runtimeArtifactId \}\}\s*$' -Expected 1
 Assert-JobCount -Job "publication" -Name "the dotnet id guard reads the preparation job's own declared output" -Pattern '^ {10}CANDIDATE_ARTIFACT_ID_DOTNET: \$\{\{ needs\.preparation\.outputs\.candidateArtifactId_dotnet \}\}\s*$' -Expected 1
 Assert-JobCount -Job "publication" -Name "the workflow id guard reads the preparation job's own declared output" -Pattern '^ {10}CANDIDATE_ARTIFACT_ID_WORKFLOW: \$\{\{ needs\.preparation\.outputs\.candidateArtifactId_workflow \}\}\s*$' -Expected 1
-Assert-JobCount -Job "publication" -Name "publication transfers every transport through the pinned official action" -Pattern '^ {8}uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2\s*$' -Expected 3
-Assert-JobCount -Job "publication" -Name "publication addresses every transfer by an exact declared artifact id" -Pattern '^ {10}artifact-ids: \$\{\{ needs\.' -Expected 3
+Assert-JobCount -Job "publication" -Name "the resolver id guard reads the preparation job's own declared output" -Pattern '^ {10}CANDIDATE_ARTIFACT_ID_RESOLVER: \$\{\{ needs\.preparation\.outputs\.candidateArtifactId_resolver \}\}\s*$' -Expected 1
+Assert-JobCount -Job "publication" -Name "publication transfers every transport through the pinned official action" -Pattern '^ {8}uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2\s*$' -Expected 4
+Assert-JobCount -Job "publication" -Name "publication addresses every transfer by an exact declared artifact id" -Pattern '^ {10}artifact-ids: \$\{\{ needs\.' -Expected 4
 Assert-JobCount -Job "publication" -Name "publication restates no artifact identity beyond the pinned action" -Pattern '^ {10}(pattern|run-id|repository|github-token|merge-multiple):' -Expected 0
 Assert-JobCount -Job "publication" -Name "no publication step selects an artifact by name" -Pattern '^ {10}name: ' -Expected 1
 Assert-JobCount -Job "publication" -Name "publication ships no hand-written artifact client" -Pattern '(Invoke-WebRequest|Invoke-RestMethod|Expand-Archive|Save-ArtifactTransport|Get-FileHash|api\.github\.com)' -Expected 0
@@ -266,6 +443,15 @@ Assert-JobCount -Job "publication" -Name "publication uploads one metadata evide
 
 # Ordering: every transport arrives through the pinned action, and the downloaded member set is proven against the
 # independent declaration before anything from it executes.
+# The verification step hands the verified SDK and runtime over through MCP_RELEASE_VERIFIED_*, so it must run before the
+# runner's publish invocation (otherwise `publish` has no handoff) and before the step that declares the credential (otherwise
+# its evaluation would run with the token in the environment). The token stays step-scoped: a job-level env block would
+# put it in every step, including the verification.
+Assert-Before -Job "publication" -Name "the toolchain is verified before the verified publisher is invoked" -First 'run: pwsh infrastructure/release/Update.ps1 -Verify' -Second '& $runner publish $configPath $candidateRoot'
+Assert-Before -Job "publication" -Name "the toolchain is verified before the step that declares the credential" -First 'run: pwsh infrastructure/release/Update.ps1 -Verify' -Second 'GITHUB_TOKEN: ${{ github.token }}'
+Assert-JobCount -Job "publication" -Name "the credential is declared by exactly one step-level entry" -Pattern '^ {10}GITHUB_TOKEN: \$\{\{ github\.token \}\}\s*$' -Expected 1
+Assert-JobCount -Job "publication" -Name "the publication job runs no SDK listing of its own" -Pattern '(--list-sdks|--list-runtimes)' -Expected 0
+Assert-JobCount -Job "publication" -Name "no job-level environment block can carry the credential into the verification step" -Pattern '^ {4}env:' -Expected 0
 Assert-Before -Job "publication" -Name "the declared artifact ids are validated before the first transfer" -First 'id: validateArtifacts' -Second 'uses: actions/download-artifact@'
 Assert-Before -Job "publication" -Name "the runtime transport is transferred before it is verified" -First 'uses: actions/download-artifact@' -Second '& pwsh -NoProfile -File $verifier'
 Assert-Before -Job "publication" -Name "the runtime inventory is verified before execution" -First '-InventoryJson $runtimeInventory' -Second '& $runner publish $configPath $candidateRoot'
@@ -357,14 +543,52 @@ if ($candidateTransfers -ne $componentIds.Count) {
     throw "cross-stage coherence failed [candidate transfer inventory]: the workflow transfers $candidateTransfers candidate transport(s) for $($componentIds.Count) roster participant(s)"
 }
 
-# The CLI receives `<componentId>/release/Config.json`; the roster must register exactly that path per participant.
+# The CLI receives the roster-registered canonical config path through the projected map. The workflow derives each release
+# directory as the path's parent and each component root as that directory's parent, so every registered path must be a forward-slash
+# `<component root>/release/Config.json` whose component root is non-empty; a nested root such as `infrastructure/resolver` is accepted.
 foreach ($entry in $roster) {
     $checked = $checked + 1
-    $derived = "$($entry.componentId)/release/Config.json"
+    $registered = "$($entry.configPath)"
 
-    if ($derived -ne $entry.configPath) {
-        throw "cross-stage coherence failed [CLI entry registration]: participant '$($entry.componentId)' registers '$($entry.configPath)' but the workflow CLI path derives '$derived'"
+    if ($registered -cnotmatch '\A(?:[A-Za-z0-9_.-]+/)+release/Config\.json\z') {
+        throw "cross-stage coherence failed [CLI entry registration]: participant '$($entry.componentId)' registers '$registered', which is not a forward-slash '<component root>/release/Config.json' path the workflow can derive its release directory and component root from"
     }
+}
+
+# unix.yml carries the same derivation and holds no participant or policy-path literal; it is read-only and never transfers or publishes.
+function Assert-UnixCount {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string]$Pattern,
+        [Parameter(Mandatory = $true)][int]$Expected
+    )
+
+    $script:checked = $script:checked + 1
+    $found = [regex]::Matches($unixText, $Pattern, [System.Text.RegularExpressions.RegexOptions]::Multiline).Count
+
+    if ($found -ne $Expected) {
+        throw "cross-stage coherence failed [$Name]: expected $Expected match(es) of '$Pattern' in $unixWorkflowPath; found $found"
+    }
+}
+
+Assert-UnixCount -Name "unix qualification reads the projected config-path map" -Pattern '\$env:RELEASE_CONFIG_PATHS \| ConvertFrom-Json -AsHashtable' -Expected 1
+Assert-UnixCount -Name "unix qualification fails closed on a missing map entry" -Pattern 'the projection declares no canonical config path for' -Expected 1
+Assert-UnixCount -Name "unix qualification derives the release directory from the map entry" -Pattern '^ {12}\$releaseDirectory = Split-Path -Parent \(\[string\]\$configPaths\[\$component\]\)\s*$' -Expected 1
+Assert-UnixCount -Name "unix qualification packs and pins from the derived release directory" -Pattern '^ {12}& dotnet fsi --nologo "\$releaseDirectory/(Build|Pin)\.fsx"\s*$' -Expected 2
+Assert-UnixCount -Name "unix qualification carries no derived or literal participant path" -Pattern ('(\$component/(release|tests)/|' + $configPathAlternation + ')') -Expected 0
+Assert-UnixCount -Name "unix qualification never publishes, transfers or holds a credential" -Pattern '(github\.token|secrets\.|contents: write|upload-artifact|download-artifact|MCP_RELEASE_DO_UPLOAD)' -Expected 0
+Assert-UnixCount -Name "unix qualification reads the projected components once" -Pattern 'ConvertFrom-Json \$env:RELEASE_COMPONENTS' -Expected 1
+Assert-UnixCount -Name "unix qualification runs the resolver packaged smoke exactly once" -Pattern '^ {10}& dotnet fsi --nologo infrastructure/resolver/tests/distribution/Smoke\.fsx\s*$' -Expected 1
+Assert-UnixCount -Name "unix resolver smoke step disables native error-action handling when the preference exists" -Pattern '^ {10}if \(Test-Path variable:PSNativeCommandUseErrorActionPreference\) \{ \$PSNativeCommandUseErrorActionPreference = \$false \}\s*$' -Expected 2
+Assert-UnixCount -Name "unix resolver smoke captures the native exit" -Pattern '^ {10}\$smokeCode = \$LASTEXITCODE\s*$' -Expected 1
+Assert-UnixCount -Name "unix resolver smoke reports the native exit as a diagnostic" -Pattern '^ {12}Write-Host "::error::resolver packaged smoke failed \(exit \$smokeCode\)"\s*$' -Expected 1
+Assert-UnixCount -Name "unix resolver smoke forwards the native exit" -Pattern '^ {12}exit \$smokeCode\s*$' -Expected 1
+$script:checked = $script:checked + 1
+$unixPackIndex = $unixText.IndexOf('& dotnet fsi --nologo "$releaseDirectory/Pin.fsx"', [System.StringComparison]::Ordinal)
+$unixBuildIndex = $unixText.IndexOf('& dotnet build infrastructure/resolver/Resolver.fsproj -c Release', [System.StringComparison]::Ordinal)
+$unixSmokeIndex = $unixText.IndexOf('& dotnet fsi --nologo infrastructure/resolver/tests/distribution/Smoke.fsx', [System.StringComparison]::Ordinal)
+if ($unixPackIndex -lt 0 -or $unixBuildIndex -lt 0 -or $unixSmokeIndex -lt 0 -or $unixPackIndex -gt $unixBuildIndex -or $unixBuildIndex -gt $unixSmokeIndex) {
+    throw "cross-stage coherence failed [unix smoke ordering]: the resolver smoke must follow the exact-head pack and pin and the resolver build in $unixWorkflowPath"
 }
 
 # The workflow passes the projection step's actual value; a step-local GITHUB_OUTPUT file belongs to a different step.

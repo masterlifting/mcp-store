@@ -4,8 +4,6 @@
 
 ![MCP Badge](https://badge.mcpx.dev)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square)](https://opensource.org/licenses/Apache-2.0)
-[![Python Lint & Format Check](https://github.com/chigwell/telegram-mcp/actions/workflows/python-lint-format.yml/badge.svg)](https://github.com/chigwell/telegram-mcp/actions/workflows/python-lint-format.yml)
-[![Docker Build & Compose Validation](https://github.com/chigwell/telegram-mcp/actions/workflows/docker-build.yml/badge.svg)](https://github.com/chigwell/telegram-mcp/actions/workflows/docker-build.yml)
 
 A Telegram integration for Claude, Cursor, and other MCP-compatible clients. It exposes Telegram account, chat, message, contact, media, folder, and admin operations through the [Model Context Protocol](https://modelcontextprotocol.io/) using [Telethon](https://docs.telethon.dev/).
 
@@ -469,27 +467,12 @@ For multiple accounts, pass variables such as `TELEGRAM_SESSION_STRING_WORK` and
 The implementation is split into a small compatibility entrypoint and modular package code:
 
 ```text
-main.py                    # historical entrypoint and compatibility exports
+main.py                    # compatibility entrypoint and exports
 telegram_mcp/runtime.py    # shared MCP setup, account routing, validation, file safety
 telegram_mcp/runner.py     # application startup
 telegram_mcp/tools/        # tool modules grouped by domain
 sanitize.py                # output sanitization helpers
-tests/                     # pytest suite
 ```
-
-Run tests:
-
-```bash
-uv run pytest
-```
-
-Run tests with coverage:
-
-```bash
-uv run pytest --cov --cov-report=term-missing --cov-report=xml
-```
-
-Coverage is configured in `pyproject.toml` with an 80% minimum gate for deterministic unit-testable core modules. GitHub Actions runs the same coverage command and uploads `coverage.xml`.
 
 Run formatting checks:
 
@@ -497,6 +480,9 @@ Run formatting checks:
 uv run black --check .
 uv run flake8 .
 ```
+
+Automated tests are not part of this package. Do not add automated tests without
+explicit, specific approval.
 
 ## Security Notes
 
@@ -549,11 +535,13 @@ Telegram messages, display names, chat titles, and button labels are untrusted c
    - `uv sync`
    - `uv run pre-commit install --hook-type pre-commit --hook-type pre-push`
 3. Create a focused branch.
-4. Add or update tests when behavior changes.
-5. Run checks locally:
+4. Run checks locally:
    - `uv run pre-commit run --all-files`
    - `uv run pre-commit run --hook-stage pre-push --all-files`
-6. Open a pull request with a concise description.
+5. Open a pull request with a concise description.
+
+Automated tests are not part of this package. Do not add automated tests without
+explicit, specific approval.
 
 ## License
 

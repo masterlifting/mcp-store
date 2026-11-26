@@ -115,7 +115,7 @@ let readCandidate (candidatePath: string) (policy: ReleasePolicy.PolicyProjectio
                                         match ReleaseCompare.contractFromPolicy policy policy.ArchiveName with
                                         | Error error -> Error error
                                         | Ok contract ->
-                                            match ReleaseCompare.validate contract observation "candidate" with
+                                            match ReleaseCompare.validateCandidate contract observation "candidate" with
                                             | Error error -> Error error
                                             | Ok () ->
                                                 match ReleaseCompare.parseEmbeddedManifestEntry observation with

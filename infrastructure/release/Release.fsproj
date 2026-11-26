@@ -1,10 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFramework>net11.0</TargetFramework>
     <OutputType>Exe</OutputType>
     <AssemblyName>ReleaseRunner</AssemblyName>
     <RootNamespace>Release</RootNamespace>
-    <LangVersion>9.0</LangVersion>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <DebugType>None</DebugType>
@@ -16,6 +14,7 @@
     <Compile Include="../distribution/Contract.fs" />
     <Compile Include="../distribution/Pin.fs" />
     <Compile Include="../distribution/Archive.fs" />
+    <Compile Include="Toolchain.fs" />
     <Compile Include="Policy.fs" />
     <Compile Include="Compare.fs" />
     <Compile Include="Metadata.fs" />

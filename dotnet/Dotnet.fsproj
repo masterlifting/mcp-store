@@ -1,6 +1,5 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFramework>net11.0</TargetFramework>
     <RootNamespace>Mcp.Dotnet</RootNamespace>
     <AssemblyName>Mcp.Dotnet</AssemblyName>
     <OutputType>Exe</OutputType>
@@ -10,7 +9,6 @@
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <WarningsAsErrors>3390;3391;3392;3393</WarningsAsErrors>
-    <LangVersion>9.0</LangVersion>
     <!-- Packaging must not embed a checkout-specific source revision. -->
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
   </PropertyGroup>

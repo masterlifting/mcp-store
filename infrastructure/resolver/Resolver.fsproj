@@ -1,18 +1,15 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFramework>net11.0</TargetFramework>
     <OutputType>Exe</OutputType>
     <AssemblyName>Resolver</AssemblyName>
     <RootNamespace>Resolver</RootNamespace>
-    <LangVersion>9.0</LangVersion>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <DebugType>None</DebugType>
     <DebugSymbols>false</DebugSymbols>
+    <!-- Artifact bytes must not change per commit: the informational version carries no source revision. -->
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
   </PropertyGroup>
-  <ItemGroup>
-    <InternalsVisibleTo Include="Resolver.Tests" />
-  </ItemGroup>
   <ItemGroup>
     <Compile Include="../../infrastructure/Failure.fs" />
     <Compile Include="../distribution/Contract.fs" />

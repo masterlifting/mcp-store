@@ -152,6 +152,13 @@ interop; Unix filesystem behavior remains unqualified. Build with:
 dotnet build workflow/Workflow.fsproj -c Release
 ```
 
+The producer has no automated behavioral test suite; the package gate
+`dotnet fsi workflow/tests/distribution/Run.fsx` verifies the packaged archive,
+manifest, pin and bytes of the already built and pinned `dist` (it does not build),
+and behavior is confirmed by a manual smoke of the
+extracted distribution (see [Verification.md](docs/Verification.md)). Adding
+automated tests requires explicit, specific approval.
+
 The component-local release scripts build the framework-dependent archive and
 consumer pin. The shared resolver owns installation, verification, and launch
 (`infrastructure/resolver/README.md`); it validates the distribution manifest

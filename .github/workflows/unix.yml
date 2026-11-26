@@ -4,8 +4,11 @@ name: unix
 # Explicit images and RIDs prevent a floating runner label from silently changing the qualified platform.
 # The projection supplies the SDK and producer roster, so this file carries no toolchain or participant literal.
 
+# The same Telegram-only exclusion as release.yml: Telegram is not a .NET release input. Check.ps1 in the release publisher job is the enforcing guard for this trigger.
 on:
   pull_request:
+    paths-ignore:
+      - 'telegram/**'
 
 concurrency:
   group: unix-${{ github.event.pull_request.number }}
@@ -43,6 +46,66 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
           persist-credentials: false
+
+      - name: advisory pre-merge check of this workflow's own trigger shape
+        shell: pwsh
+        # ADVISORY ONLY: with no required status check on main, a pull request that broadens this file's own filter also skips this step.
+        # The enforcing point for both workflows is infrastructure/release/Check.ps1 in the release publisher job. This subset is portable
+        # (forward-slash path, no Windows-only API) and runs the three negative cases against in-memory variants of the parsed block.
+        continue-on-error: true
+        run: |
+          $ErrorActionPreference = "Stop"
+          $path = ".github/workflows/unix.yml"
+          $event = "pull_request"
+          $exclusion = "      - 'telegram/**'"
+          $expected = @("  pull_request:", "    paths-ignore:", $exclusion)
+          function Read-Trigger {
+            param([string[]]$Lines)
+            $start = [array]::IndexOf($Lines, "on:")
+            if ($start -lt 0) { throw "the workflow declares no top-level on: block" }
+            $block = @()
+            for ($i = $start + 1; $i -lt $Lines.Count; $i++) {
+              $line = $Lines[$i]
+              if ([string]::IsNullOrWhiteSpace($line) -or $line.TrimStart().StartsWith("#")) { continue }
+              if (-not $line.StartsWith(" ")) { break }
+              $block += $line
+            }
+            return $block
+          }
+          function Get-Faults {
+            param([string[]]$Block)
+            $faults = @()
+            $events = @($Block | Where-Object { $_ -match '^  [^\s#][^:]*:' } | ForEach-Object { ($_ -replace '^  ([^:]+):.*$', '$1') })
+            if (($events -join ",") -cne $event) { $faults += "event keys [$($events -join ', ')] where only '$event' is allowed" }
+            foreach ($key in @("paths", "branches-ignore", "tags", "tags-ignore")) {
+              if (@($Block | Where-Object { $_ -match ('^\s+' + $key + ':') }).Count -ne 0) { $faults += "forbidden '$key' filter" }
+            }
+            $index = [array]::IndexOf($Block, "    paths-ignore:")
+            if (@($Block | Where-Object { $_ -match '^\s+paths-ignore:' }).Count -ne 1 -or $index -lt 0) {
+              $faults += "exactly one paths-ignore block is required"
+            } else {
+              $items = @()
+              for ($i = $index + 1; $i -lt $Block.Count; $i++) { if ($Block[$i].StartsWith("      ")) { $items += $Block[$i] } else { break } }
+              if ($items.Count -ne 1 -or $items[0] -cne $exclusion) { $faults += "paths-ignore must carry exactly the one expected exclusion item" }
+            }
+            if (($Block -join "`n") -cne ($expected -join "`n")) { $faults += "the trigger block is not the exact expected shape" }
+            return $faults
+          }
+          $block = @(Read-Trigger -Lines @(Get-Content -LiteralPath $path | ForEach-Object { $_.TrimEnd() }))
+          $actual = @(Get-Faults -Block $block)
+          if ($actual.Count -ne 0) { throw "the trigger shape is not accepted: $($actual -join '; ')" }
+          $text = $block -join "`n"
+          $variants = [ordered]@{
+            "broadened exclusion" = ($text -replace [regex]::Escape($exclusion), ($exclusion + "`n      - 'docs/**'"))
+            "missing exclusion"   = ($text -replace '(?m)^    paths-ignore:\n[^\n]*(\n|$)', '')
+            "extra event"         = ($text + "`n  schedule:`n    - cron: '0 0 * * *'")
+          }
+          foreach ($name in $variants.Keys) {
+            $variant = @($variants[$name] -split "`n")
+            if ($variants[$name] -ceq $text -or @(Get-Faults -Block $variant).Count -eq 0) { throw "the negative case '$name' was not rejected" }
+            Write-Host "negative case rejected: $name"
+          }
+          Write-Host "trigger shape accepted; three negative cases rejected (advisory)"
 
       - name: project the canonical toolchain from the policy JSON
         id: project
@@ -87,39 +150,42 @@ jobs:
           & dotnet "--info"
           if ($LASTEXITCODE -ne 0) { throw "dotnet --info failed (exit $LASTEXITCODE)" }
 
-      - name: pack both canonical producer distributions from the exact head
+      - name: pack every enrolled canonical distribution from the exact head
         shell: pwsh
-        # The resolver launch tests consume the canonical local distributions, so both packed products precede the Expecto gate.
+        # Every enrolled distribution is packed from the exact head; the roster keeps the resolver last.
         run: |
           $ErrorActionPreference = "Stop"
           if (Test-Path variable:PSNativeCommandUseErrorActionPreference) { $PSNativeCommandUseErrorActionPreference = $false }
           $components = @(ConvertFrom-Json $env:RELEASE_COMPONENTS)
           if ($components.Count -eq 0) { throw "the projection declares no enrolled component" }
+          $configPaths = $env:RELEASE_CONFIG_PATHS | ConvertFrom-Json -AsHashtable
           foreach ($component in $components) {
-            & dotnet fsi --nologo "$component/release/Build.fsx"
+            # The canonical config path is the roster-registered map entry; the release directory is its parent, so a nested component root needs no derived literal.
+            if (-not $configPaths.Contains($component)) { throw "the projection declares no canonical config path for '$component'" }
+            $releaseDirectory = Split-Path -Parent ([string]$configPaths[$component])
+            if ((Split-Path -Leaf $releaseDirectory) -cne "release") { throw "the canonical config path '$($configPaths[$component])' for '$component' is not under a release directory" }
+            & dotnet fsi --nologo "$releaseDirectory/Build.fsx"
             if ($LASTEXITCODE -ne 0) { throw "$component distribution build failed (exit $LASTEXITCODE)" }
-            & dotnet fsi --nologo "$component/release/Pin.fsx"
+            & dotnet fsi --nologo "$releaseDirectory/Pin.fsx"
             if ($LASTEXITCODE -ne 0) { throw "$component consumer pin failed (exit $LASTEXITCODE)" }
           }
 
-      - name: build the compiled resolver and its test project
+      - name: build the compiled resolver
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           & dotnet build infrastructure/resolver/Resolver.fsproj -c Release
           if ($LASTEXITCODE -ne 0) { throw "resolver build failed (exit $LASTEXITCODE)" }
-          & dotnet build infrastructure/resolver/tests/Tests.fsproj -c Release
-          if ($LASTEXITCODE -ne 0) { throw "resolver test build failed (exit $LASTEXITCODE)" }
 
-      - name: run the full resolver Expecto suite with the native exit
+      - name: smoke the packaged resolver archive
         shell: pwsh
-        # No filter, ignore list or result rewrite: the suite's own exit code is the qualification gate.
+        # Reads the distribution packed from the exact head above; only local archive bytes are used.
         run: |
           $ErrorActionPreference = "Stop"
           if (Test-Path variable:PSNativeCommandUseErrorActionPreference) { $PSNativeCommandUseErrorActionPreference = $false }
-          $watch = [System.Diagnostics.Stopwatch]::StartNew()
-          & dotnet run --project infrastructure/resolver/tests/Tests.fsproj -c Release --no-build
-          $code = $LASTEXITCODE
-          $watch.Stop()
-          Write-Host "resolver suite exit=$code elapsed=$([math]::Round($watch.Elapsed.TotalSeconds, 3))s"
-          exit $code
+          & dotnet fsi --nologo infrastructure/resolver/tests/distribution/Smoke.fsx
+          $smokeCode = $LASTEXITCODE
+          if ($smokeCode -ne 0) {
+            Write-Host "::error::resolver packaged smoke failed (exit $smokeCode)"
+            exit $smokeCode
+          }

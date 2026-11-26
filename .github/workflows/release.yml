@@ -6,11 +6,14 @@ name: release
 
 run-name: release ${{ github.sha }}
 
-# No path filter or dispatch: an unrelated push can still change packaged bytes.
+# A filter may exclude Telegram-only revisions because Telegram is not a .NET release input, but no filter may skip a .NET-affecting revision.
+# Check.ps1 enforces the exact trigger shape (one exclusion, no other filter, no other event); there is no dispatch.
 on:
   push:
     branches:
       - main
+    paths-ignore:
+      - 'telegram/**'
 
 # Least privilege: read default; only the publication job elevates to write.
 permissions:
@@ -75,16 +78,21 @@ jobs:
 
       - name: pack each enrolled producer's canonical local distribution and consumer pin
         shell: pwsh
-        # The resolver launch gate installs the canonical local product bytes, so both producers must be packed first.
+        # Every enrolled distribution is packed and pinned here; the roster keeps the resolver last.
         run: |
           $ErrorActionPreference = "Stop"
           if (Test-Path variable:PSNativeCommandUseErrorActionPreference) { $PSNativeCommandUseErrorActionPreference = $false }
           $components = @(ConvertFrom-Json $env:RELEASE_COMPONENTS)
           if ($components.Count -eq 0) { throw "the projection declares no enrolled component" }
+          $configPaths = $env:RELEASE_CONFIG_PATHS | ConvertFrom-Json -AsHashtable
           foreach ($component in $components) {
-            & dotnet fsi --nologo "$component/release/Build.fsx"
+            # The canonical config path is the roster-registered map entry; the release directory is its parent, so a nested component root needs no derived literal.
+            if (-not $configPaths.Contains($component)) { throw "the projection declares no canonical config path for '$component'" }
+            $releaseDirectory = Split-Path -Parent ([string]$configPaths[$component])
+            if ((Split-Path -Leaf $releaseDirectory) -cne "release") { throw "the canonical config path '$($configPaths[$component])' for '$component' is not under a release directory" }
+            & dotnet fsi --nologo "$releaseDirectory/Build.fsx"
             if ($LASTEXITCODE -ne 0) { throw "$component distribution build failed (exit $LASTEXITCODE)" }
-            & dotnet fsi --nologo "$component/release/Pin.fsx"
+            & dotnet fsi --nologo "$releaseDirectory/Pin.fsx"
             if ($LASTEXITCODE -ne 0) { throw "$component consumer pin failed (exit $LASTEXITCODE)" }
           }
 
@@ -116,6 +124,13 @@ jobs:
             $generated.Add("    " + $property.OuterXml)
           }
           # The staged sources live under `src`, so the SDK's default glob must not add a second unordered item set.
+          # The stage imports no repository build props, so it takes the framework and language version `Update.ps1 -Verify` evaluated.
+          $targetFramework = $env:MCP_RELEASE_VERIFIED_TARGET_FRAMEWORK
+          $languageVersion = $env:MCP_RELEASE_VERIFIED_LANGUAGE_VERSION
+          if ($targetFramework -cnotmatch '\Anet[0-9]+\.[0-9]+\z') { throw "the verified TargetFramework '$targetFramework' is missing or not a plain netX.Y moniker" }
+          if ($languageVersion -cnotmatch '\A[0-9]+\.[0-9]+\z') { throw "the verified LangVersion '$languageVersion' is missing or not a plain X.Y version" }
+          $generated.Add("    <TargetFramework>$targetFramework</TargetFramework>")
+          $generated.Add("    <LangVersion>$languageVersion</LangVersion>")
           $generated.Add('    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>')
           $generated.Add('  </PropertyGroup>')
           $generated.Add('  <ItemGroup>')
@@ -198,129 +213,17 @@ jobs:
           path: ${{ env.PUBLISHER_STAGE_ROOT }}/publish
           if-no-files-found: error
 
-      - name: build the producer projects, the resolver and the compiled Expecto projects
+      - name: build the producer projects and the resolver
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          # Build the exact projects the Expecto gates execute; the --no-build runs below then execute that same output.
           dotnet build dotnet/Dotnet.fsproj -c Release
           if ($LASTEXITCODE -ne 0) { throw "dotnet producer build failed (exit $LASTEXITCODE)" }
           dotnet build workflow/Workflow.fsproj -c Release
           if ($LASTEXITCODE -ne 0) { throw "workflow producer build failed (exit $LASTEXITCODE)" }
-          dotnet build dotnet/tests/Tests.fsproj -c Release
-          if ($LASTEXITCODE -ne 0) { throw "producer Expecto test project build failed (exit $LASTEXITCODE)" }
-          dotnet build infrastructure/release/tests/Tests.fsproj -c Release
-          if ($LASTEXITCODE -ne 0) { throw "compiled release Expecto project build failed (exit $LASTEXITCODE)" }
           # The resolver is the shared install and launch boundary for both producers, so a build break must fail before publication.
           dotnet build infrastructure/resolver/Resolver.fsproj -c Release
           if ($LASTEXITCODE -ne 0) { throw "resolver build failed (exit $LASTEXITCODE)" }
-          dotnet build infrastructure/resolver/tests/Tests.fsproj -c Release
-          if ($LASTEXITCODE -ne 0) { throw "resolver Expecto test project build failed (exit $LASTEXITCODE)" }
-
-      - name: run the producer Expecto gate (native exit preserved)
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          # Actual compiled Expecto entrypoint: no --ignore, no filter, no result rewriting; the native failure exit blocks the release job.
-          dotnet run --project dotnet/tests/Tests.fsproj -c Release --no-build
-          exit $LASTEXITCODE
-
-      - name: run the resolver Expecto gate (native exit preserved)
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          # dotnet test reports no counts for a console Expecto entrypoint, so the runner's own failure exit is the gate.
-          dotnet run --project infrastructure/resolver/tests/Tests.fsproj -c Release --no-build
-          exit $LASTEXITCODE
-
-      - name: run the non-packaging Workflow test entrypoints (native exit preserved)
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          # Read the native exit code instead of letting a native-command error preference throw before it is captured.
-          if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
-            $PSNativeCommandUseErrorActionPreference = $false
-          }
-          # Explicit deterministic selection of the thirteen Workflow suites that need no built distribution; never globbed.
-          $entrypoints = @(
-            "workflow/tests/authority/Metadata.fsx",
-            "workflow/tests/locking/Run.fsx",
-            "workflow/tests/evidence/Run.fsx",
-            "workflow/tests/Projections.fsx",
-            "workflow/tests/schema/Run.fsx",
-            "workflow/tests/contract/Run.fsx",
-            "workflow/tests/path/Run.fsx",
-            "workflow/tests/profile/Run.fsx",
-            "workflow/tests/artifacts/Run.fsx",
-            "workflow/tests/protocol/Findings.fsx",
-            "workflow/tests/protocol/Negotiation.fsx",
-            "workflow/tests/protocol/Run.fsx",
-            "workflow/tests/domain/Run.fsx"
-          )
-          $tempBase = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { [System.IO.Path]::GetTempPath() }
-          # The suites compare this pre-redirection path with their resolved directory, so it is captured before any child starts.
-          $realAppData = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::LocalApplicationData)
-          $redirected = @(
-            "LOCALAPPDATA",
-            "APPDATA",
-            "ProgramData",
-            "USERPROFILE",
-            "HOME",
-            "TEMP",
-            "TMP",
-            "DOTNET_CLI_HOME",
-            "MCP_WORKFLOW_TEST_EXPECTED_APP_DATA",
-            "MCP_WORKFLOW_TEST_REAL_APP_DATA"
-          )
-          foreach ($entrypoint in $entrypoints) {
-            if (-not (Test-Path -LiteralPath $entrypoint)) { throw "Workflow test entrypoint is missing: $entrypoint" }
-            # A unique run root per suite keeps one suite's resolved key path out of every other suite's reach.
-            $runRoot = Join-Path $tempBase ("workflow-test-" + [guid]::NewGuid().ToString("N"))
-            $appData = Join-Path $runRoot "appdata"
-            $homeDirectory = Join-Path $runRoot "home"
-            $tempDirectory = Join-Path $runRoot "temp"
-            $cliHome = Join-Path $runRoot "cli"
-            foreach ($directory in @($appData, $homeDirectory, $tempDirectory, $cliHome)) {
-              New-Item -ItemType Directory -Path $directory -Force | Out-Null
-            }
-            $previous = @{}
-            foreach ($name in $redirected) {
-              $previous[$name] = [System.Environment]::GetEnvironmentVariable($name)
-            }
-            Write-Host "::group::workflow test $entrypoint"
-            $code = 1
-            try {
-              # Set before the child starts, so the suite guard resolves the sandbox before a producer captures a key path.
-              $env:LOCALAPPDATA = $appData
-              $env:APPDATA = $appData
-              $env:ProgramData = $appData
-              $env:USERPROFILE = $homeDirectory
-              $env:HOME = $homeDirectory
-              $env:TEMP = $tempDirectory
-              $env:TMP = $tempDirectory
-              $env:DOTNET_CLI_HOME = $cliHome
-              $env:MCP_WORKFLOW_TEST_EXPECTED_APP_DATA = $appData
-              $env:MCP_WORKFLOW_TEST_REAL_APP_DATA = $realAppData
-              & dotnet fsi --nologo $entrypoint
-              $code = $LASTEXITCODE
-            } finally {
-              foreach ($name in $redirected) {
-                [System.Environment]::SetEnvironmentVariable($name, $previous[$name])
-              }
-              Write-Host "::endgroup::"
-              Remove-Item -LiteralPath $runRoot -Recurse -Force -ErrorAction SilentlyContinue
-            }
-            if ($code -ne 0) {
-              Write-Host "::error::Workflow test entrypoint failed: $entrypoint (exit $code)"
-              exit $code
-            }
-          }
-
-      - name: run the complete compiled release regression gate
-        shell: pwsh
-        # Test.ps1 runs the complete compiled suite with a case-count check and never excludes or rewrites a case; its
-        # retained baseline regression reads canonical fixtures, so no stage downloads or stages a fixture transport.
-        run: pwsh infrastructure/release/Test.ps1
 
       - name: strict FCS typecheck of the retained release scripts
         shell: pwsh
@@ -329,7 +232,7 @@ jobs:
   preparation:
     name: prepare-candidates
     runs-on: windows-latest
-    # Read-only: this job runs both producers' package gates and builds candidates; it never holds write authority.
+    # Read-only: this job prepares every enrolled candidate, including its package gate; it never holds write authority.
     permissions:
       contents: read
     # Static producer-specific keys: each candidate is uploaded by its own step, so one common key can never be
@@ -341,6 +244,9 @@ jobs:
       candidateArtifactId_workflow: ${{ steps.upload_workflow.outputs.artifact-id }}
       candidateArtifactDigest_workflow: ${{ steps.upload_workflow.outputs.artifact-digest }}
       candidateArchiveName_workflow: ${{ steps.prepare.outputs.archiveName_workflow }}
+      candidateArtifactId_resolver: ${{ steps.upload_resolver.outputs.artifact-id }}
+      candidateArtifactDigest_resolver: ${{ steps.upload_resolver.outputs.artifact-digest }}
+      candidateArchiveName_resolver: ${{ steps.prepare.outputs.archiveName_resolver }}
     steps:
       - name: checkout exact event SHA
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -369,7 +275,7 @@ jobs:
         shell: pwsh
         run: pwsh infrastructure/release/Update.ps1 -Verify
 
-      - name: build the release runner and both producer projects
+      - name: build the release runner and the producer projects
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -380,46 +286,11 @@ jobs:
           dotnet build workflow/Workflow.fsproj -c Release
           if ($LASTEXITCODE -ne 0) { throw "workflow producer build failed (exit $LASTEXITCODE)" }
 
-      - name: run both producers' distribution package gates (native exit preserved)
-        shell: pwsh
-        # Each participant's package gate is read from its own roster-registered component root and must pass before any candidate is uploaded.
-        run: |
-          $ErrorActionPreference = "Stop"
-          if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
-            $PSNativeCommandUseErrorActionPreference = $false
-          }
-          $components = @(ConvertFrom-Json $env:RELEASE_COMPONENTS)
-          foreach ($component in $components) {
-            $entrypoint = "$component/tests/distribution/Run.fsx"
-            if (-not (Test-Path -LiteralPath $entrypoint)) { throw "producer package gate is missing: $entrypoint" }
-            Write-Host "::group::producer package gate $entrypoint"
-            & dotnet fsi --nologo $entrypoint
-            $code = $LASTEXITCODE
-            Write-Host "::endgroup::"
-            if ($code -ne 0) {
-              Write-Host "::error::producer package gate failed: $entrypoint (exit $code)"
-              exit $code
-            }
-          }
-
-      - name: run the Workflow packaged runtime coordination gate (native exit preserved)
-        shell: pwsh
-        # Producer-owned and roster-independent: it exercises the packaged runtime against the clean built distribution.
-        run: |
-          $ErrorActionPreference = "Stop"
-          if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
-            $PSNativeCommandUseErrorActionPreference = $false
-          }
-          $entrypoint = "workflow/tests/coordination/Run.fsx"
-          if (-not (Test-Path -LiteralPath $entrypoint)) { throw "Workflow packaged coordination gate is missing: $entrypoint" }
-          pwsh -NoProfile -File ./Run.ps1 -Script $entrypoint
-          exit $LASTEXITCODE
-
       - name: prepare each enrolled candidate from its canonical policy
         id: prepare
         shell: pwsh
-        # One job, one explicit loop over the projection: the retired matrix leg published a shared output key whose
-        # last writer won, so each component now writes only its own static keys.
+        # Preparation builds, pins and runs the component's package gate in order, failing closed before a candidate is accepted.
+        # One job, one explicit loop over the projection: each component writes only its own static keys.
         run: |
           $ErrorActionPreference = "Stop"
           if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
@@ -430,9 +301,11 @@ jobs:
           if (-not (Test-Path -LiteralPath $runner -PathType Leaf)) { throw "compiled release runner not found at $runner" }
           $components = @(ConvertFrom-Json $env:RELEASE_COMPONENTS)
           if ($components.Count -eq 0) { throw "the projection declares no enrolled component" }
+          $configPaths = $env:RELEASE_CONFIG_PATHS | ConvertFrom-Json -AsHashtable
           foreach ($component in $components) {
             # The policy path is the roster-registered canonical config; the config reader itself is the compiled one.
-            $configPath = Join-Path (Get-Location) "$component/release/Config.json"
+            if (-not $configPaths.Contains($component)) { throw "the projection declares no canonical config path for '$component'" }
+            $configPath = Join-Path (Get-Location) ([string]$configPaths[$component])
             if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) { throw "canonical policy is missing for '$component': $configPath" }
             $candidate = Join-Path $env:CANDIDATE_ROOT $component
             $stdout = (& $runner prepare $configPath $candidate | Out-String)
@@ -454,6 +327,30 @@ jobs:
             "archiveName_$component=$archiveName" >> $env:GITHUB_OUTPUT
             "CANDIDATE_ARCHIVE_NAME_$(($component).ToUpperInvariant())=$archiveName" >> $env:GITHUB_ENV
             Write-Host "prepared $component candidate in $candidate with archive $archiveName"
+          }
+
+      - name: smoke the packaged resolver archive on the final regenerated distribution (native exit preserved)
+        shell: pwsh
+        # Runs after every candidate is prepared so it reads the final distribution; only local archive bytes are used and it precedes every candidate upload.
+        run: |
+          $ErrorActionPreference = "Stop"
+          if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
+            $PSNativeCommandUseErrorActionPreference = $false
+          }
+          $resolverArchiveName = $env:CANDIDATE_ARCHIVE_NAME_RESOLVER
+          if ([string]::IsNullOrWhiteSpace($resolverArchiveName)) { throw "the preparation step recorded no resolver candidate archive name" }
+          $candidateArchive = Join-Path $env:CANDIDATE_ROOT "resolver/$resolverArchiveName"
+          $distributionArchive = Join-Path (Get-Location) "infrastructure/resolver/dist/$resolverArchiveName"
+          $candidateSha256 = (Get-FileHash -LiteralPath $candidateArchive -Algorithm SHA256).Hash
+          $distributionSha256 = (Get-FileHash -LiteralPath $distributionArchive -Algorithm SHA256).Hash
+          if ($candidateSha256 -cne $distributionSha256) { throw "the resolver candidate archive $candidateSha256 differs from the distribution archive $distributionSha256 the smoke reads" }
+          Write-Host "::group::resolver packaged smoke"
+          & dotnet fsi --nologo infrastructure/resolver/tests/distribution/Smoke.fsx
+          $smokeCode = $LASTEXITCODE
+          Write-Host "::endgroup::"
+          if ($smokeCode -ne 0) {
+            Write-Host "::error::resolver packaged smoke failed (exit $smokeCode)"
+            exit $smokeCode
           }
 
       - name: upload the dotnet candidate transport
@@ -478,12 +375,24 @@ jobs:
             ${{ env.CANDIDATE_ROOT }}/workflow/distribution.json
           if-no-files-found: error
 
+      - name: upload the resolver candidate transport
+        id: upload_resolver
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          # Exactly the two direct members the publisher consumes: the producer archive and its distribution manifest.
+          name: release-candidate-resolver
+          path: |
+            ${{ env.CANDIDATE_ROOT }}/resolver/${{ env.CANDIDATE_ARCHIVE_NAME_RESOLVER }}
+            ${{ env.CANDIDATE_ROOT }}/resolver/distribution.json
+          if-no-files-found: error
+
   publication:
     name: publish
     # The single write boundary: this job installs the canonical SDK so the framework-dependent runtime can execute,
     # downloads the exact artifact ids declared by the two read-only jobs through the pinned official download action,
     # verifies every downloaded member against the publisher job's independent inventory, and only then runs the
-    # verified publisher. It runs no build, restore, FSI or test work.
+    # verified publisher. Its pre-credential toolchain verification (Update.ps1 -Verify) runs nested FSI and MSBuild
+    # evaluation; the step that holds the credential runs no FSI, MSBuild evaluation, build, restore or test work.
     needs:
       - publisher
       - preparation
@@ -526,6 +435,7 @@ jobs:
           RUNTIME_ARTIFACT_ID: ${{ needs.publisher.outputs.runtimeArtifactId }}
           CANDIDATE_ARTIFACT_ID_DOTNET: ${{ needs.preparation.outputs.candidateArtifactId_dotnet }}
           CANDIDATE_ARTIFACT_ID_WORKFLOW: ${{ needs.preparation.outputs.candidateArtifactId_workflow }}
+          CANDIDATE_ARTIFACT_ID_RESOLVER: ${{ needs.preparation.outputs.candidateArtifactId_resolver }}
         run: |
           $ErrorActionPreference = "Stop"
           function Assert-ArtifactId {
@@ -538,7 +448,8 @@ jobs:
           Assert-ArtifactId "publisher runtime" $env:RUNTIME_ARTIFACT_ID
           Assert-ArtifactId "dotnet candidate" $env:CANDIDATE_ARTIFACT_ID_DOTNET
           Assert-ArtifactId "workflow candidate" $env:CANDIDATE_ARTIFACT_ID_WORKFLOW
-          Write-Host "validated the three declared artifact ids before any transfer"
+          Assert-ArtifactId "resolver candidate" $env:CANDIDATE_ARTIFACT_ID_RESOLVER
+          Write-Host "validated the four declared artifact ids before any transfer"
 
       - name: download the declared publisher runtime transport
         id: downloadPublisher
@@ -567,6 +478,14 @@ jobs:
           # The exact numeric artifact id from this run; a single id extracts directly into the path below.
           artifact-ids: ${{ needs.preparation.outputs.candidateArtifactId_workflow }}
           path: ${{ runner.temp }}/candidate-workflow
+
+      - name: download the declared resolver candidate transport
+        id: downloadCandidateResolver
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          # The exact numeric artifact id from this run; a single id extracts directly into the path below.
+          artifact-ids: ${{ needs.preparation.outputs.candidateArtifactId_resolver }}
+          path: ${{ runner.temp }}/candidate-resolver
 
       - name: verify the declared transports and publish each enrolled component
         id: publish
@@ -629,6 +548,7 @@ jobs:
           if (-not ($inventoryEntries | Where-Object { "$($_.path)" -ceq "ReleaseRunner.exe" })) { throw "the declared runtime inventory carries no ReleaseRunner.exe" }
           $components = @(ConvertFrom-Json $env:RELEASE_COMPONENTS)
           if ($components.Count -eq 0) { throw "the projection declares no enrolled component" }
+          $configPaths = $env:RELEASE_CONFIG_PATHS | ConvertFrom-Json -AsHashtable
 
           # Complete membership, path and SHA-256 proof against the publisher job's own inventory, before any
           # downloaded file is executed. The verifier is read-only and reads no credential or platform state.
@@ -642,7 +562,8 @@ jobs:
           $firstFailure = 0
           foreach ($component in $components) {
             # The policy comes from this fresh trusted checkout, never from candidate data.
-            $configPath = Join-Path $workspace "$component/release/Config.json"
+            if (-not $configPaths.Contains($component)) { throw "the projection declares no canonical config path for '$component'" }
+            $configPath = Join-Path $workspace ([string]$configPaths[$component])
             if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) { throw "the trusted checkout carries no policy for '$component': $configPath" }
             $candidateArtifactId = Read-DeclaredOutput $candidates "candidateArtifactId_$component" "preparation"
             $candidateDigest = Read-DeclaredOutput $candidates "candidateArtifactDigest_$component" "preparation"

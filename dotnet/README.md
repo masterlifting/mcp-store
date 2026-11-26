@@ -2,7 +2,7 @@
 
 This directory is the standalone producer boundary for the bounded .NET
 build/test MCP server. It owns the Dotnet producer implementation and publishes
-the `dotnet` v1.0.6 framework-dependent `net11.0` runtime distribution. Consumers
+the `dotnet` v1.0.7 framework-dependent `net11.0` runtime distribution. Consumers
 do not build or run this source checkout at runtime.
 
 ## Consumer installation
@@ -51,28 +51,17 @@ The server exposes the fixed tools `build`, `test`, and `details` over stdio.
 The implementation has no dependency on OpenCode APIs; OpenCode owns only its
 consumer descriptor, launcher, and tool-facing contracts.
 
-## Producer tests
+## Verification
 
-The deterministic F#-native implementation suite is an Expecto executable:
-
-```text
-dotnet run --project tests/Tests.fsproj --configuration Release
-```
-
-Run the command from this directory. It targets `net11.0`, references
-`Dotnet.fsproj` directly, and owns the dotnet build/test domain, authorization,
-process, quota, and MCP transport coverage.
-
-The repo-shared provenance guard has a focused check that does not require a clean
-tree:
-
-```text
-dotnet fsi dotnet/tests/provenance/Run.fsx
-```
+The producer has no automated behavioral test suite. Verify a change by building
+`dotnet/Dotnet.fsproj` in Release, running the package gate below, and, when a
+behavioral check is needed, a manual smoke: extract the packaged archive and start
+the MCP through the Resolver contract. Adding automated tests requires explicit,
+specific approval. The production MCP `test` tool is unrelated and remains.
 
 ## Producer packaging
 
-From the repository root, build and pin the immutable `v1.0.6.zip`
+From the repository root, build and pin the immutable `v1.0.7.zip`
 release with:
 
 ```text
@@ -81,12 +70,13 @@ dotnet fsi dotnet/release/Pin.fsx
 dotnet fsi dotnet/tests/distribution/Run.fsx
 ```
 
-The scripts stage only the allowlisted runtime files under
+The package gate only reads the built and pinned output; it does not build or
+regenerate. The scripts stage only the allowlisted runtime files under
 `dotnet/dist/dotnet/`. `distribution.json` records the exact archive
 allowlist and a lowercase SHA-256 for every runtime file. The generated archive
 contains the runtime files, `NOTICE.txt`, and the manifest; source, project,
 build output, PDB, and apphost files are rejected. The archive filename
-encodes the version only (`v1.0.6.zip`); the producer identity already comes
+encodes the version only (`v1.0.7.zip`); the producer identity already comes
 from the producer directory, the manifest `id`, the project/assembly
 identity, the release context, and the consumer descriptor. Packaging refuses
 to run from a dirty source tree and stamps each manifest with the clean

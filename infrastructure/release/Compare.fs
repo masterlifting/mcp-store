@@ -65,7 +65,7 @@ let contractFromPolicy
               Runtime = policy.RuntimeVersion
               Platform = policy.Platform }
           Launch =
-            { Kind = launchKindDotnetExec
+            { Kind = policy.LaunchKind
               Entrypoint = policy.EntryDll
               Arguments = policy.LaunchArguments }
           EntryAllowlist = trustedArchiveMemberNames policy.PublishedFiles })
@@ -116,7 +116,7 @@ let private renderLaunch (launch: LaunchDescriptor) : string =
         |> List.map (fun argument -> $"{argument.Flag} {argument.Input} {LaunchArgumentType.wireName argument.Type}")
         |> String.concat "; "
 
-    $"{launch.Kind} {launch.Entrypoint} [{arguments}]"
+    $"{LaunchKind.wireName launch.Kind} {launch.Entrypoint} [{arguments}]"
 
 // The declared runtime prerequisite must match the packaged runtime configuration
 // bytes that `files` hashes, so the manifest never states an unverified runtime.
@@ -292,6 +292,28 @@ let validate (contract: ComponentContract) (observation: ArchiveObservation) (la
                     Error(IdentityMismatch("launch", renderLaunch contract.Launch, renderLaunch manifest.Launch))
                 else
                     Ok()
+
+// Candidate-only: the declared `producer.runtime` is the SDK-derived value, and the manifest's `runtime.version` is the
+// byte-derived value `selfConsistency` already proved against the packaged runtime configuration. They must agree.
+// `observe` and `selfConsistency` do not call this, because they also validate already-published remote and mirror
+// archives, and a published archive whose two values differ must not become unpublishable at its own version.
+let producerRuntimeMatchesPackaged (manifest: DistributionManifest) : Result<unit, ReleaseError> =
+    if manifest.Producer.Runtime = manifest.Runtime.Version then
+        Ok()
+    else
+        Error(IdentityMismatch("producer.runtime", manifest.Runtime.Version, manifest.Producer.Runtime))
+
+// The candidate-path validation: the shared contract validation plus the declared-versus-packaged runtime equality.
+let validateCandidate (contract: ComponentContract) (observation: ArchiveObservation) (label: string) : Result<unit, ReleaseError> =
+    match validate contract observation label with
+    | Error error -> Error error
+    | Ok () ->
+        match observation.ManifestBody with
+        | None -> Error(MalformedArtifact(observation.ArchivePath, "the canonical embedded manifest is missing"))
+        | Some body ->
+            match parseBytes (Encoding.UTF8.GetBytes body) with
+            | Error error -> Error error
+            | Ok manifest -> producerRuntimeMatchesPackaged manifest
 
 // Excludes the derived local-header offset; every stored byte, including the compressed payload, must match.
 let private compareRawEntries (published: DistributionArchive.Entry) (candidate: DistributionArchive.Entry) : string option =

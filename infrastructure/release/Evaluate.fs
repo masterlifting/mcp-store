@@ -223,6 +223,7 @@ module VerifiedCandidate =
                     |> Result.bind (fun _ -> idCheck)
                     |> Result.bind (fun _ -> versionCheck)
                     |> Result.bind (fun _ -> archiveCheck)
+                    |> Result.bind (fun _ -> ReleaseCompare.producerRuntimeMatchesPackaged manifest)
                 manifestBytesCheck
                 |> Result.bind (fun _ -> manifestShaCheck)
                 |> Result.bind (fun _ -> archiveShaCheck)
@@ -390,6 +391,7 @@ module VerifiedCandidate =
                         |> Result.bind (fun _ -> idCheck)
                         |> Result.bind (fun _ -> versionCheck)
                         |> Result.bind (fun _ -> archiveCheck)
+                        |> Result.bind (fun _ -> ReleaseCompare.producerRuntimeMatchesPackaged manifest)
                         |> Result.map (fun _ -> manifest)
                     manifestBytesCheck
                     |> Result.bind (fun _ -> manifestShaCheck)
@@ -693,7 +695,7 @@ let evaluate
         | Error error -> return Error error
         | Ok () ->
 
-            match ReleaseCompare.validate candidate.Dto.Contract candidate.ArchiveObservation "candidate" with
+            match ReleaseCompare.validateCandidate candidate.Dto.Contract candidate.ArchiveObservation "candidate" with
             | Error error -> return Error error
             | Ok () ->
 

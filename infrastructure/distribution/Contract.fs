@@ -14,8 +14,28 @@ open SharedFailure
 let schemaVersion = 2
 let manifestEntryName = "distribution.json"
 let noticeEntryName = "NOTICE.txt"
-let launchKindDotnetExec = "dotnet-exec"
 let runtimeFramework = "Microsoft.NETCore.App"
+
+// The launch kinds are a closed set added additively to schema 2: an unknown kind is rejected by
+// the reader, so the fail-closed guarantee is unchanged and no schema advance is required.
+// `DotnetExec` is an MCP launch target with required arguments; `DotnetCli` is a host-run
+// command-line tool that declares no arguments and is never an MCP launch target.
+type LaunchKind =
+    | DotnetExec
+    | DotnetCli
+
+module LaunchKind =
+    let wireName (value: LaunchKind) : string =
+        match value with
+        | DotnetExec -> "dotnet-exec"
+        | DotnetCli -> "dotnet-cli"
+
+    let private names = [ DotnetExec; DotnetCli ]
+
+    let tryParse (value: string) : LaunchKind option =
+        names |> List.tryFind (fun candidate -> wireName candidate = value)
+
+    let allNames: string = names |> List.map wireName |> String.concat ", "
 
 // The launch argument value kinds are a closed set: a consumer can resolve every
 // descriptor without producer knowledge, and no shell template is admitted.
@@ -42,7 +62,7 @@ type LaunchArgument =
       Type: LaunchArgumentType }
 
 type LaunchDescriptor =
-    { Kind: string
+    { Kind: LaunchKind
       Entrypoint: string
       Arguments: LaunchArgument list }
 
@@ -279,14 +299,17 @@ let validate (manifest: DistributionManifest) : Result<unit, ReleaseError> =
     requireNonEmpty "producer.runtime" manifest.Producer.Runtime
     requireNonEmpty "producer.platform" manifest.Producer.Platform
 
-    if manifest.Launch.Kind <> launchKindDotnetExec then
-        fail $"the manifest 'launch.kind' '{manifest.Launch.Kind}' is not '{launchKindDotnetExec}'"
-
     if not (isSafeRelativePath manifest.Launch.Entrypoint) then
         fail "the manifest 'launch.entrypoint' is not a safe slash-separated relative path"
 
-    if List.isEmpty manifest.Launch.Arguments then
-        fail "the manifest 'launch.arguments' must declare at least one required argument"
+    // Kind-specific argument rule: an MCP launch target needs its required arguments; a CLI tool declares none.
+    match manifest.Launch.Kind with
+    | DotnetExec ->
+        if List.isEmpty manifest.Launch.Arguments then
+            fail "the manifest 'launch.arguments' must declare at least one required argument for 'dotnet-exec'"
+    | DotnetCli ->
+        if not (List.isEmpty manifest.Launch.Arguments) then
+            fail "the manifest 'launch.arguments' must be empty for 'dotnet-cli'"
 
     if manifest.Launch.Arguments |> List.map (fun argument -> lower argument.Flag) |> List.distinct |> List.length <> manifest.Launch.Arguments.Length then
         fail "the manifest 'launch.arguments' repeats an argument flag"
@@ -464,13 +487,21 @@ let private parseObject (root: JsonElement) : Result<DistributionManifest, Relea
     let launch =
         match reader.Object(root, "launch") with
         | None ->
-            { Kind = ""
+            { Kind = DotnetExec
               Entrypoint = ""
               Arguments = [] }
         | Some element ->
             let launchReader = MemberReader "the manifest 'launch'"
             launchReader.KnownFields(element, [ "kind"; "entrypoint"; "arguments" ])
-            let kind = launchReader.String(element, "kind")
+            let kindName = launchReader.String(element, "kind")
+
+            let kind =
+                match LaunchKind.tryParse kindName with
+                | Some parsed -> parsed
+                | None ->
+                    launchReader.Fail $"the manifest 'launch.kind' '{kindName}' is not one of {LaunchKind.allNames}"
+                    DotnetExec
+
             let entrypoint = launchReader.String(element, "entrypoint")
 
             let arguments =
@@ -622,7 +653,7 @@ let toJsonNode (manifest: DistributionManifest) : JsonNode =
     node["producer"] <- producer
     node["archive"] <- JsonValue.Create manifest.Archive
     let launch = JsonObject()
-    launch["kind"] <- JsonValue.Create manifest.Launch.Kind
+    launch["kind"] <- JsonValue.Create(LaunchKind.wireName manifest.Launch.Kind)
     launch["entrypoint"] <- JsonValue.Create manifest.Launch.Entrypoint
     let arguments = JsonArray()
 

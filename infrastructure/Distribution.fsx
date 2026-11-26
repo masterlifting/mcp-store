@@ -8,6 +8,7 @@ module DistributionBuild
 #load "Provenance.fs"
 #load "distribution/Contract.fs"
 #load "distribution/Archive.fs"
+#load "release/Toolchain.fs"
 #load "release/Policy.fs"
 
 open System
@@ -35,6 +36,7 @@ type Request =
       EntryDll: string
       ArchiveName: string
       PublishedFiles: string list
+      LaunchKind: LaunchKind
       LaunchArguments: LaunchArgument list
       ExtraPublishProperties: string list
       Notice: string }
@@ -45,11 +47,20 @@ type DistributionResult =
       ManifestSha256: string
       Revision: string }
 
-// Build and pin entrypoints share the compiled publisher's bounded policy parser.
-let loadConfig (path: string) : PolicyProjection =
-    match ReleasePolicy.parse path with
-    | Ok policy -> policy
-    | Error error -> raise (InvalidDataException(ReleaseError.message error))
+// This script lives directly under the repository's infrastructure directory, which anchors the toolchain owners.
+let private repositoryRoot = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, ".."))
+
+// Build and pin entrypoints share the compiled publisher's bounded policy parser. The SDK and runtime versions come from
+// their owners (`global.json` and the pinned SDK), resolved locally in this credential-free context, never from the policy.
+let loadConfig (path: string) : Async<Result<PolicyProjection, ReleaseError>> =
+    releaseResult {
+        let! toolchain = ReleaseToolchain.resolveLocal repositoryRoot
+        let! policy = ReleasePolicy.parse toolchain path
+        return policy
+    }
+
+// Entrypoints that also load Testing.fsx see a second ReleaseError definition, so only this string crosses that boundary.
+let describeError (error: ReleaseError) : string = ReleaseError.message error
 
 let private listFiles (root: string) (searchOption: SearchOption) =
     Directory.EnumerateFiles(root, "*", searchOption)
@@ -200,7 +211,7 @@ let private buildWith
                   Platform = request.Platform }
               Archive = request.ArchiveName
               Launch =
-                { Kind = launchKindDotnetExec
+                { Kind = request.LaunchKind
                   Entrypoint = request.EntryDll
                   Arguments = request.LaunchArguments }
               Runtime = runtime

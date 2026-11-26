@@ -137,19 +137,15 @@ The analyzer keeps static, typecheck, and integration concerns separate:
 The `validate` subcommand composes every static check followed by the
 typecheck lane.
 
-## Regression tests
+## Verification
 
-Run the deterministic analyzer and FSI-boundary regression suite from the
-repository root:
+The analyzer has no automated regression suite. Verify a change by building
+`infrastructure/scripts/Validation.fsproj` in Release and running the `validate`
+subcommand over the repository. Adding automated tests requires explicit,
+specific approval.
 
-```text
-dotnet fsi infrastructure/scripts/tests/Regression.fsx
-```
-
-## Audit snapshot
+## Inventory
 
 There is no authoritative file inventory maintained by this project. The
-issue audit snapshot recorded 29 owned scripts (4 under
-`infrastructure/`, 5 under `dotnet/`, 20 under `workflow/`); the
 analyzer's `inventory` subcommand is the live source of truth at any
 given commit.

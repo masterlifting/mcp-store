@@ -1,18 +1,17 @@
 {
   "componentId": "workflow",
-  "version": "3.0.0",
+  "version": "3.0.1",
   "entryDll": "Mcp.Workflow.dll",
-  "sdkVersion": "11.0.100-rc.1.26425.128",
-  "runtimeVersion": "11.0.0-rc.1.26425.128",
   "platform": "win-x64",
-  "archiveName": "v3.0.0.zip",
-  "assetUri": "https://github.com/masterlifting/mcp-store/releases/download/workflow/v3.0.0.zip",
+  "archiveName": "v3.0.1.zip",
+  "assetUri": "https://github.com/masterlifting/mcp-store/releases/download/workflow/v3.0.1.zip",
   "publishedFiles": [
     "FSharp.Core.dll",
     "Mcp.Workflow.deps.json",
     "Mcp.Workflow.dll",
     "Mcp.Workflow.runtimeconfig.json"
   ],
+  "launchKind": "dotnet-exec",
   "launchArguments": [
     { "flag": "--profile-catalog", "input": "profileCatalog", "type": "absolute-file" },
     { "flag": "--profile-catalog-sha256", "input": "profileCatalogSha256", "type": "sha256" }
