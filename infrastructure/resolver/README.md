@@ -220,7 +220,8 @@ document as a claim beyond them.
 
 - **Runtime qualification is bounded to the configured targets.** Automated
   resolver verification is limited to the package gate
-  (`tests/distribution/Run.fsx`: archive, manifest, pin and closure bytes), the
+  (`tests/distribution/Run.fsx`: archive, manifest, pin and closure bytes of the
+  built and pinned `dist`), the
   packaged smoke (`tests/distribution/Smoke.fsx`: the extracted DLL's no-argument
   usage contract, the authenticated CLI-only launch refusal and an archive-digest
   refusal) and the native build; install, lease and process behavior are not

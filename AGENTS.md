@@ -19,11 +19,10 @@ The official GitHub MCP is an external dependency and is not produced or install
 
 ## Validation
 
-- The repository carries no automated behavioral test suite. Do not add automated tests, test projects, test frameworks or test-only CI phases without explicit, specific approval for each addition.
-- Dotnet: build `dotnet/Dotnet.fsproj` in Release; run the package gate `dotnet fsi dotnet/tests/distribution/Run.fsx`.
-- Workflow: `dotnet build workflow/Workflow.fsproj -c Release`; run the package gate `dotnet fsi workflow/tests/distribution/Run.fsx`.
-- Resolver: `dotnet build infrastructure/resolver/Resolver.fsproj -c Release`; run the package gate `dotnet fsi infrastructure/resolver/tests/distribution/Run.fsx`.
-- The package gates run in clean-tree release preparation and verify archive, manifest, pin and byte contracts; they are not behavioral suites.
+- The repository carries no automated behavioral test suite; the sole approved automated behavioral check is the packaged Resolver smoke (`infrastructure/resolver/tests/distribution/Smoke.fsx`). Do not add automated tests, test projects, test frameworks or test-only CI phases without explicit, specific approval for each addition.
+- Release builds: build `dotnet/Dotnet.fsproj`, `workflow/Workflow.fsproj`, and `infrastructure/resolver/Resolver.fsproj` in Release.
+- For each component directory (`dotnet`, `workflow`, `infrastructure/resolver`), run these commands in order from the repository root, replacing `<component>` with that directory: `dotnet fsi <component>/release/Build.fsx`, `dotnet fsi <component>/release/Pin.fsx`, then `dotnet fsi <component>/tests/distribution/Run.fsx`.
+- The package gates only read the freshly built and pinned `dist` (build and pin first; gates never build or regenerate). Release preparation runs build, pin and gate in order per component; they verify archive, manifest, pin and byte contracts and are not behavioral suites.
 - Release tooling: `pwsh infrastructure/release/Check.ps1 -Components '["dotnet","workflow","resolver"]'` and `pwsh infrastructure/release/Typecheck.ps1`.
 - Manual smoke: extract each MCP distribution and start it through the Resolver contract by hand; this is not automated.
 - Telegram: lint and format checks only (see below).

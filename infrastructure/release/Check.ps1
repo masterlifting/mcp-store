@@ -272,14 +272,14 @@ Assert-Count -Name "no participant literal in a CLI or policy path" -Pattern ('(
 Assert-Count -Name "no derived <componentId>/release path survives" -Pattern '\$component/release/' -Expected 0
 Assert-Count -Name "no derived <componentId>/tests path survives" -Pattern '\$component/tests/' -Expected 0
 # Every path is read from the projected componentId -> configPath map, which is the one canonical map `Update.ps1 -Project` emits from the roster.
-Assert-Count -Name "every path consumer reads the projected config-path map" -Pattern '\$env:RELEASE_CONFIG_PATHS \| ConvertFrom-Json -AsHashtable' -Expected 4
+Assert-Count -Name "every path consumer reads the projected config-path map" -Pattern '\$env:RELEASE_CONFIG_PATHS \| ConvertFrom-Json -AsHashtable' -Expected 3
 Assert-JobCount -Job "publisher" -Name "publisher reads the projected config-path map" -Pattern '\$env:RELEASE_CONFIG_PATHS \| ConvertFrom-Json -AsHashtable' -Expected 1
-Assert-JobCount -Job "preparation" -Name "preparation reads the projected config-path map" -Pattern '\$env:RELEASE_CONFIG_PATHS \| ConvertFrom-Json -AsHashtable' -Expected 2
+Assert-JobCount -Job "preparation" -Name "preparation reads the projected config-path map" -Pattern '\$env:RELEASE_CONFIG_PATHS \| ConvertFrom-Json -AsHashtable' -Expected 1
 Assert-JobCount -Job "publication" -Name "publication reads the projected config-path map" -Pattern '\$env:RELEASE_CONFIG_PATHS \| ConvertFrom-Json -AsHashtable' -Expected 1
-Assert-Count -Name "each path consumer fails closed on a missing map entry" -Pattern 'the projection declares no canonical config path for' -Expected 4
-Assert-Count -Name "every config path is addressed by the looped participant's map entry" -Pattern '\[string\]\$configPaths\[\$component\]\)' -Expected 4
+Assert-Count -Name "each path consumer fails closed on a missing map entry" -Pattern 'the projection declares no canonical config path for' -Expected 3
+Assert-Count -Name "every config path is addressed by the looped participant's map entry" -Pattern '\[string\]\$configPaths\[\$component\]\)' -Expected 3
 Assert-JobCount -Job "publisher" -Name "publisher derives the release directory from the map entry" -Pattern '^ {12}\$releaseDirectory = Split-Path -Parent \(\[string\]\$configPaths\[\$component\]\)\s*$' -Expected 1
-Assert-JobCount -Job "preparation" -Name "preparation derives the component root from the map entry" -Pattern '^ {12}\$releaseDirectory = Split-Path -Parent \(\[string\]\$configPaths\[\$component\]\)\s*$' -Expected 1
+Assert-JobCount -Job "preparation" -Name "preparation derives no release directory outside the canonical prepare" -Pattern '\$releaseDirectory' -Expected 0
 Assert-JobCount -Job "preparation" -Name "preparation addresses the candidate policy by the map entry" -Pattern '^ {12}\$configPath = Join-Path \(Get-Location\) \(\[string\]\$configPaths\[\$component\]\)\s*$' -Expected 1
 Assert-JobCount -Job "publication" -Name "publication addresses the trusted policy by the map entry" -Pattern '^ {12}\$configPath = Join-Path \$workspace \(\[string\]\$configPaths\[\$component\]\)\s*$' -Expected 1
 
@@ -292,9 +292,9 @@ Assert-Count -Name "the coherence guard reads no step-local output file" -Patter
 Assert-Count -Name "every SDK install is fed by the canonical projection" -Pattern '^ {10}dotnet-version: \$\{\{ steps\.project\.outputs\.sdk \}\}\s*$' -Expected 3
 Assert-Count -Name "SDK installs never name a literal version" -Pattern 'dotnet-version: (?!\$\{\{)' -Expected 0
 # One projection drives every job's participant list, so a hand-edited roster cannot drift from the enrolled components.
-Assert-Count -Name "every stage reads the projection instead of a literal participant list" -Pattern 'ConvertFrom-Json \$env:RELEASE_COMPONENTS' -Expected 5
+Assert-Count -Name "every stage reads the projection instead of a literal participant list" -Pattern 'ConvertFrom-Json \$env:RELEASE_COMPONENTS' -Expected 4
 Assert-JobCount -Job "publisher" -Name "publisher reads the projected components" -Pattern 'ConvertFrom-Json \$env:RELEASE_COMPONENTS' -Expected 1
-Assert-JobCount -Job "preparation" -Name "preparation reads the projected components" -Pattern 'ConvertFrom-Json \$env:RELEASE_COMPONENTS' -Expected 2
+Assert-JobCount -Job "preparation" -Name "preparation reads the projected components" -Pattern 'ConvertFrom-Json \$env:RELEASE_COMPONENTS' -Expected 1
 Assert-JobCount -Job "publication" -Name "publication reads the projected components" -Pattern 'ConvertFrom-Json \$env:RELEASE_COMPONENTS' -Expected 2
 
 # Every action reference must be a reviewed 40-hex commit; a floating tag would let an upstream change reach the publication boundary.
@@ -383,11 +383,10 @@ Assert-Before -Job "publisher" -Name "each producer is packed before its consume
 Assert-Before -Job "publisher" -Name "local packaging precedes the checkout build gates" -First '& dotnet fsi --nologo "$releaseDirectory/Pin.fsx"' -Second 'dotnet build dotnet/Dotnet.fsproj -c Release'
 Assert-JobCount -Job "publisher" -Name "publisher typechecks the retained release scripts" -Pattern 'Typecheck\.ps1 -SdkVersion' -Expected 1
 
-# Preparation job: both producers' package gates pass before either candidate transport is uploaded.
+# Preparation job: each candidate's package gate runs inside the canonical prepare (build, pin, gate) before any transport is uploaded.
 Assert-JobCount -Job "preparation" -Name "preparation job is read-only" -Pattern '^ {6}contents: read\s*$' -Expected 1
 Assert-JobCount -Job "preparation" -Name "preparation checkout disables credential persistence" -Pattern 'persist-credentials: false\s*$' -Expected 1
-Assert-JobCount -Job "preparation" -Name "preparation runs each producer package gate" -Pattern '^ {12}\$entrypoint = "\$componentRoot/tests/distribution/Run\.fsx"\s*$' -Expected 1
-Assert-JobCount -Job "preparation" -Name "preparation derives each component root from its release directory" -Pattern '^ {12}\$componentRoot = Split-Path -Parent \$releaseDirectory\s*$' -Expected 1
+Assert-JobCount -Job "preparation" -Name "preparation runs no standalone package gate outside the canonical prepare" -Pattern '(tests/distribution/Run\.fsx|producer package gate)' -Expected 0
 Assert-JobCount -Job "preparation" -Name "preparation builds the release runner from the checkout" -Pattern 'dotnet build infrastructure/release/Release\.fsproj -c Release' -Expected 1
 Assert-JobCount -Job "preparation" -Name "preparation prepares each enrolled candidate through the canonical CLI" -Pattern '& \$runner prepare \$configPath \$candidate\s*\|' -Expected 1
 Assert-JobCount -Job "preparation" -Name "preparation writes each component's own archive key" -Pattern '^ {12}"archiveName_\$component=\$archiveName" >> \$env:GITHUB_OUTPUT\s*$' -Expected 1

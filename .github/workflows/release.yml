@@ -232,7 +232,7 @@ jobs:
   preparation:
     name: prepare-candidates
     runs-on: windows-latest
-    # Read-only: this job runs both producers' package gates and builds candidates; it never holds write authority.
+    # Read-only: this job prepares every enrolled candidate, including its package gate; it never holds write authority.
     permissions:
       contents: read
     # Static producer-specific keys: each candidate is uploaded by its own step, so one common key can never be
@@ -286,39 +286,11 @@ jobs:
           dotnet build workflow/Workflow.fsproj -c Release
           if ($LASTEXITCODE -ne 0) { throw "workflow producer build failed (exit $LASTEXITCODE)" }
 
-      - name: run every enrolled distribution package gate (native exit preserved)
-        shell: pwsh
-        # Each participant's package gate is read from its own roster-registered component root and must pass before any candidate is uploaded.
-        run: |
-          $ErrorActionPreference = "Stop"
-          if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
-            $PSNativeCommandUseErrorActionPreference = $false
-          }
-          $components = @(ConvertFrom-Json $env:RELEASE_COMPONENTS)
-          $configPaths = $env:RELEASE_CONFIG_PATHS | ConvertFrom-Json -AsHashtable
-          foreach ($component in $components) {
-            if (-not $configPaths.Contains($component)) { throw "the projection declares no canonical config path for '$component'" }
-            # The component root is the parent of its release directory, which is the parent of the canonical config.
-            $releaseDirectory = Split-Path -Parent ([string]$configPaths[$component])
-            if ((Split-Path -Leaf $releaseDirectory) -cne "release") { throw "the canonical config path '$($configPaths[$component])' for '$component' is not under a release directory" }
-            $componentRoot = Split-Path -Parent $releaseDirectory
-            $entrypoint = "$componentRoot/tests/distribution/Run.fsx"
-            if (-not (Test-Path -LiteralPath $entrypoint)) { throw "producer package gate is missing: $entrypoint" }
-            Write-Host "::group::producer package gate $entrypoint"
-            & dotnet fsi --nologo $entrypoint
-            $code = $LASTEXITCODE
-            Write-Host "::endgroup::"
-            if ($code -ne 0) {
-              Write-Host "::error::producer package gate failed: $entrypoint (exit $code)"
-              exit $code
-            }
-          }
-
       - name: prepare each enrolled candidate from its canonical policy
         id: prepare
         shell: pwsh
-        # One job, one explicit loop over the projection: the retired matrix leg published a shared output key whose
-        # last writer won, so each component now writes only its own static keys.
+        # Preparation builds, pins and runs the component's package gate in order, failing closed before a candidate is accepted.
+        # One job, one explicit loop over the projection: each component writes only its own static keys.
         run: |
           $ErrorActionPreference = "Stop"
           if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {

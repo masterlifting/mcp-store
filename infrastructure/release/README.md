@@ -119,8 +119,10 @@ parser can be built.
 - `Toolchain.fsx` — credential-free FSI entry that prints the four verified toolchain values for `Update.ps1 -Verify`.
 - `Typecheck.ps1 -SdkVersion <sdk>` — strict FCS typecheck of each enrolled component's `Build.fsx`, `Pin.fsx` and `tests/distribution/Run.fsx`, plus `Toolchain.fsx` and the Resolver `Smoke.fsx`.
 
-Preparation runs each component's `tests/distribution/Run.fsx` package gate (reported as phase
-`tests` on failure). After every candidate is prepared and before any candidate upload,
+Preparation runs, per component and in order, `Build.fsx`, `Pin.fsx` and then the
+`tests/distribution/Run.fsx` package gate (reported as phase `tests` on failure). The gate only
+reads the freshly built and pinned `dist`; it never builds or regenerates, and the workflow
+carries no separate gate loop. After every candidate is prepared and before any candidate upload,
 preparation runs `infrastructure/resolver/tests/distribution/Smoke.fsx` on the final
 regenerated Resolver distribution, after confirming the candidate archive bytes equal the
 distribution archive the smoke reads. The publisher job builds the producers and the Resolver and runs

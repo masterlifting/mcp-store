@@ -70,7 +70,8 @@ dotnet fsi dotnet/release/Pin.fsx
 dotnet fsi dotnet/tests/distribution/Run.fsx
 ```
 
-The scripts stage only the allowlisted runtime files under
+The package gate only reads the built and pinned output; it does not build or
+regenerate. The scripts stage only the allowlisted runtime files under
 `dotnet/dist/dotnet/`. `distribution.json` records the exact archive
 allowlist and a lowercase SHA-256 for every runtime file. The generated archive
 contains the runtime files, `NOTICE.txt`, and the manifest; source, project,

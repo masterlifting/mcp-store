@@ -121,7 +121,8 @@ stops that participant before publication:
 2. Select and verify the SDK, target framework, language version, platform, and
    runtime.
 3. Build and package the producer; prepare the canonical manifest and pin.
-4. Run the component's `tests/distribution/Run.fsx` package gate.
+4. Run the component's `tests/distribution/Run.fsx` package gate against the
+   build and pin just produced.
 5. Verify candidate archive membership, inner archive structure, manifest
    identity, and event revision.
 6. Observe the remote container and asset, compare declared and published
@@ -232,8 +233,10 @@ Current automated verification, deterministic and non-behavioral:
   `infrastructure/release/Release.fsproj`, all in Release.
 - Package gates: `dotnet/tests/distribution/Run.fsx`,
   `workflow/tests/distribution/Run.fsx`, and
-  `infrastructure/resolver/tests/distribution/Run.fsx`. They verify the archive,
-  manifest, pin, and byte contracts; they are not behavioral suites.
+  `infrastructure/resolver/tests/distribution/Run.fsx`. They read the freshly
+  built and pinned `dist` and verify the archive, manifest, pin, and byte
+  contracts; they neither build nor regenerate anything and are not behavioral
+  suites. Preparation runs each one after that component's build and pin.
 - Resolver packaged smoke: `infrastructure/resolver/tests/distribution/Smoke.fsx`
   extracts the Resolver archive from the final regenerated `dist`, launches the
   packaged DLL with no arguments (exit 2, empty stdout, the documented usage
