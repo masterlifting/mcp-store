@@ -220,8 +220,11 @@ document as a claim beyond them.
 
 - **Runtime qualification is bounded to the configured targets.** Automated
   resolver verification is limited to the package gate
-  (`tests/distribution/Run.fsx`: archive, manifest, pin and closure bytes) and
-  the native build; resolver behavior is not covered by an automated suite.
+  (`tests/distribution/Run.fsx`: archive, manifest, pin and closure bytes), the
+  packaged smoke (`tests/distribution/Smoke.fsx`: the extracted DLL's no-argument
+  usage contract, the authenticated CLI-only launch refusal and an archive-digest
+  refusal) and the native build; install, lease and process behavior are not
+  covered by an automated suite.
   Windows x64 is the release platform selection. Qualification covers only the
   hosted Unix targets configured in `.github/workflows/unix.yml` (`linux-x64` on
   Ubuntu 24, `osx-arm64` on macOS 15, and `osx-x64` on macOS 15). It does not

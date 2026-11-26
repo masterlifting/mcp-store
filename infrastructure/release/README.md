@@ -117,9 +117,12 @@ parser can be built.
 - `Check.ps1 -Components <projection>` — cross-stage guard over `release.yml`, the pinned action transfers and the enrollment roster.
 - `Verify.ps1 -Root <dir> -InventoryJson <json>` / `-MembersJson <json>` — deterministic membership, path and SHA-256 proof of a downloaded artifact; it reads no network, token or receipt state, so it runs before anything from the verified set executes.
 - `Toolchain.fsx` — credential-free FSI entry that prints the four verified toolchain values for `Update.ps1 -Verify`.
-- `Typecheck.ps1 -SdkVersion <sdk>` — strict FCS typecheck of the retained producer scripts and `Toolchain.fsx`.
+- `Typecheck.ps1 -SdkVersion <sdk>` — strict FCS typecheck of each enrolled component's `Build.fsx`, `Pin.fsx` and `tests/distribution/Run.fsx`, plus `Toolchain.fsx` and the Resolver `Smoke.fsx`.
 
 Preparation runs each component's `tests/distribution/Run.fsx` package gate (reported as phase
-`tests` on failure), and the publisher job builds the producers and the Resolver and runs
+`tests` on failure). After every candidate is prepared and before any candidate upload,
+preparation runs `infrastructure/resolver/tests/distribution/Smoke.fsx` on the final
+regenerated Resolver distribution, after confirming the candidate archive bytes equal the
+distribution archive the smoke reads. The publisher job builds the producers and the Resolver and runs
 `Check.ps1` and `Typecheck.ps1`. The repository carries no automated behavioral test suite;
 adding automated tests requires explicit, specific approval.

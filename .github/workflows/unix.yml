@@ -176,3 +176,16 @@ jobs:
           $ErrorActionPreference = "Stop"
           & dotnet build infrastructure/resolver/Resolver.fsproj -c Release
           if ($LASTEXITCODE -ne 0) { throw "resolver build failed (exit $LASTEXITCODE)" }
+
+      - name: smoke the packaged resolver archive
+        shell: pwsh
+        # Reads the distribution packed from the exact head above; only local archive bytes are used.
+        run: |
+          $ErrorActionPreference = "Stop"
+          if (Test-Path variable:PSNativeCommandUseErrorActionPreference) { $PSNativeCommandUseErrorActionPreference = $false }
+          & dotnet fsi --nologo infrastructure/resolver/tests/distribution/Smoke.fsx
+          $smokeCode = $LASTEXITCODE
+          if ($smokeCode -ne 0) {
+            Write-Host "::error::resolver packaged smoke failed (exit $smokeCode)"
+            exit $smokeCode
+          }

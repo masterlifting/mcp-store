@@ -123,6 +123,11 @@ transports. It is not enrolled in this .NET distribution transaction.
   Resolver artifact or public release status is claimed.
 - Windows x64 is the release platform selection. Unix qualification is a
   read-only pull-request check, not Unix release publication.
+- A packaged Resolver smoke (`infrastructure/resolver/tests/distribution/Smoke.fsx`)
+  checks that the extracted Resolver archive launches with its usage contract,
+  that the compiled verifier refuses the CLI-only archive as an MCP launch
+  target, and that a changed archive fails its digest. It is not install, lease
+  or consumer acceptance.
 - No published-release HTTP download has been verified.
 - Hosted GitHub Actions upload, immutable-release detection, and queue ordering
   behavior are not independently observed. The release workflow configures

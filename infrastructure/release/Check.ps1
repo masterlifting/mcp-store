@@ -393,13 +393,22 @@ Assert-JobCount -Job "preparation" -Name "preparation prepares each enrolled can
 Assert-JobCount -Job "preparation" -Name "preparation writes each component's own archive key" -Pattern '^ {12}"archiveName_\$component=\$archiveName" >> \$env:GITHUB_OUTPUT\s*$' -Expected 1
 Assert-JobCount -Job "preparation" -Name "preparation publishes each component's archive name in the job environment" -Pattern 'CANDIDATE_ARCHIVE_NAME_\$\(\(\$component\)\.ToUpperInvariant\(\)\)' -Expected 1
 Assert-JobCount -Job "preparation" -Name "preparation accepts only the exact two-member candidate directory" -Pattern 'where exactly the archive' -Expected 1
-# Publication job: it installs the canonical SDK, verifies every downloaded member and publishes without building anything.
+# The resolver smoke reads the final regenerated distribution, so it follows every candidate preparation and precedes every upload; it never runs where a credential or publication exists.
+Assert-JobCount -Job "preparation" -Name "preparation runs the resolver packaged smoke exactly once" -Pattern '^ {10}& dotnet fsi --nologo infrastructure/resolver/tests/distribution/Smoke\.fsx\s*$' -Expected 1
+Assert-JobCount -Job "preparation" -Name "preparation propagates the resolver smoke native exit" -Pattern '^ {10}\$smokeCode = \$LASTEXITCODE\s*$' -Expected 1
+Assert-JobCount -Job "preparation" -Name "preparation exits with the resolver smoke native code" -Pattern '^ {12}exit \$smokeCode\s*$' -Expected 1
+Assert-JobCount -Job "preparation" -Name "preparation proves the resolver candidate archive equals the distribution archive the smoke reads" -Pattern 'differs from the distribution archive' -Expected 1
+Assert-Before -Job "preparation" -Name "every candidate is prepared before the resolver smoke" -First 'id: prepare' -Second '& dotnet fsi --nologo infrastructure/resolver/tests/distribution/Smoke.fsx'
+Assert-Before -Job "preparation" -Name "the resolver smoke precedes every candidate upload" -First '& dotnet fsi --nologo infrastructure/resolver/tests/distribution/Smoke.fsx' -Second 'uses: actions/upload-artifact@'
+Assert-JobCount -Job "publisher" -Name "the publisher job runs no resolver smoke" -Pattern 'Smoke\.fsx' -Expected 0
+Assert-JobCount -Job "publication" -Name "the publication job runs no resolver smoke" -Pattern 'Smoke\.fsx' -Expected 0
+# Publication job text: it installs the canonical SDK, runs the pre-credential toolchain verification, verifies every downloaded member and carries no direct build, restore, test or run invocation.
 Assert-JobCount -Job "publication" -Name "publish job alone holds write authority" -Pattern '^ {6}contents: write\s*$' -Expected 1
 Assert-JobCount -Job "publication" -Name "publish job keeps platform artifact read" -Pattern '^ {6}actions: read\s*$' -Expected 1
 Assert-JobCount -Job "publication" -Name "publication installs the canonical SDK exactly once" -Pattern 'uses: actions/setup-dotnet@' -Expected 1
 Assert-JobCount -Job "publication" -Name "publication never builds" -Pattern 'dotnet build' -Expected 0
 Assert-JobCount -Job "publication" -Name "publication never restores" -Pattern 'dotnet restore' -Expected 0
-Assert-JobCount -Job "publication" -Name "no publication step evaluates F# beside the credential" -Pattern 'dotnet fsi' -Expected 0
+Assert-JobCount -Job "publication" -Name "the publication job text carries no direct dotnet fsi invocation" -Pattern 'dotnet fsi' -Expected 0
 Assert-JobCount -Job "publication" -Name "publication never runs tests" -Pattern 'dotnet test' -Expected 0
 Assert-JobCount -Job "publication" -Name "publication never runs a project" -Pattern 'dotnet run' -Expected 0
 Assert-JobCount -Job "publication" -Name "publication rechecks the control plane" -Pattern 'git rev-parse HEAD' -Expected 2
@@ -570,6 +579,18 @@ Assert-UnixCount -Name "unix qualification packs and pins from the derived relea
 Assert-UnixCount -Name "unix qualification carries no derived or literal participant path" -Pattern ('(\$component/(release|tests)/|' + $configPathAlternation + ')') -Expected 0
 Assert-UnixCount -Name "unix qualification never publishes, transfers or holds a credential" -Pattern '(github\.token|secrets\.|contents: write|upload-artifact|download-artifact|MCP_RELEASE_DO_UPLOAD)' -Expected 0
 Assert-UnixCount -Name "unix qualification reads the projected components once" -Pattern 'ConvertFrom-Json \$env:RELEASE_COMPONENTS' -Expected 1
+Assert-UnixCount -Name "unix qualification runs the resolver packaged smoke exactly once" -Pattern '^ {10}& dotnet fsi --nologo infrastructure/resolver/tests/distribution/Smoke\.fsx\s*$' -Expected 1
+Assert-UnixCount -Name "unix resolver smoke step disables native error-action handling when the preference exists" -Pattern '^ {10}if \(Test-Path variable:PSNativeCommandUseErrorActionPreference\) \{ \$PSNativeCommandUseErrorActionPreference = \$false \}\s*$' -Expected 2
+Assert-UnixCount -Name "unix resolver smoke captures the native exit" -Pattern '^ {10}\$smokeCode = \$LASTEXITCODE\s*$' -Expected 1
+Assert-UnixCount -Name "unix resolver smoke reports the native exit as a diagnostic" -Pattern '^ {12}Write-Host "::error::resolver packaged smoke failed \(exit \$smokeCode\)"\s*$' -Expected 1
+Assert-UnixCount -Name "unix resolver smoke forwards the native exit" -Pattern '^ {12}exit \$smokeCode\s*$' -Expected 1
+$script:checked = $script:checked + 1
+$unixPackIndex = $unixText.IndexOf('& dotnet fsi --nologo "$releaseDirectory/Pin.fsx"', [System.StringComparison]::Ordinal)
+$unixBuildIndex = $unixText.IndexOf('& dotnet build infrastructure/resolver/Resolver.fsproj -c Release', [System.StringComparison]::Ordinal)
+$unixSmokeIndex = $unixText.IndexOf('& dotnet fsi --nologo infrastructure/resolver/tests/distribution/Smoke.fsx', [System.StringComparison]::Ordinal)
+if ($unixPackIndex -lt 0 -or $unixBuildIndex -lt 0 -or $unixSmokeIndex -lt 0 -or $unixPackIndex -gt $unixBuildIndex -or $unixBuildIndex -gt $unixSmokeIndex) {
+    throw "cross-stage coherence failed [unix smoke ordering]: the resolver smoke must follow the exact-head pack and pin and the resolver build in $unixWorkflowPath"
+}
 
 # The workflow passes the projection step's actual value; a step-local GITHUB_OUTPUT file belongs to a different step.
 if ([string]::IsNullOrWhiteSpace($Components)) {

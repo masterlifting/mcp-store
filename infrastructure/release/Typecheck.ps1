@@ -27,6 +27,7 @@ function Get-RosterTargets {
     }
 
     $derived.Add("infrastructure/release/Toolchain.fsx")
+    $derived.Add("infrastructure/resolver/tests/distribution/Smoke.fsx")
     return $derived
 }
 

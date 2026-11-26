@@ -213,8 +213,10 @@ Additional requirements:
   override the transfer's documented digest or extraction behavior.
 - The publisher job builds from the release project's ordered `<Compile
   Include>` list, contains every staged item inside the checkout, and publishes
-  with repository build imports suppressed. The publication job never builds,
-  restores, evaluates F#, runs a project, or runs a test.
+  with repository build imports suppressed. The publication job's text carries no
+  direct build, restore, F# script, project-run, or test invocation. Its
+  pre-credential `Update.ps1 -Verify` step runs nested FSI and MSBuild evaluation;
+  the credential-bearing step runs none.
 - The control plane is rechecked in the credential-bearing step immediately
   before the native publisher call. No hand-written artifact client or direct
   API upload path bypasses the verified publisher.
@@ -232,11 +234,22 @@ Current automated verification, deterministic and non-behavioral:
   `workflow/tests/distribution/Run.fsx`, and
   `infrastructure/resolver/tests/distribution/Run.fsx`. They verify the archive,
   manifest, pin, and byte contracts; they are not behavioral suites.
+- Resolver packaged smoke: `infrastructure/resolver/tests/distribution/Smoke.fsx`
+  extracts the Resolver archive from the final regenerated `dist`, launches the
+  packaged DLL with no arguments (exit 2, empty stdout, the documented usage
+  line), then calls the compiled `ResolverPayload.verify` with the generated pin.
+  The real archive must reach the authenticated CLI-only `launch.kind` refusal and
+  an in-memory changed copy must fail at the archive digest. It runs in the
+  preparation job after every candidate is prepared and before any candidate
+  upload (the job holds no credential), and on each hosted Unix leg after packing
+  and the Resolver build. It covers packaged launch and those two refusals only,
+  not install, lease, process lifetime or consumer acceptance.
 - Guards: `infrastructure/release/Check.ps1` (roster, trigger shape, job
   structure, action pins, artifact bindings, transfer roots, CLI paths, credential
   separation, cross-stage ordering) and
-  `infrastructure/release/Typecheck.ps1` (strict FCS typecheck of the retained
-  release scripts).
+  `infrastructure/release/Typecheck.ps1` (strict FCS typecheck, as text, of each
+  enrolled component's `Build.fsx`, `Pin.fsx` and `tests/distribution/Run.fsx`,
+  plus `Toolchain.fsx` and the Resolver `Smoke.fsx`).
 - `Verify.ps1` proves downloaded membership, paths, and SHA-256 before
   execution.
 

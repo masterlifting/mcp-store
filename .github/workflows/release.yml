@@ -78,7 +78,7 @@ jobs:
 
       - name: pack each enrolled producer's canonical local distribution and consumer pin
         shell: pwsh
-        # The resolver launch gate installs the canonical local product bytes, so both producers must be packed first; the roster keeps the resolver last.
+        # Every enrolled distribution is packed and pinned here; the roster keeps the resolver last.
         run: |
           $ErrorActionPreference = "Stop"
           if (Test-Path variable:PSNativeCommandUseErrorActionPreference) { $PSNativeCommandUseErrorActionPreference = $false }
@@ -357,6 +357,30 @@ jobs:
             Write-Host "prepared $component candidate in $candidate with archive $archiveName"
           }
 
+      - name: smoke the packaged resolver archive on the final regenerated distribution (native exit preserved)
+        shell: pwsh
+        # Runs after every candidate is prepared so it reads the final distribution; only local archive bytes are used and it precedes every candidate upload.
+        run: |
+          $ErrorActionPreference = "Stop"
+          if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
+            $PSNativeCommandUseErrorActionPreference = $false
+          }
+          $resolverArchiveName = $env:CANDIDATE_ARCHIVE_NAME_RESOLVER
+          if ([string]::IsNullOrWhiteSpace($resolverArchiveName)) { throw "the preparation step recorded no resolver candidate archive name" }
+          $candidateArchive = Join-Path $env:CANDIDATE_ROOT "resolver/$resolverArchiveName"
+          $distributionArchive = Join-Path (Get-Location) "infrastructure/resolver/dist/$resolverArchiveName"
+          $candidateSha256 = (Get-FileHash -LiteralPath $candidateArchive -Algorithm SHA256).Hash
+          $distributionSha256 = (Get-FileHash -LiteralPath $distributionArchive -Algorithm SHA256).Hash
+          if ($candidateSha256 -cne $distributionSha256) { throw "the resolver candidate archive $candidateSha256 differs from the distribution archive $distributionSha256 the smoke reads" }
+          Write-Host "::group::resolver packaged smoke"
+          & dotnet fsi --nologo infrastructure/resolver/tests/distribution/Smoke.fsx
+          $smokeCode = $LASTEXITCODE
+          Write-Host "::endgroup::"
+          if ($smokeCode -ne 0) {
+            Write-Host "::error::resolver packaged smoke failed (exit $smokeCode)"
+            exit $smokeCode
+          }
+
       - name: upload the dotnet candidate transport
         id: upload_dotnet
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -395,7 +419,8 @@ jobs:
     # The single write boundary: this job installs the canonical SDK so the framework-dependent runtime can execute,
     # downloads the exact artifact ids declared by the two read-only jobs through the pinned official download action,
     # verifies every downloaded member against the publisher job's independent inventory, and only then runs the
-    # verified publisher. It runs no build, restore, FSI or test work.
+    # verified publisher. Its pre-credential toolchain verification (Update.ps1 -Verify) runs nested FSI and MSBuild
+    # evaluation; the step that holds the credential runs no FSI, MSBuild evaluation, build, restore or test work.
     needs:
       - publisher
       - preparation
