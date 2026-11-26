@@ -112,7 +112,7 @@ parser can be built.
 - `Verify.ps1 -Root <dir> -InventoryJson <json>` / `-MembersJson <json>` — deterministic membership, path and SHA-256 proof of a downloaded artifact; it reads no network, token or receipt state, so it runs before anything from the verified set executes.
 - `Typecheck.ps1 -SdkVersion <sdk>` — strict FCS typecheck of the retained producer scripts.
 
-The compiled release regression suite and `Test.ps1` are retired. Preparation runs each
-component's `tests/distribution/Run.fsx` package gate (reported as phase `tests` on failure), and
-the publisher job builds the producers and the Resolver and runs `Check.ps1` and `Typecheck.ps1`.
-Automated tests are added only with explicit, specific approval.
+Preparation runs each component's `tests/distribution/Run.fsx` package gate (reported as phase
+`tests` on failure), and the publisher job builds the producers and the Resolver and runs
+`Check.ps1` and `Typecheck.ps1`. The repository carries no automated behavioral test suite;
+adding automated tests requires explicit, specific approval.

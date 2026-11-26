@@ -113,8 +113,7 @@ existing release-metadata schema, not the distribution schema).
 ```
 
 - `consumer-pins.json` is exactly one unwrapped record, not an object keyed by
-  component ID. The five-field keyed schema and its readers are removed with no
-  alias or dual reader.
+  component ID. No keyed schema, compatibility alias, or dual reader exists.
 - `producerSdk`, `producerRuntime`, and `producerPlatform` are optional
   informational fields: omission is permitted, a present explicit null or a
   non-string is malformed, and an empty string is malformed.

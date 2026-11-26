@@ -144,10 +144,8 @@ The analyzer has no automated regression suite. Verify a change by building
 subcommand over the repository. Adding automated tests requires explicit,
 specific approval.
 
-## Audit snapshot
+## Inventory
 
 There is no authoritative file inventory maintained by this project. The
-issue audit snapshot recorded 29 owned scripts (4 under
-`infrastructure/`, 5 under `dotnet/`, 20 under `workflow/`); the
 analyzer's `inventory` subcommand is the live source of truth at any
 given commit.

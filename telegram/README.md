@@ -4,8 +4,6 @@
 
 ![MCP Badge](https://badge.mcpx.dev)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square)](https://opensource.org/licenses/Apache-2.0)
-[![Python Lint & Format Check](https://github.com/chigwell/telegram-mcp/actions/workflows/python-lint-format.yml/badge.svg)](https://github.com/chigwell/telegram-mcp/actions/workflows/python-lint-format.yml)
-[![Docker Build & Compose Validation](https://github.com/chigwell/telegram-mcp/actions/workflows/docker-build.yml/badge.svg)](https://github.com/chigwell/telegram-mcp/actions/workflows/docker-build.yml)
 
 A Telegram integration for Claude, Cursor, and other MCP-compatible clients. It exposes Telegram account, chat, message, contact, media, folder, and admin operations through the [Model Context Protocol](https://modelcontextprotocol.io/) using [Telethon](https://docs.telethon.dev/).
 
@@ -469,7 +467,7 @@ For multiple accounts, pass variables such as `TELEGRAM_SESSION_STRING_WORK` and
 The implementation is split into a small compatibility entrypoint and modular package code:
 
 ```text
-main.py                    # historical entrypoint and compatibility exports
+main.py                    # compatibility entrypoint and exports
 telegram_mcp/runtime.py    # shared MCP setup, account routing, validation, file safety
 telegram_mcp/runner.py     # application startup
 telegram_mcp/tools/        # tool modules grouped by domain

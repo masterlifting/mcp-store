@@ -1,184 +1,264 @@
-# Release automation requirements and evidence matrix (GHI-24)
+# Release requirements
 
-Status: W5 narrow pass-1 regression appended; columns distinguish **local**
-(earlier tests under the since-removed `infrastructure/release/tests/` plus updated existing suites),
-**simulated** (loopback HttpListener or `localMirrorObserver` injecting the
-seam), **actual remote read** (none in this slice), and **unverified hosted**
-(GitHub Actions queue, real `api.github.com` uploads, immutable-release
-detection). The matrix is not retroactive; rows not touched remain
-`unverified`. Authority: [issue #24](https://github.com/masterlifting/mcp-store/issues/24)
-is the available live source; it is not an immutable snapshot of the original body.
-Requirement numbering below retains the historical 1–72 extraction. The original
-issue snapshot (`.tasks/GHI-24/docs/original.md`), baseline and gap analysis
-(`.tasks/GHI-24/docs/research.md`), and full evidence narrative
-(`.tasks/GHI-24/docs/tests.md`) were removed from the current repository tree when
-`.tasks/` was untracked. They are no longer available at those paths; no replacement
-evidence location is asserted. If this file and the live issue conflict, the issue
-wins. Retained matrix entries are historical claims, not fresh verification.
+Status: current normative contract. The implementation is
+`.github/workflows/release.yml`, `.github/workflows/unix.yml`, and
+`infrastructure/release/` (`ReleaseRunner`, `Check.ps1`, `Update.ps1`,
+`Verify.ps1`, `Typecheck.ps1`). The shared manifest and pin contracts are in
+[`infrastructure/distribution/`](../../infrastructure/distribution/README.md).
+Where this summary is incomplete, the implementation and its guards are
+authoritative; a requirement never authorizes bypassing a fail-closed check.
 
-Current state (Store #46, PR #85 second review): the automated behavioral suites are
-removed — the compiled Expecto projects under `dotnet/`, `infrastructure/release/` and
-`infrastructure/resolver/`, the Workflow script suites, `infrastructure/release/Test.ps1`,
-the root `Run.ps1` wrapper, the distribution smoke and the scripts regression. Every
-`EV-TEST`, `Release.Tests`, `Bootstrap.fsx`, `Telegram.fsx` and "compiled-suite" citation
-below names evidence from those retired suites. Those citations are historical
-observations of earlier revisions, are unchanged, and are not a current gate. What
-remains automated is the three producer package gates (`tests/distribution/Run.fsx` of
-`dotnet`, `workflow` and `infrastructure/resolver`), the native Release builds,
-`infrastructure/release/Check.ps1` and `Typecheck.ps1`, and the release transaction's own
-artifact, provenance and no-clobber validation. Behavioral checks of the extracted MCP
-distributions are a manual smoke.
+Related current contracts:
+[distribution and consumer boundary](../Distribution.md),
+[`infrastructure/release/README.md`](../../infrastructure/release/README.md),
+[`infrastructure/resolver/README.md`](../../infrastructure/resolver/README.md), and
+[`AGENTS.md`](../../AGENTS.md).
 
-Evidence IDs: `EV-BUILD` producer build/package validation; `EV-TEST`
-deterministic tests; `EV-WF` static/config validation of the root workflow;
-`EV-REMOTE` read-only GitHub API metadata/digest observation; `EV-CMP` new
-deterministic comparison/provenance helper tests; `EV-REVIEW` independent
-review; `EV-AUDIT` separate task-first acceptance audit. W5 evidence layer:
-updates test names to the post-W4 actual paths (e.g. `TransactionTests`
-removed; coverage now lives under `Evaluate.fsx::finalizeVerifiedPublication*`,
-`finalizeRecovery*`, `finalizeFailure*`), aligns status qualifiers, and adds
-the metadata-asset-sha distinct-from-archive-sha invariant.
+## 1. Trigger and scope
 
----
+- One root release workflow owns publication. It runs on `push` to `main` and on
+  no other event, branch, tag, or manual dispatch on the normal path.
+- The only path filter in both workflows is the single `telegram/**` exclusion.
+  Telegram source is outside the release transaction and is a verified non-input
+  to the .NET release; the exclusion is not a Telegram CI. No `paths`,
+  `branches-ignore`, or tag filter may skip a .NET-affecting revision.
+- An empty or Telegram-only push does not trigger the release; the head tree,
+  not the diff, is what a triggered run evaluates.
+- A merged pull request and a direct push both fire the same workflow. The
+  checked-out event SHA is the authority.
+- A product version authored in a component's policy is published by the next
+  qualifying push without a manual release step.
+- Recovery of a failed release is a re-run of the failed workflow run or a
+  follow-up push touching a non-Telegram path. `workflow_dispatch` remains
+  forbidden, because it could bypass the push gate.
+- The separate Unix workflow is pull-request-only, read-only, holds no write
+  token, and never publishes or transfers an artifact. Its pre-merge trigger
+  check is advisory; the release workflow's `Check.ps1` is the enforcing trigger
+  guard for both workflows.
 
-## 1. Requirement inventory → planned evidence
+## 2. Version and toolchain ownership
 
-| Req | Requirement (condensed) | Planned evidence | Status |
-| --- | --- | --- | --- |
-| 1 | One root workflow deterministically evaluates/publishes dotnet + workflow on every `main` push except a Telegram-only revision (the `paths-ignore: ['telegram/**']` exclusion; see row 28) | EV-WF (YAML), EV-BUILD (W3 packages.md), EV-TEST (`Runner.fsx::contractJsonShape`, `runnerBinaryExists`) | local-run static + simulated; hosted unverified |
-| 2 | `telegram/**` and Telegram-owned workflows out of scope; Telegram is not a .NET release input, so the release and Unix qualification workflows exclude Telegram-only changes, and that exclusion is not a Telegram CI | EV-WF, EV-TEST (`Telegram.fs` exact-exclusion and non-input proof), EV-REVIEW | local-run, deterministic |
-| 3 | Required predecessors #21/#23/#26/#27 satisfied | EV-AUDIT, baseline `research.md` | unverified (status from W3 prior slice) |
-| 4 | Dependency graph honored (this → #28 → …) | EV-AUDIT | unverified (status from W3 prior slice) |
-| 5 | Land before later producer work on a stable publication path | EV-AUDIT | unverified (status from W3 prior slice) |
-| 6 | Single root release/integrity workflow: `.github/workflows/release.yml` owns publication and its trigger stays `push to main` with the single `telegram/**` exclusion; a separate non-publishing qualification workflow may exist without becoming a release path | EV-WF: YAML read of `.github/workflows/release.yml` (`push` → `main`, sole writer) and `.github/workflows/unix.yml` (`pull_request` with the same single exclusion, `permissions: contents: read`, no publish step, no credentials); EV-TEST (`Release.Tests.Coherence::the release workflow isolates preparation, trusted building, and data-only publication`; `Release.Tests.Telegram::release participant isolation assertions`) guards the release graph and participant roster, not the qualification boundary; that boundary rests on local static checks plus focused review, with no deterministic automated enforcement. The trigger shape of both workflows is enforced by `infrastructure/release/Check.ps1` in the publisher job, which blocks the release. The pre-merge subset in `unix.yml` is advisory only: with no required status check on `main`, a pull request that broadens `unix.yml`'s own filter also skips the step that polices it | local-run static + focused review (qualification boundary not auto-enforced; pre-merge guard advisory) |
-| 7 | Merged PR and direct push both fire; branch state is authority | EV-WF | unverified hosted |
-| 8 | No manual release step on normal path | EV-WF: neither workflow has `workflow_dispatch` (asserted by `Check.ps1`); because dispatch stays forbidden, a failed release is recovered by re-running the failed run from the GitHub Actions UI or by a follow-up push touching a non-Telegram path, since a Telegram-only or empty push no longer triggers the release; EV-TEST (`Telegram.fsx::releaseWorkflowMatrixNamesOnly`) | local-run, deterministic |
-| 9 | `workflow_dispatch` only if identical deterministic logic and cannot overwrite | EV-WF | unverified hosted |
-| 10 | Canonical per-producer config is single source of truth for the per-component policy (id/version/archive/URI/allowlist/platform). Reconciled (Store #46, revised after PR #85 review): the shared .NET toolchain is not per-component policy and is no longer in `*/release/Config.json`. The SDK version is authored once in the root `global.json`; the TFM and F# language version are owned by the root `Directory.Build.props`; `Release.fsproj` carries no duplicate TFM or language version. After SDK setup the selected SDK, TFM, language version and runtime come from native MSBuild evaluation; the runtime is never authored but is the evaluated `DefaultRuntimeFrameworkVersion` of the unique `KnownFrameworkReference` for `Microsoft.NETCore.App` at the evaluated TFM. `platform` stays per component. A producer config that declares `sdkVersion` or `runtimeVersion` is rejected. The earlier strict whole-file reader, PowerShell mirror and documented `Release.fsproj` exception are superseded; evidence recorded before this revision describes that earlier model | EV-BUILD; EV-WF: `Check.ps1` owner assertions; EV-TEST (planned `Release.Tests` policy suites; `Bootstrap.fsx::updatePs1ProjectEmitsCanonicalValues` is earlier, pre-owner evidence). Not qualified in this row: compiled-suite, candidate-comparison and hosted results | local-run partial (native evaluation, `Update.ps1 -Project/-Verify` and `Check.ps1` observed locally); compiled-suite and hosted evidence not claimed |
-| 11 | Workflow YAML must not duplicate producer versions | EV-WF; EV-TEST (`Bootstrap.fsx::bootstrapKeysAreStable`) | local-run, deterministic |
-| 12 | CI never auto-increments/invents a semantic version | EV-WF, EV-TEST (`Bootstrap.fsx::updatePs1ProjectRejectsDuplicateLiteral`) | local-run, deterministic |
-| 13 | Smallest deterministic metadata projection if SDK setup needs config. Reconciled (Store #46, revised after PR #85 review): the pre-SDK projection (`Update.ps1 -Project`) is plain PowerShell that reads only what installation needs from `global.json` and the per-component policy and emits the SDK version, platform, component list and per-component version and entry, but **no runtime version** and no verified handoff, because no SDK exists at that point. `Update.ps1 -Verify` runs after SDK installation, evaluates the SDK natively, derives the runtime, checks installed-runtime compatibility (same major.minor, patch at least the derived value, a prerelease never satisfying a stable value) and only then writes the verified SDK, runtime, TFM and language version to `GITHUB_ENV` | EV-WF, EV-TEST (`Bootstrap.fsx::bootstrapEntryEmitsCanonicalSummary` is earlier evidence; planned `Release.Tests` `Invocation` projection cases) | local-run partial (`-Project` and `-Verify` observed with SDK 11.0.100, runtime 11.0.0; the verified values carried TFM `net11.0` and language version `9.0`); compiled-suite evidence not claimed |
-| 14 | Harness-independent: producers + producer metadata only | EV-WF; EV-TEST (`Telegram.fsx::runnerSourceExcludesTelegram`) | local-run, deterministic |
-| 15 | Preserve fixed `dotnet`/`workflow` tags and `v1.0.3.zip`-style assets; no tag-model redesign | EV-REMOTE | unverified hosted |
-| 16 | Per-component transaction: SHA → SDK → build/tests → distribution → validation → metadata → asset absent/no-op | EV-BUILD, EV-TEST (`Evaluate.fsx::publishedOnArchiveAbsent`, `unchangedOnByteIdentical`, `unchangedOnRevisionOnlyEquivalent`, `failedOnBumpedSdk`, `finalizeVerifiedPublicationFillsRemoteDigests`) | local-run, deterministic |
-| 17 | Producers fail/report independently; no publish before validation | EV-TEST (`Evaluate.fsx` failedEvaluation against `MetadataCorrupt`, `MetadataImmutable`, `ArchiveMissing`, `ArchiveImmutable`) | local-run, deterministic |
-| 18 | Never overwrite/clobber a published versioned asset | EV-TEST (`Compare.fsx`, `Publish.fsx::uploadCandidateRefusesOverwrite`) | local-run, deterministic; live HTTP unverified |
-| 19 | Asset absent: validation passes → upload; report archive/manifest SHA-256, revision, version, URI | EV-BUILD, EV-TEST (`Evaluate.fsx::publishedOnArchiveAbsent` carries config context into the Render; `Runner.fsx::runnerDirtyTreeEmitsStructuredFailureJson` asserts every published* key absent on failure) | local-run, deterministic; live HTTP unverified |
-| 20 | Asset exists: download/read, verify digest + embedded manifest, deterministic compare | EV-CMP, EV-REMOTE (`Publish.fsx::uploadCandidateIdempotentNoPost` issues GET release + GET asset and verifies digest) | local-run simulated; live HTTP unverified hosted |
-| 21 | Embedded `revision` exception is exact; do not falsify/remove revision | EV-CMP (`Compare.fsx::revisionOnlyEquivalentDecision`), EV-REVIEW | local-run, deterministic |
-| 22 | Byte-identical asset → successful no-op | EV-CMP (`Compare.fsx::byteIdenticalDecision`) | local-run, deterministic |
-| 23 | Revision-only difference → no-op only after full remote digest/structure/payload/manifest match | EV-CMP, EV-REMOTE (`Publish.fsx::uploadCandidateIdempotentNoPost` verifies digest + bytes; `Compare.fsx::revisionOnlyEquivalentDecision`) | local-run, deterministic; live HTTP unverified |
-| 24 | Any other/inconclusive difference → fail closed with version-bump diagnostic | EV-CMP (`Compare.fsx::changedSdkRejection`, `changedPayloadHashRejection`, `changedCompressionMethodRejection`, `unknownManifestFieldAddedClassifiedBeyondRevision`, `externalAttributesRejected`, `entryCommentRejected`); EV-TEST (`Evaluate.fsx::failedOnBumpedSdk`) | local-run, deterministic |
-| 25 | Comparison strict, deterministic, testable without GitHub | EV-CMP (`Compare.fsx` 26 cases) | local-run, deterministic |
-| 26 | No-op reports published hash/manifest/revision plus distinct evaluated HEAD | EV-CMP (`Compare.fsx::revisionOnlyEquivalentDecision`); EV-TEST (`Evaluate.fsx::observedMetadataAssetShaDiffersArchiveShaAndCarried`) | local-run, deterministic |
-| 27 | No `--clobber`/replacement/delete-reupload/mutable tags/assets | EV-TEST (`Publish.fsx::uploadCandidateRefusesOverwrite`, `uploadMetadataRefusesOverwrite`) | local-run, deterministic |
-| 28 | No filter may skip a .NET-affecting revision | EV-WF: both triggers carry exactly one `paths-ignore` block with the single item `telegram/**`, and no `paths`, `branches-ignore`, `tags*` or extra event, asserted by the exact-shape check in `Check.ps1` and its negative tests (`Coherence.fs`); the release evaluates the head tree, not the diff, so a skip delays a release rather than losing it. GitHub's changed-file comparison has documented limits (an empty diff does not run the workflow; a diff above the file cap can fall outside the evaluated range; a push above the commit cap always runs), so the exclusion is not an absolute claim | local-run, deterministic; hosted trigger behavior unverified |
-| 29 | Preferred model: candidate → compare declared version → no-op/publish/bump-fail | EV-CMP, EV-TEST (`Evaluate.fsx::publicStatusSetIsExhaustive`) | local-run, deterministic |
-| 30 | Path optimization only if tests prove it cannot hide a changed package; the only filter is the Telegram exclusion, proved by the non-input proof (no production release module, release script, roster entry or workflow line consumes Telegram, extended to the `dotnet/**` and `workflow/**` build inputs) | EV-TEST (`Telegram.fs`; `Compare.fsx::changedCompressionMethodRejection`, `changedPayloadHashRejection`) | local-run, deterministic |
-| 31 | Every archive/manifest identifies exact committed `main` revision | EV-BUILD, EV-CMP (`Runner.fsx::manifestRevisionGuardContract`) | local-run, deterministic |
-| 32 | Preserve clean-HEAD/revision validation semantics in shared infra | EV-CMP, EV-TEST (`Runner.fsx::cleanTreeGuardContract`) | local-run, deterministic |
-| 33 | `dist/**` output must not weaken clean-source provenance checks | EV-BUILD, EV-TEST (`Runner.fsx::cleanTreeGuardContract`, `runnerDirtyTreeEmitsStructuredFailureJson`) | local-run, deterministic |
-| 34 | Per-component summary: status published/unchanged/failed, version, revision, URI/name, archive+manifest SHA-256, reason | EV-BUILD; EV-TEST (`Evaluate.fsx::unchangedOnByteIdentical`, `observedMetadataAssetShaDiffersArchiveShaAndCarried`; `Runner.fsx::runnerDirtyTreeEmitsStructuredFailureJson` parses JSON for status/component/version/archiveName/assetUri/reason/published* null) | local-run, deterministic |
-| 35 | Minimum GitHub Actions permissions; write limited to contents/assets | EV-WF: YAML `permissions: contents: read` default and `contents: write` only on the release job; EV-TEST (`Telegram.fsx::releaseWorkflowMatrixNamesOnly`) | local-run, deterministic |
-| 36 | Prefer `GITHUB_TOKEN`; no PAT | EV-WF: YAML references `secrets.GITHUB_TOKEN` only | local-run, deterministic |
-| 37 | Repo/component-safe serialization so rapid merges cannot race | EV-WF, EV-TEST | unverified hosted; YAML checked statically only |
-| 38 | Newer run must not silently cancel an in-progress publication | EV-WF, EV-TEST | unverified hosted |
-| 39 | `cancel-in-progress: false` alone insufficient (pending-run replacement) | EV-WF, EV-TEST | unverified hosted |
-| 40 | Use `queue: max` (or prove equivalent); report overflow/cancellation; keep publication serialized | EV-WF: YAML has `queue: max`; EV-TEST | unverified hosted (no hosted runner available) |
-| 41 | Fail closed on build/test/package failure, revision mismatch, metadata inconsistency, asset diff, ambiguous upload, unresolvable container | EV-TEST (`Evaluate.fsx::failedOnMissingManifest`, `failedOnArchiveMissing`, `failedOnArchiveImmutable`, `failedOnMetadataCorrupt`, `finalizeFailureClearsAllPublishedButRetainsRender`; `Runner.fsx::runnerDirtyTreeEmitsStructuredFailureJson`) | local-run, deterministic |
-| 42 | On ambiguous upload, observe remote before retry; never retry blindly | EV-TEST (`Publish.fsx::uploadCandidateAmbiguousPostMustObserveRemote`, `uploadCandidatePostTimeoutReadsBackVerifiedBytes`, `uploadCandidatePostServerErrorNoRetry`) | local-run simulated; live HTTP unverified hosted |
-| 43 | One producer's failure must not publish an unvalidated artifact for that producer | EV-TEST (`Evaluate.fsx::finalizeFailureClearsAllPublishedButRetainsRender`); the Runner CLI exercises the same helpers and never invents a fake extra API | local-run, deterministic |
-| 44 | Use existing component release containers/tags (`dotnet`, `workflow`); the Resolver is a third release artifact with its own `resolver` container/tag, which an explicitly confirmed operator action must create as a published, non-draft release before its first publication, and which is not GitHub-immutable | EV-WF, EV-REMOTE | static YAML checked for `dotnet` and `workflow`; `resolver` container not created or observed; live remote unverified |
-| 45 | Missing container: create via accepted tag policy or fail with actionable error | EV-WF, EV-TEST (`Evaluate.fsx::failedOnArchiveMissing`; `Publish.fsx::localMirrorObserver` Missing path) | local-run simulated; live HTTP unverified hosted |
-| 46 | Do not move/rewrite an existing component tag | EV-WF, EV-REVIEW | unverified hosted |
-| 47 | Run canonical producer pin preparation as part of release validation | EV-BUILD, EV-CMP (`Metadata.fsx::roundTripByteExactIdentical`) | local-run, deterministic |
-| 48 | Workflow must not mutate any consumer repository | EV-WF, EV-REVIEW | unverified hosted |
-| 49 | Publish one consumer-neutral producer metadata projection | EV-BUILD, EV-TEST (`Metadata.fsx::makeProjection` round-trip, `writeToFileDeterministic`); EV-TEST (`Evaluate.fsx::observedMetadataAssetShaDiffersArchiveShaAndCarried` proves the metadata asset sha is verified separately from the archive sha) | local-run, deterministic |
-| 50 | Optional: expose metadata as Actions artifact/summary; no consumer-specific formats | EV-WF: YAML references `release-metadata-<component>` artifact | local-run, deterministic |
-| 51 | Deterministic tests/helpers without real publication for ordinary local runs (retired: the suites cited here are removed; the row records the earlier observation only) | EV-TEST (`infrastructure/release/tests/*.fsx`, 9 entrypoint scripts and 272 assertions in Test.ps1; `Fixture.fsx` helper + `Historical.fsx` integration = 282 total assertions) | local-run, deterministic |
-| 52 | Cover publish/no-op/bump-fail/validation-gate/ambiguous/two-component/shared-infra/concurrency/Telegram-exclusion | EV-TEST (publish/no-op/bump-fail/validation-gate/ambiguous/two-component/shared-infra-change/Telegram are covered; concurrency is YAML-static only) | local-run simulated; concurrency hosted unverified |
-| 53 | Keep decision logic deterministic and separate from the thin transport shell | EV-CMP (`Compare.fsx`, `Metadata.fsx`), EV-REVIEW | local-run, deterministic |
-| 54 | Merge/push to `main` auto-evaluates both producers | EV-WF, EV-REMOTE | unverified hosted |
-| 55 | New source-controlled versions publish without manual release step | EV-WF, EV-REMOTE | unverified hosted |
-| 56 | Byte-identical / revision-only equivalent → clean no-op retaining published revision/hashes | EV-CMP (`Compare.fsx::byteIdenticalDecision`, `revisionOnlyEquivalentDecision`); EV-TEST (`Evaluate.fsx::finalizeRecoveryPreservesVerifiedArchiveFields`) | local-run, deterministic |
-| 57 | Same-version candidates differing beyond the exception fail, require bump | EV-CMP (`Compare.fsx::changedSdkRejection`, `changedPayloadHashRejection`, `unknownManifestFieldAddedClassifiedBeyondRevision`, `externalAttributesRejected`, `entryCommentRejected`); EV-TEST (`Evaluate.fsx::failedOnBumpedSdk`) | local-run, deterministic |
-| 58 | No asset is ever overwritten | EV-TEST (`Publish.fsx::uploadCandidateRefusesOverwrite`, `uploadMetadataRefusesOverwrite`) | local-run simulated; live HTTP unverified hosted |
-| 59 | Artifacts built from and identify the exact canonical `main` SHA | EV-BUILD (packages.md SHA-256), EV-CMP (`Runner.fsx::manifestRevisionGuardContract`) | local-run, deterministic |
-| 60 | Producer validation runs before publication | EV-BUILD, EV-TEST (`Evaluate.fsx::missingManifestRejection`, `missingArchiveRejection`) | local-run, deterministic |
-| 61 | Version/SDK/release metadata not duplicated in workflow YAML | EV-WF, EV-TEST (`Bootstrap.fsx::updatePs1ProjectEmitsCanonicalValues`) | local-run, deterministic |
-| 62 | Release output exposes deterministic hashes/revision suitable for pin updates | EV-BUILD, EV-CMP (`Metadata.fsx::renderDeterministicByteExact`, `writeToFileDeterministic`); EV-TEST (`Evaluate.fsx::finalizeVerifiedPublicationFillsRemoteDigests`) | local-run, deterministic |
-| 63 | Concurrent merges cannot race into mutable/duplicate publication | EV-WF, EV-TEST | unverified hosted |
-| 64 | Telegram source and Telegram-owned workflows remain untouched (only the exclusion line in the two non-Telegram workflows is added) | EV-TEST (`Telegram.fs`), EV-REVIEW | local-run, deterministic |
-| 65 | Non-goals respected (no Telegram CI; the `telegram/**` exclusion is not one, auto bump, consumer edits, tag-model change, registry, generic framework) | EV-AUDIT, EV-REVIEW | local-run (`Telegram.fsx::noTelegramWorkflowFiles`, `noUvPytestInReleaseWorkflows`) |
-| 66 | Audit snapshot: #21/#23/#26/#27 closed; no root workflow; both configs `1.0.3` / SDK `11.0.100-rc.1.26425.128` | baseline `research.md` | unverified (status from W3 prior slice); the W4 manifest refresh bumped to 1.0.4 (see `packages.md`) |
-| 67 | Historical bootstrap: compare candidate vs published `v1.0.3`; PR authors reviewed bump if beyond revision | EV-REMOTE, EV-CMP, EV-REVIEW (`packages.md` §7 records byte comparison; the 1.0.4 bump is the authored response) | local-run, deterministic on the bootstrap assets at `MCP_RELEASE_HISTORICAL_ROOT` |
-| 68 | Install/verify exact configured SDK actually executes build/test/publish; no second source; select/validate platform+arch. Reconciled (Store #46, revised after PR #85 review): the single source for the SDK is the root `global.json` (`rollForward: disable`, `allowPrerelease: false`); `Update.ps1 -Verify` compares the SDK **selected** by native MSBuild evaluation at the repository root with the owner and fails closed on disagreement, and the SDK root chosen by the native resolver is accepted without custom root listing. Only after verification does it hand the verified SDK, runtime, TFM and language version to later steps through `MCP_RELEASE_VERIFIED_*`; `-Project` never writes them. Publication consumes the verified values, fails closed when they are missing or invalid and performs no SDK discovery in the credential step. The isolated publisher stage receives only the verified TFM and language version, stays outside the checkout and disables automatic props/targets imports; `Check.ps1` asserts `-Verify` precedes both the publish invocation and the `GITHUB_TOKEN` step. The earlier `MCP_RELEASE_SDK_ROOT` handoff, single-root rule and strict reader are superseded | EV-BUILD, EV-WF, EV-TEST (planned `Release.Tests` invocation and orchestration suites; `Bootstrap.fsx::updatePs1ProjectEmitsCanonicalValues`, `updatePs1ProjectRejectsDuplicateLiteral` and `Invocation.fsx` negative cases are earlier evidence describing the superseded model) | local-run partial (`-Verify` observed with SDK 11.0.100; isolated-stage generation and publish locally exercised, see task evidence); hosted `setup-dotnet` image resolution, compiled-suite and candidate-comparison evidence unverified |
-| 69 | Check out event `github.sha` (not moving `main`); verify HEAD+manifest; stale re-run fails closed; never move tags | EV-WF (YAML `ref: ${{ github.sha }}`), EV-CMP, EV-TEST (`Runner.fsx::runnerDirtyTreeEmitsStructuredFailureJson` exercises the clean-tree guard with a real runner invocation) | local-run, deterministic; hosted unverified |
-| 70 | Preserve fixed tags/URLs; detect incompatible immutable-release settings and fail with actionable message | EV-REMOTE, EV-WF, EV-TEST (`Evaluate.fsx::failedOnArchiveImmutable`, `Publish.fsx::observerImmutableReleaseReportsImmutable`) | local-run simulated; hosted unverified |
-| 71 | Additional tests: consecutive unrelated HEADs → unchanged; identical/revision-only/changed/malformed/bootstrap/pending-queue/Telegram | EV-TEST (`Compare.fsx` covers identical/revision-only/changed/malformed; `Bootstrap.fsx` covers bootstrap; `Telegram.fsx` covers Telegram; `Historical.fsx::consecutiveDistinctHeadFixturesClassifiedRevisionOnlyEquivalent` covers consecutive unrelated HEADs; pending-queue **unverified hosted**) | local-run, deterministic (pending-queue hosted unverified) |
-| 72 | Clarifications are scope clarifications, not permission to redesign public formats | EV-AUDIT, EV-REVIEW | unverified |
+- The SDK version is authored once in the root `global.json`
+  (`rollForward: disable`, `allowPrerelease: false`). A pre-SDK projection reads
+  only what installation needs.
+- The target framework and F# language version are owned by the root
+  `Directory.Build.props`; no project may re-declare them. No competing
+  `Directory.Build.targets`, nested `Directory.Build.*`, `Directory.Packages.props`,
+  or `NuGet.config` may exist.
+- The runtime is never authored. After SDK setup, native MSBuild evaluation of
+  the release project derives it from the single
+  `KnownFrameworkReference` for `Microsoft.NETCore.App` at the evaluated target
+  framework. The runtime is not computed from the target-framework string.
+  The PowerShell verification step and F# preparation paths both use native
+  MSBuild evaluation.
+- Each component's `*/release/Config.json` owns only its per-component policy
+  (`componentId`, version, entry DLL, platform RID, archive name, asset URI,
+  published files, launch kind, and ordered launch arguments). A config that
+  declares `sdkVersion` or `runtimeVersion` is rejected.
+- `Update.ps1 -Verify` runs after SDK installation. It fails closed unless the
+  selected SDK equals the owner, the evaluated target framework and language
+  version are plain tokens, the SDK-bundled framework matches, exactly one
+  matching framework reference exists, the installed runtime is compatible
+  (same major.minor, patch at least the derived value; a prerelease never
+  satisfies a stable value), and the executing platform RID equals the
+  configured `platform`.
+- Only after verification may the workflow publish
+  `MCP_RELEASE_VERIFIED_SDK`, `MCP_RELEASE_VERIFIED_RUNTIME`,
+  `MCP_RELEASE_VERIFIED_TARGET_FRAMEWORK`, and
+  `MCP_RELEASE_VERIFIED_LANGUAGE_VERSION`. `-Project` never writes them.
+- Publication consumes the verified values, fails closed when they are missing
+  or invalid, and performs no SDK discovery while the credential is present.
+  The isolated publisher stage imports no repository build files and receives
+  only the verified target framework and language version.
+- Workflow YAML must not duplicate producer versions, the SDK version, or the
+  runtime version. CI never increments, invents, or infers a product version.
 
-## 2. User verification scenarios
+## 3. Participants, policy, and candidate input
 
-Each scenario is how a reviewer/user confirms an acceptance criterion (#54–64)
-or required test (#52/#71). None is executed in this slice.
+- `infrastructure/release/Participants.json` is a closed enrollment roster of
+  `dotnet`, `workflow`, and `resolver`, in that order. It carries component IDs
+  and canonical config paths only; policy values such as `launchKind` come from
+  each component's config.
+- The transaction is harness-independent: it consumes only producer source,
+  component policy, and generated metadata, never a harness checkout or consumer
+  runtime.
+- Component roots derive from each participant's registered `configPath`.
+  A nested location such as `infrastructure/resolver/` needs no
+  `<componentId>/release` layout.
+- The candidate is a data-only directory containing exactly the producer archive
+  and standalone `distribution.json`. It carries no sidecar, receipt, or
+  executable instruction, and candidate members are never executed.
+- The canonical manifest and consumer pin are produced by the component's
+  release scripts from that policy and the packaged bytes. The manifest records
+  the clean source revision, the exact member inventory and per-member SHA-256,
+  the runtime derived from the packaged runtime configuration, and the launch
+  descriptor. The pin records the exact selected identity: component, version,
+  asset URI and name, archive and manifest digests, and `publishedRevision`.
+- The manifest schema stays at 2 and the pin schema at 1. `dotnet-cli` is an
+  additive launch kind inside schema 2; `dotnet-exec` remains the MCP launch
+  kind. An unknown kind, unknown field, duplicate key, missing member, or
+  malformed value fails closed. No compatibility reader or migration path
+  exists.
+- The Resolver refuses a `dotnet-cli` manifest as an MCP launch target in both
+  `run` and `resolve`, before staging or installing, and releases the lease on
+  the refusal branch.
 
-| # | Scenario | Expected observable | Planned evidence | Status |
-| --- | --- | --- | --- | --- |
-| V1 | Push/merge new Dotnet version to `main` | `dotnet` run reports `published` with archive/manifest SHA-256, revision, URI | EV-WF, EV-BUILD, EV-REMOTE | unverified |
-| V2 | Push/merge new Workflow version to `main` | `workflow` run reports `published` | EV-WF, EV-BUILD, EV-REMOTE | unverified |
-| V3 | Push docs-only change (a Telegram-only push no longer triggers the release or Unix workflows) | Both producers report `unchanged` despite new embedded revision | EV-TEST (`Historical.fsx::consecutiveDistinctHeadFixturesClassifiedRevisionOnlyEquivalent`; Req 71) | local-run, deterministic |
-| V4 | Re-publish byte-identical asset | `unchanged`; published revision/hashes retained | EV-CMP (`Evaluate.fsx::finalizeRecoveryPreservesVerifiedArchiveFields`) | local-run, deterministic |
-| V5 | Same version, candidate differs beyond revision (runtime/SDK/manifest/ZIP metadata) | `failed` with version-bump diagnostic; no upload | EV-CMP, EV-TEST | unverified |
-| V6 | Malformed/mismatched published digest or manifest | `failed`; no upload | EV-CMP, EV-TEST | unverified |
-| V7 | Producer build/test/package validation fails | No upload for that producer; other producer unaffected | EV-BUILD, EV-TEST | unverified |
-| V8 | Manifest revision ≠ checked-out HEAD | Fail closed before publish | EV-CMP, EV-TEST | unverified |
-| V9 | Ambiguous upload result | Remote observed before any retry; no blind retry | EV-TEST | unverified |
-| V10 | Two rapid merges / pending runs | No clobber; serialized publication; overflow reported | EV-WF, EV-TEST | unverified |
-| V11 | Shared infrastructure / project metadata change | Not incorrectly skipped; change is detected | EV-TEST | unverified |
-| V12 | Historical `v1.0.3` bootstrap comparison | Explicit decision: no-op or reviewed bump, never overwrite | EV-REMOTE, EV-CMP, EV-REVIEW | unverified |
-| V13 | Immutable-release setting incompatible | Fail closed with actionable message; tags unmoved | EV-REMOTE, EV-TEST | unverified |
-| V14 | Audit Telegram boundaries | Telegram source/workflows unchanged by the release transaction | EV-TEST, EV-REVIEW | unverified |
-| V15 | Workflow YAML not a second version/SDK table | Per-component values for all three participants (`dotnet`, `workflow`, `resolver`) trace to their own `release/Config.json`, and the shared SDK to the root `global.json`; none is repeated in workflow YAML | EV-WF, EV-REVIEW | unverified |
+## 4. Per-component publication transaction
 
-## 3. Constraints carried into design (not yet frozen)
+Each participant advances through the same ordered transaction, and a failure
+stops that participant before publication:
 
-- The immutable-container conflict must fail closed; no new tag model.
-- Only the strict embedded-`revision` exception is allowed; actual historical
-  byte comparison is required later (blocked by the remote-download transport
-  gap in `research.md` §5.I).
-- Review profile is combined plus DevOps/security because release integrity and
-  API credentials are material.
-- No implementation solution is frozen by this document.
+1. Check out and verify the exact event revision.
+2. Select and verify the SDK, target framework, language version, platform, and
+   runtime.
+3. Build and package the producer; prepare the canonical manifest and pin.
+4. Run the component's `tests/distribution/Run.fsx` package gate.
+5. Verify candidate archive membership, inner archive structure, manifest
+   identity, and event revision.
+6. Observe the remote container and asset, compare declared and published
+   identity, and decide publish, no-op, or fail.
+7. Publish only data, through the existing transaction, with the existing
+   no-clobber policy.
 
-## 4. Known blocking ambiguities
+Additional requirements:
 
-A1 concurrency group key / `queue: max` equivalence; A2 `workflow_dispatch`
-inputs; A3 immutable-conflict response (configure vs fail); A4 ambiguous-upload
-test determinism boundary; A5 failure-reason conciseness / transient post-upload
-5xx. See `research.md` §5 for evidence and impact.
+- The canonical producer pin is prepared as part of release validation.
+- Producer validation completes before publication. An invalid or unproven
+  candidate is never published.
+- `dist/**` output does not weaken clean-source provenance. Packaging refuses a
+  dirty source tree and stamps the clean `HEAD` revision it built from.
+- The record for each component reports its published, unchanged, or failed
+  status, version, revision, asset URI/name, archive and manifest SHA-256, and
+  failure reason. Release output exposes deterministic hashes and the revision
+  suitable for consumer pin updates. A published metadata projection is
+  consumer-neutral and deterministic; optional workflow summary/artifact output
+  must not add consumer-specific formats.
+- No asset is overwritten, replaced, deleted and re-uploaded, or made mutable
+  through a tag or asset rename.
 
-W5 tester additions to `Ambiguities`:
+## 5. Comparison, no-op, and failure
 
-A6 runner binary state: `infrastructure/release/bin/Release/net11.0/ReleaseRunner.exe`
-is the owner-built apphost that ships with the repo (W4 build evidence
-`runId=sSO_NO5zPkb5zICwmItBZtjZzLLmK_aeLwrMzl7jcf8`, 0 errors / 0 warnings).
-The tester cannot rebuild (engineer-owned). `Runner.fsx` exercises both the
-empty-argv exit-2 path and the dirty-tree structured-JSON + exit-4 path
-against the real binary; the binary is owned by the engineer, the test
-asserts observable contract behaviour.
+- The candidate is compared against the declared version and the published
+  asset. The decision logic is deterministic, strict, and separate from the thin
+  network shell, so it can be exercised without a live GitHub publication.
+- An absent asset that passes validation is uploaded. The result reports the
+  archive and manifest SHA-256, revision, version, and URI.
+- A byte-identical asset is a successful no-op.
+- A revision-only difference is a no-op only after a full remote digest,
+  structure, payload, and manifest match. Only the exact embedded revision
+  exception is allowed; the published revision and hashes are retained, never
+  replaced by candidate values.
+- Any other difference, including a changed SDK, runtime, payload hash,
+  compression method, manifest field, ZIP attribute, or entry comment, fails
+  closed with a version-bump diagnostic and no upload.
+- A malformed, mismatched, or inconsistent published digest or manifest fails
+  closed. An inconclusive comparison fails closed.
+- A no-op result reports the published hashes and revision separately from the
+  distinct evaluated HEAD.
 
-A7 hosted GitHub Actions behavior: actual `api.github.com` reads, POST
-uploads, redirect handling, 404/5xx semantics, and `queue: max` FIFO
-semantics are **unverified hosted**. The loopback HttpListener and
-`localMirrorObserver` simulate the typed-state classification but do not
-exercise the hosted API. No independent queue adapter test is labeled as
-hosted verification.
+## 6. Recovery, stale runs, and serialization
 
-A8 consecutive unrelated HEADs → unchanged classification: exercised locally
-via `Historical.fsx::consecutiveDistinctHeadFixturesClassifiedRevisionOnlyEquivalent`
-when `MCP_RELEASE_HISTORICAL_ROOT` points at the locally downloaded v1.0.3
-archives; otherwise the test skips gracefully. The `Compare` decision
-matrix short-circuit + revision-only-equivalent path is the underlying
-contract covered by `Compare.fsx::revisionOnlyEquivalentDecision`.
-ivalentDecision`.
+- A stale re-run fails closed. The workflow checks out `github.sha` rather than a
+  moving branch tip, verifies `HEAD` equals the event SHA, and proves in the
+  credential-bearing step that the event SHA is still the `main` tip or a safe
+  ancestor with the event SHA as merge base. Tags are never moved.
+- An ambiguous upload result requires observing the remote before any retry.
+  There is no blind retry.
+- One participant's failure is reported without publishing an unvalidated
+  artifact for that participant. Other participants retain their own validated
+  outcome.
+- Publication is serialized. The workflow uses `queue: max` and
+  `cancel-in-progress: false`; the publication job has its own serialized group
+  with the same settings, so a newer run does not silently replace or cancel a
+  pending publication.
+- Partial publication is possible because components publish independently. A
+  retry must inspect the actual published assets, reuse the verified no-op and
+  recovery checks, and never overwrite published bytes. See
+  [partial publication and recovery](../Distribution.md#partial-publication-and-recovery).
+- Missing container: create it through the accepted tag policy or fail with an
+  actionable error. The `resolver` container must already exist as a published,
+  non-draft, non-immutable release before its first publication. An immutable
+  container setting is an incompatible, fail-closed condition.
+- The release workflow does not mutate any consumer repository.
+- Component releases use the fixed `dotnet`, `workflow`, and `resolver` tags,
+  and assets keep the `vX.Y.Z.zip` name form. An existing tag is never moved,
+  rewritten, or used as a mutable asset pointer; the tag model is not
+  redesigned.
+
+## 7. Security and release-boundary safeguards
+
+- Minimum permissions: workflow default `contents: read`. Only the publication
+  job holds `contents: write`; it alone also holds `actions: read`.
+- The only credential is the platform `GITHUB_TOKEN`. No repository secret or
+  PAT is read. The token is scoped to the one publication step and is absent
+  from the publisher and preparation jobs and from the toolchain-verification
+  step.
+- Action references are reviewed 40-hex commit pins. No floating tag or short
+  reference is allowed.
+- Transfers use exact, validated numeric artifact IDs and isolated declared
+  roots. No name, pattern, latest-run, repository, token, or merge lookup
+  exists. Blank or unusable IDs are rejected before the first transfer.
+- The publication job verifies the downloaded runtime against the publisher
+  job's independent file/SHA-256 inventory and each candidate against the exact
+  declared members before executing anything from either transfer. It does not
+  override the transfer's documented digest or extraction behavior.
+- The publisher job builds from the release project's ordered `<Compile
+  Include>` list, contains every staged item inside the checkout, and publishes
+  with repository build imports suppressed. The publication job never builds,
+  restores, evaluates F#, runs a project, or runs a test.
+- The control plane is rechecked in the credential-bearing step immediately
+  before the native publisher call. No hand-written artifact client or direct
+  API upload path bypasses the verified publisher.
+- The Resolver trust boundary is unchanged: a Resolver is verified from its pin
+  and closure, never by running an unverified Resolver.
+
+## 8. Verification gates and support boundaries
+
+Current automated verification, deterministic and non-behavioral:
+
+- Builds: `dotnet/Dotnet.fsproj`, `workflow/Workflow.fsproj`,
+  `infrastructure/resolver/Resolver.fsproj`, and
+  `infrastructure/release/Release.fsproj`, all in Release.
+- Package gates: `dotnet/tests/distribution/Run.fsx`,
+  `workflow/tests/distribution/Run.fsx`, and
+  `infrastructure/resolver/tests/distribution/Run.fsx`. They verify the archive,
+  manifest, pin, and byte contracts; they are not behavioral suites.
+- Guards: `infrastructure/release/Check.ps1` (roster, trigger shape, job
+  structure, action pins, artifact bindings, transfer roots, CLI paths, credential
+  separation, cross-stage ordering) and
+  `infrastructure/release/Typecheck.ps1` (strict FCS typecheck of the retained
+  release scripts).
+- `Verify.ps1` proves downloaded membership, paths, and SHA-256 before
+  execution.
+
+None of these gates performs a live publication or requires a hosted
+credential.
+
+The repository has no automated behavioral test suite. Behavioral confirmation
+of an extracted MCP is a manual smoke through the Resolver contract. Adding
+automated tests, test projects, or test-only CI phases requires explicit,
+specific approval for each addition.
+
+Support boundaries:
+
+- Hosted GitHub Actions behavior is not independently observed: upload
+  semantics, immutable-release detection, and `queue: max` FIFO ordering are
+  configured and guarded but not claimed as hosted verification.
+- GitHub's changed-file comparison has documented limits: an empty diff does not
+  run the workflow, and a very large diff can fall outside the evaluated range.
+  The Telegram exclusion is therefore not an absolute claim.
+- The `resolver` release container and identity are unverified and unpublished.
+  No public release status is asserted.
+- Published-release HTTP download is unverified; local qualification hashes are
+  not publication identities.
+- Windows x64 is the release platform selection. Unix qualification is a
+  read-only pull-request check and is not Unix release publication.
+
+## 9. Non-goals
+
+- No Telegram CI, automatic version bump, consumer-repository edit, tag-model
+  change, package registry, or generic language/framework adapter.
+- No parallel producer delivery mechanism, second package resolver, generic
+  command engine, or recursive Resolver self-installation.
+- No change to public wire names, persisted schemas, or existing consumer
+  contracts except through a separately approved contract migration.

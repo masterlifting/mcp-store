@@ -218,28 +218,19 @@ resolver provisions no runtime and does not substitute another revision.
 These are current, unverified, or unimplemented properties. Do not read this
 document as a claim beyond them.
 
-- **Runtime qualification is bounded to the executed targets.** The automated
-  resolver behavior suite is retired, so the figures in this item are historical
-  observations of earlier revisions, not a current gate; only the package gate
-  (`tests/distribution/Run.fsx`: archive, manifest, pin and closure bytes) and the
-  native build remain automated. The native
-  resolver suite passed 77/77 locally on Windows (with its Windows-specific
-  platform gates). Hosted run
-  [39319894447](https://github.com/masterlifting/mcp-store/actions/runs/39319894447)
-  passed all three Unix jobs at commit `ecd9e32e3c58e85daf970fb285ee9a8f9922e7ae`
-  with .NET SDK 11.0.100-rc.1: `linux-x64` on Ubuntu 24, `osx-arm64` on macOS 15,
-  and `osx-x64` on macOS 15. Each job passed clean producer builds, strict pin
-  and archive acceptance, and MCP initialize. The combined Unix inventory
-  reported 91/91; this includes 17 Unix filesystem cases and 14 `Stat` cases,
-  which were included in the inventory/count rather than individually printed
-  as successful cases.
-  The Windows 77/77 and Unix 91/91 counts use different platform gates and are
-  not directly comparable. These runs qualify only the listed hosted targets;
-  they do not establish support for all Linux architectures, musl, or other OS
-  versions. No published-release HTTP download was verified.
+- **Runtime qualification is bounded to the configured targets.** Automated
+  resolver verification is limited to the package gate
+  (`tests/distribution/Run.fsx`: archive, manifest, pin and closure bytes) and
+  the native build; resolver behavior is not covered by an automated suite.
+  Windows x64 is the release platform selection. Qualification covers only the
+  hosted Unix targets configured in `.github/workflows/unix.yml` (`linux-x64` on
+  Ubuntu 24, `osx-arm64` on macOS 15, and `osx-x64` on macOS 15). It does not
+  establish support for all Linux architectures, musl, or other OS versions. No
+  published-release HTTP download was verified.
 - **Unix coordination has bounded runtime evidence.** The guard's exclusivity
-  acquisition probe passed on the filesystems used by the three hosted Unix
-  runners. On Unix, .NET implements `FileShare.None` as a non-blocking
+  acquisition probe runs at install time; its runtime evidence is bounded to the
+  filesystems used by the hosted Unix qualification targets. On Unix, .NET
+  implements `FileShare.None` as a non-blocking
   `flock(LOCK_EX)` and every other share value as `LOCK_SH`, and it ignores lock
   failures other than `EWOULDBLOCK` — exactly the silent absence the acquisition
   probe detects. The shared lease remains a best-effort usage claim; no safety
@@ -252,8 +243,8 @@ document as a claim beyond them.
   path. The implementation invokes it directly with fixed platform arguments,
   bounds each call to at most two seconds, and fails closed on unsupported
   platforms, execution errors, timeout, or malformed output. Its runtime
-  behavior was exercised in the three hosted Unix targets listed above; that
-  does not qualify other Unix platforms or runtime versions.
+  evidence is bounded to the hosted Unix qualification targets; that does not
+  qualify other Unix platforms or runtime versions.
 - **Classification has subprocess cost.** Inventory and cleanup classify entries
   sequentially and may launch one process per entry (up to the 8,192-entry
   bound). Each scan/cleanup has a cooperative 60-second deadline, with the
