@@ -47,14 +47,15 @@ manifest or pin changes shape. Consuming the new stable producer releases still
 requires each consumer to review and select their published pins, and a .NET
 host does not roll a prerelease framework forward to a stable one.
 
-**Delivery state.** Everything above describes the contract being implemented and
-its intended publication, not a delivered release. As of this update no Resolver artifact has been qualified
-or published, no Resolver version, digest or release identity exists, and no
-hosted run has exercised the new wiring. The implementation is carried by one
-pull request after PR #61, and publication happens only when that pull request
-merges, as one final artifact set rather than an intermediate set per step.
-Exact identities come from that verified release and are never recorded here
-beforehand.
+**Publication and recovery.** One implementation PR follows PR #61, with no
+planned intermediate releases. Before merging, verify that the `resolver`
+release container exists, is published and non-draft, and is not configured as
+GitHub-immutable. Publication is not atomic across components: if Resolver
+publication fails, Dotnet or Workflow assets may already have been published.
+Before retrying, inspect which assets were actually published and use the
+existing verified no-op and recovery checks. Never overwrite published bytes.
+Local qualification hashes are not publication identities; use only identities
+verified after release.
 
 The evidence and reconciliation sections, the candidate comparison, the approved
 Windows experiment and the ordered-plan history below are the dated research
@@ -555,10 +556,9 @@ that arbitrary malicious code was run. No equivalent production verification
 wrapper was built. A successful tool install is not permission to delete the
 release policy or `Compare.fs`.
 
-As of the 2026-11-25 status update no Resolver artifact has been qualified or
-published and no hosted run has exercised the new wiring. Remaining work: Store
-#46 must implement the selected trusted bootstrap publication and its dependency
-closure; Harness #120 must define trusted
+Local qualification does not establish hosted publication. Store #46 must
+verify publication and provide the actual Resolver release identity and
+dependency closure; Harness #120 must define trusted
 selection, acquisition, repair and pre-execution verification and then prove
 checkout-independent delivery. Any production implementation, artifact
 publication and runtime activation require their own explicit approvals. The
