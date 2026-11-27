@@ -2,7 +2,6 @@
   "componentId": "workflow",
   "version": "3.0.2",
   "entryDll": "Mcp.Workflow.dll",
-  "platform": "win-x64",
   "publishedFiles": [
     "FSharp.Core.dll",
     "Mcp.Workflow.deps.json",

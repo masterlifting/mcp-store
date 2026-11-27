@@ -28,7 +28,7 @@ let writeConsumerPins
     (distRoot: string)
     (outputPath: string)
     (missingArtifactHint: string)
-    : Async<Result<string * string * string * string, ReleaseError>> =
+    : Async<Result<Pin, ReleaseError>> =
     releaseResult {
         // The SDK and runtime versions come from their owners, never from the component policy.
         let! toolchain = ReleaseToolchain.resolveLocal root
@@ -58,16 +58,12 @@ let writeConsumerPins
                  Error(RevisionMismatch(head, manifest.Revision)))
 
         let! archiveSha256 = BuildProvenance.sha256FileAsync archivePath
-        let! manifestSha256 = BuildProvenance.sha256FileAsync manifestPath
 
         let pin: Pin =
-            { SchemaVersion = DistributionPin.schemaVersion
-              ComponentId = policy.ComponentId
+            { Id = policy.ComponentId
               Version = policy.Version
-              ArchiveSha256 = archiveSha256
-              ManifestSha256 = manifestSha256
-              PublishedRevision = manifest.Revision }
+              Digest = DistributionPin.digestFor archiveSha256 }
 
         do! BuildProvenance.writeJsonAsync outputPath (DistributionPin.toJsonNode pin)
-        return policy.ArchiveName, archiveSha256, manifestSha256, manifest.Revision
+        return pin
     }

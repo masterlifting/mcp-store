@@ -263,25 +263,15 @@ let assertDistributionContract (producer: Producer) (layout: Layout) : Async<uni
 
         archive.Dispose()
 
-        // The consumer pin and the published release-metadata projection share one
-        // unwrapped canonical schema; no keyed five-field inner record exists.
+        // The consumer pin and the published release metadata share one canonical record; the archive
+        // name, asset location and revision derive from it and the authenticated archive.
         let! pinsText = File.ReadAllTextAsync layout.PinsPath |> Async.AwaitTask
         let pin = JsonNode.Parse(pinsText).AsObject()
 
-        // The archive name and asset location derive from the identity, so the pin carries only the six identity and digest fields.
-        assertExactKeys
-            "pin declares exactly the canonical release-metadata fields"
-            [ "schemaVersion"; "componentId"; "version"; "archiveSha256"; "manifestSha256"; "publishedRevision" ]
-            (keysOf pin)
-
-        assertEqual "pin schemaVersion" 2 (pin["schemaVersion"].GetValue<int>())
-        assertString "pin componentId" producer.ComponentId pin["componentId"]
+        assertExactKeys "pin declares exactly the canonical fields" [ "id"; "version"; "digest" ] (keysOf pin)
+        assertString "pin id" producer.ComponentId pin["id"]
         assertString "pin version" producer.Version pin["version"]
 
         let! archiveSha256 = sha256Async layout.ArchivePath
-        let! manifestSha256 = sha256Async layout.ManifestPath
-        assertEqual "pin archiveSha256" archiveSha256 (pin["archiveSha256"].GetValue<string>())
-        assertEqual "pin manifestSha256" manifestSha256 (pin["manifestSha256"].GetValue<string>())
-        assertEqual "pin publishedRevision equals the validated manifest revision" manifestRevision (pin["publishedRevision"].GetValue<string>())
-        assertEqual "pin publishedRevision equals the committed HEAD" headRevision (pin["publishedRevision"].GetValue<string>())
+        assertEqual "pin digest" $"sha256:{archiveSha256}" (pin["digest"].GetValue<string>())
     }

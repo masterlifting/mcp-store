@@ -1,6 +1,6 @@
 # role: reusable module/helper
 # Pre-SDK reader for the enrollment roster; it mirrors the compiled `ReleaseEnrollment` acceptance rules so every gate rejects the same drift.
-# Only structural and participation policy is mirrored here; the per-component policy (versions, allowlists, URIs, platform) stays in each producer's canonical `Config.json`, and the shared SDK and runtime versions stay in their toolchain owners.
+# Only structural and participation policy is mirrored here; the per-component policy (versions, allowlists, URIs) stays in each producer's canonical `Config.json`, and the shared SDK, runtime and platform stay in their toolchain owners.
 
 $script:ReleaseSupportedComponentIds = @("dotnet", "workflow", "resolver")
 $script:ReleaseForbiddenRosterFields = @(

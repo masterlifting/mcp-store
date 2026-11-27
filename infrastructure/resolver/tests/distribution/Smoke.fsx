@@ -141,7 +141,7 @@ async {
 
         let pinFields = expectCase "the generated pin parses" "Ok" (parsePin.Invoke(null, [| box pinText |]))
         let pin = pinFields.[0]
-        let pinArchiveSha256 = pin.GetType().GetProperty("ArchiveSha256").GetValue(pin) :?> string
+        let pinDigest = pin.GetType().GetProperty("Digest").GetValue(pin) :?> string
 
         assertEqual "the pin derives the packaged archive name" archiveName (pin.GetType().GetProperty("ArchiveName").GetValue(pin) :?> string)
 
@@ -153,7 +153,7 @@ async {
         let actualArchiveSha256 =
             SHA256.HashData archiveBytes |> Convert.ToHexString |> fun value -> value.ToLowerInvariant()
 
-        assertEqual "the generated pin matches the archive bytes" pinArchiveSha256 actualArchiveSha256
+        assertEqual "the generated pin matches the archive bytes" pinDigest $"sha256:{actualArchiveSha256}"
 
         let verify =
             assembly.GetType("ResolverPayload", true).GetMethod("verify", BindingFlags.Public ||| BindingFlags.Static)
@@ -177,7 +177,8 @@ async {
 
         let altered = Array.copy archiveBytes
         altered.[0] <- altered.[0] ^^^ 0xFFuy
-        let alteredSha256 = SHA256.HashData altered |> Convert.ToHexString |> fun value -> value.ToLowerInvariant()
+        let alteredDigest =
+            SHA256.HashData altered |> Convert.ToHexString |> fun value -> $"sha256:{value.ToLowerInvariant()}"
 
         // The archive digest is checked first, so the changed copy must fail before any decompression or parsing.
         let alteredError =
@@ -192,13 +193,13 @@ async {
                 "IdentityMismatch"
                 alteredError.[0]
 
-        assertEqual "the altered-archive refusal names archiveSha256" "archiveSha256" (alteredFields.[0] :?> string)
-        assertEqual "the altered-archive refusal keeps the pin digest as expected" pinArchiveSha256 (alteredFields.[1] :?> string)
-        assertEqual "the altered-archive refusal reports the changed digest" alteredSha256 (alteredFields.[2] :?> string)
-        assertTrue "the altered archive has a different digest" (alteredSha256 <> pinArchiveSha256)
+        assertEqual "the altered-archive refusal names digest" "digest" (alteredFields.[0] :?> string)
+        assertEqual "the altered-archive refusal keeps the pin digest as expected" pinDigest (alteredFields.[1] :?> string)
+        assertEqual "the altered-archive refusal reports the changed digest" alteredDigest (alteredFields.[2] :?> string)
+        assertTrue "the altered archive has a different digest" (alteredDigest <> pinDigest)
 
         printfn
-            "OK resolver packaged smoke: %s (%s, sha256 %s) launched with exit 2, refused the CLI-only launch.kind, and rejected an altered archive at archiveSha256"
+            "OK resolver packaged smoke: %s (%s, sha256 %s) launched with exit 2, refused the CLI-only launch.kind, and rejected an altered archive at digest"
             componentId
             archiveName
             actualArchiveSha256

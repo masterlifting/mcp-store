@@ -10,9 +10,7 @@ open SharedFailure
 
 type Transport = { CreateClient: unit -> HttpClient }
 
-let private releaseHost = "github.com"
-
-// The asset CDN hosts GitHub redirects a release download to; nothing else is followed.
+// The Store release host plus the asset CDN hosts GitHub redirects a release download to; nothing else is followed.
 let private assetHosts =
     [ "github.com"; "release-assets.githubusercontent.com"; "objects.githubusercontent.com" ]
 
@@ -42,26 +40,16 @@ let private isApprovedRedirectTarget (uri: Uri) : bool =
 let private location (uri: Uri) : string =
     if isNull uri then "<null>" else $"{uri.Scheme}://{uri.Host}:{uri.Port}{uri.AbsolutePath}"
 
-// The location derives from the validated identity and the trusted Store repository, never from pin-supplied text.
+// The location derives from the validated identity and the fixed Store repository, never from pin-supplied text;
+// `send` admits only the exact HTTPS GitHub origins.
 let assetUri (pin: DistributionPin.Pin) : Result<Uri, ReleaseError> =
-    let expectedPath =
-        $"/{DistributionContract.storeOwner}/{DistributionContract.storeName}/releases/download/{pin.ComponentId}/{pin.ArchiveName}"
-
-    match DistributionContract.validateIdentity pin.ComponentId pin.Version, ResolverPath.portablePath pin.ArchiveName with
+    match DistributionContract.validateIdentity pin.Id pin.Version, ResolverPath.portablePath pin.ArchiveName with
     | Error error, _ -> Error error
     | _, Error error -> Error error
     | Ok (), Ok () ->
         match Uri.TryCreate(pin.AssetUri, UriKind.Absolute) with
-        | false, _ -> Error(TransportRejected(pin.AssetUri, "the pin assetUri is not an absolute URI"))
-        | true, uri ->
-            if not (isExactHttpsOrigin releaseHost uri) then
-                Error(TransportRejected(pin.AssetUri, "the asset URI is not an exact HTTPS github.com origin"))
-            elif not (String.IsNullOrEmpty uri.Query) || not (String.IsNullOrEmpty uri.Fragment) then
-                Error(TransportRejected(pin.AssetUri, "the asset URI carries a query string or fragment"))
-            elif uri.AbsolutePath <> expectedPath then
-                Error(TransportRejected(pin.AssetUri, $"the asset URI path is not '{expectedPath}'"))
-            else
-                Ok uri
+        | true, uri -> Ok uri
+        | false, _ -> Error(TransportRejected(pin.AssetUri, "the derived asset URI is not an absolute URI"))
 
 let private isRedirect (status: HttpStatusCode) : bool =
     status = HttpStatusCode.MovedPermanently
@@ -193,10 +181,10 @@ let download (transport: Transport) (pin: DistributionPin.Pin) : Async<Result<by
                         | Error error -> return Error error
                         | Ok bytes ->
                             // The payload is checked here and again before decompression, so unverified bytes cross neither boundary.
-                            let actual = ResolverDigest.sha256 bytes
+                            let actual = DistributionPin.digestFor (ResolverDigest.sha256 bytes)
 
-                            if actual <> pin.ArchiveSha256 then
-                                return Error(IdentityMismatch("archiveSha256", pin.ArchiveSha256, actual))
+                            if actual <> pin.Digest then
+                                return Error(IdentityMismatch("digest", pin.Digest, actual))
                             else
                                 return Ok bytes
     }

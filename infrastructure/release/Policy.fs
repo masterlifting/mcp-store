@@ -1,10 +1,10 @@
 // role: reusable module/helper
 // Strict reader for a producer's canonical Config.json policy plus the trusted
 // distribution contract derived from it. Pure: no processes or filesystem writes.
-// The per-component policy owns identity, entry point, platform and launch descriptors; the archive name and asset URI derive
+// The per-component policy owns identity, entry point and launch descriptors; the archive name and asset URI derive
 // from the identity and the trusted Store repository, so a Config.json that declares either is rejected as an unknown field.
-// The SDK and runtime versions are not policy: the caller passes the toolchain resolved from its owners (`ReleaseToolchain`),
-// and a Config.json that declares either version is rejected the same way.
+// The SDK, runtime and platform are not policy: the caller passes the toolchain resolved from its owners (`ReleaseToolchain`),
+// and a Config.json that declares any of them is rejected the same way.
 module ReleasePolicy
 
 open System
@@ -35,7 +35,6 @@ let private requiredFields =
     [ "componentId"
       "version"
       "entryDll"
-      "platform"
       "publishedFiles"
       "launchKind"
       "launchArguments" ]
@@ -187,7 +186,7 @@ let parseBytes (toolchain: ReleaseToolchain.Toolchain) (sourcePath: string) (bou
                             []
 
                     let scalarFields =
-                        [ "componentId"; "version"; "entryDll"; "platform"; "launchKind" ]
+                        [ "componentId"; "version"; "entryDll"; "launchKind" ]
 
                     let scalars = scalarFields |> List.map (fun field -> field, readString field)
 
@@ -236,7 +235,7 @@ let parseBytes (toolchain: ReleaseToolchain.Toolchain) (sourcePath: string) (bou
                                   EntryDll = valueOf "entryDll"
                                   SdkVersion = toolchain.SdkVersion
                                   RuntimeVersion = toolchain.RuntimeVersion
-                                  Platform = valueOf "platform"
+                                  Platform = toolchain.Platform
                                   ArchiveName = DistributionContract.archiveNameFor (valueOf "version")
                                   AssetUri = DistributionContract.assetUriFor (valueOf "componentId") (valueOf "version")
                                   PublishedFiles = publishedFiles

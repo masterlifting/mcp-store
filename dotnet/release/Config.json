@@ -2,7 +2,6 @@
   "componentId": "dotnet",
   "version": "1.0.8",
   "entryDll": "Mcp.Dotnet.dll",
-  "platform": "win-x64",
   "publishedFiles": [
     "FSharp.Core.dll",
     "Mcp.Dotnet.deps.json",

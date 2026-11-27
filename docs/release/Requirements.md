@@ -54,9 +54,9 @@ Related current contracts:
   F# preparation and packaging paths all use it, and PowerShell carries no
   second copy.
 - Each component's `*/release/Config.json` owns only its per-component policy
-  (`componentId`, version, entry DLL, platform RID, archive name, asset URI,
-  published files, launch kind, and ordered launch arguments). A config that
-  declares `sdkVersion` or `runtimeVersion` is rejected.
+  (`componentId`, version, entry DLL, published files, launch kind, and ordered
+  launch arguments). A config that declares `sdkVersion`, `runtimeVersion`,
+  `platform`, an archive name or an asset URI is rejected.
 - `Update.ps1 -Verify` runs after SDK installation and invokes
   `Toolchain.fsx`, the thin entry to the evaluator, before any credential step.
   The evaluator reads only the `sdk.version`, `sdk.rollForward` and
@@ -68,10 +68,12 @@ Related current contracts:
   matching framework reference exists, the installed runtime is compatible
   (same major.minor, patch at least the derived value; a prerelease never
   satisfies a stable value), and the executing platform RID equals the
-  configured `platform`.
+  publisher's single qualified platform (`win-x64`, asserted in `Update.ps1 -Verify`
+  only; Unix qualification builds are not subject to it). The observed RID is the
+  manifest's `producer.platform`.
 - Only after verification may the workflow publish
   `MCP_RELEASE_VERIFIED_SDK`, `MCP_RELEASE_VERIFIED_RUNTIME`,
-  `MCP_RELEASE_VERIFIED_TARGET_FRAMEWORK`, and
+  `MCP_RELEASE_VERIFIED_PLATFORM`, `MCP_RELEASE_VERIFIED_TARGET_FRAMEWORK`, and
   `MCP_RELEASE_VERIFIED_LANGUAGE_VERSION`. `-Project` never writes them.
 - Publication consumes the verified values, fails closed when they are missing
   or invalid, independently reads the on-disk owner and requires it to equal the
@@ -101,13 +103,14 @@ Related current contracts:
   release scripts from that policy and the packaged bytes. The manifest records
   the clean source revision, the exact member inventory and per-member SHA-256,
   the runtime derived from the packaged runtime configuration, and the launch
-  descriptor. The pin records the exact selected identity: component, version,
-  archive and manifest digests, and `publishedRevision`. The archive name
+  descriptor. The pin records the exact selected identity: `id`, `version` and the
+  `sha256:` digest of the complete archive. The published revision and manifest
+  hash stay internal release provenance outside the pin. The archive name
   (`v<version>.zip`) and canonical HTTPS asset URI derive from the validated
   component and version and the single trusted Store repository; the policy
   declares neither, and producer build provenance stays in the manifest only.
-- The manifest schema stays at 2 and the pin schema is 2. The pin reader accepts
-  only schema 2; a schema 1 document fails closed, including at an existing
+- The manifest schema stays at 2. The pin reader accepts only the exact
+  three-field record; any other document fails closed, including at an existing
   version slot. `dotnet-cli` is an
   additive launch kind inside schema 2; `dotnet-exec` remains the MCP launch
   kind. An unknown kind, unknown field, duplicate key, missing member, or
@@ -279,8 +282,8 @@ Support boundaries:
   The Telegram exclusion is therefore not an absolute claim.
 - Resolver 1.0.0 was published with Dotnet 1.0.7 and Workflow 3.0.1. Those
   baseline assets were downloaded and independently verified.
-- The revised schema v2 releases are not yet published. Their published
-  downloads have not been verified, and local qualification hashes are not
+- Releases using the final three-field pin are not yet published. Verify
+  the published downloads before handoff; local qualification hashes are not
   publication identities.
 - Windows x64 is the release platform selection. Unix qualification is a
   read-only pull-request check and is not Unix release publication.

@@ -18,9 +18,8 @@ let compare
         if expected <> actual then
             failures.Add($"{field} differs: pin={expected} manifest={actual}")
 
-    check "id" pin.ComponentId manifest.Id
+    check "id" pin.Id manifest.Id
     check "version" pin.Version manifest.Version
-    check "revision" pin.PublishedRevision manifest.Revision
     check "archive" pin.ArchiveName manifest.Archive
     check "sourceRepository" DistributionContract.storeRepository manifest.SourceRepository
 

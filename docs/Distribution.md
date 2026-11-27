@@ -25,8 +25,8 @@ The Resolver CLI, storage, and failure contract are in
   `Resolver.runtimeconfig.json`, and `distribution.json`.
 - The distribution manifest stays at schema 2. `dotnet-cli` is an additive
   launch kind inside that schema, not a schema change. The consumer pin is
-  schema 2 with exactly six fields; its archive name and asset URI derive from
-  the identity and the trusted Store repository.
+  exactly `id`, `version` and `digest`; its archive name and asset URI derive
+  from the identity and the trusted Store repository.
 - An unknown launch kind, unknown field, missing member, duplicate key, or
   malformed value fails closed. There is no permissive reader and no
   case-insensitive fallback.
@@ -37,9 +37,9 @@ The Resolver CLI, storage, and failure contract are in
   artifact is never presented as an MCP launch target.
 - The cutover is forward-only. The previously published Resolver 1.0.0 and the
   historical pins, releases and running installations are untouched. Resolver
-  2.0.0 rejects v1 pins, and new consumption uses the six-field v2 pin. Each
-  consumer must review and select the published v2 pin for a new producer
-  release.
+  2.0.0 reads only the three-field pin; no legacy reader exists, and the
+  intermediate six-field format was never published. Each consumer must review
+  and select the published pin for a new producer release.
 
 ## Host and runtime prerequisites
 
@@ -64,8 +64,12 @@ runtime and does not discover a host.
 ## Trust and release handoff
 
 A consumer trusts a reviewed pin, not a file hash in isolation. The pin fixes
-the component, version, archive digest, manifest digest, and published revision;
-the archive name and HTTPS asset URI derive from the component and version. The trust chain is the reviewed consumer pin, allowed
+the component, version, and the digest of the complete archive
+(`sha256:` plus 64 lowercase hexadecimal characters); the archive name and HTTPS
+asset URI derive from the component and version. The Resolver authenticates the
+whole archive against that digest before it trusts the embedded manifest, then
+takes the source revision, launch descriptor and runtime requirement from that
+authenticated manifest. The trust chain is the reviewed consumer pin, allowed
 HTTPS origins, and verification of the manifest, archive members, and the exact
 archive closure before first execution.
 
@@ -127,15 +131,17 @@ transports. It is not enrolled in this .NET distribution transaction.
   Dotnet, Workflow and Resolver 2.0.0 releases are not yet published or verified
   by a real release. Only after that verification do they go to Harness #120,
   and checkout-independent consumer acceptance remains outstanding.
-- Windows x64 is the release platform selection. Unix qualification is a
-  read-only pull-request check, not Unix release publication.
+- Windows x64 is the release platform selection, asserted once by the
+  publisher toolchain verification; each manifest records the RID the build host
+  observed. Unix qualification is a read-only pull-request check, not Unix
+  release publication.
 - A packaged Resolver smoke (`infrastructure/resolver/tests/distribution/Smoke.fsx`)
   checks that the extracted Resolver archive launches with its usage contract,
   that the compiled verifier refuses the CLI-only archive as an MCP launch
   target, and that a changed archive fails its digest. It is not install, lease
   or consumer acceptance.
 - Historical baseline downloads were verified; no download of a revised
-  (v2) published release has been verified.
+  published release has been verified.
 - Hosted GitHub Actions upload, immutable-release detection, and queue ordering
   behavior are not independently observed. The release workflow configures
   serialization and fails closed, but this document does not claim hosted

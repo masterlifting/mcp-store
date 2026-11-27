@@ -13,17 +13,9 @@ let persistVerifiedProjection
     (componentId: string)
     (version: string)
     (verifiedArchiveSha: string)
-    (verifiedManifestSha: string)
-    (verifiedRevision: string)
     : Async<Result<unit, ReleaseError>> =
     async {
-        let projection =
-            ReleaseMetadata.makeProjection
-                componentId
-                version
-                verifiedArchiveSha
-                verifiedManifestSha
-                verifiedRevision
+        let projection = ReleaseMetadata.makeProjection componentId version verifiedArchiveSha
 
         match! ReleaseMetadata.writeToFileAsync metadataLocalPath projection with
         | Ok _ -> return Ok()
@@ -156,24 +148,12 @@ let private execute
                     | Error error ->
                         return ReleaseEvaluate.finalizeFailure resolution.Render (ReleaseError.message error), 1
                     | Ok verifiedMetadataSha ->
-                        let verifiedManifestSha =
-                            match resolution.PublishedManifestSha256 with
-                            | Some v -> v
-                            | None -> candidate.ManifestSha256
-
-                        let verifiedRevision =
-                            match resolution.PublishedRevision with
-                            | Some v -> v
-                            | None -> candidate.EmbeddedRevision
-
                         let! persistResult =
                             persistVerifiedProjection
                                 resolution.Render.MetadataLocalPath
                                 resolution.Render.ComponentId
                                 resolution.Render.Version
                                 verifiedArchiveSha
-                                verifiedManifestSha
-                                verifiedRevision
 
                         match persistResult with
                         | Error error ->
@@ -188,15 +168,13 @@ let private execute
             if resolution.MetadataRecoveryNeeded then
                 match auth with
                 | Some authValue ->
-                    match resolution.PublishedArchiveSha256, resolution.PublishedManifestSha256, resolution.PublishedRevision with
-                    | Some verifiedArchiveSha, Some verifiedManifestSha, Some verifiedRevision ->
+                    match resolution.PublishedArchiveSha256 with
+                    | Some verifiedArchiveSha ->
                         let recoveryProjection =
                             ReleaseMetadata.makeProjection
                                 resolution.Render.ComponentId
                                 resolution.Render.Version
                                 verifiedArchiveSha
-                                verifiedManifestSha
-                                verifiedRevision
 
                         let! uploadResult =
                             ReleasePublish.uploadMetadataBytes authValue locator recoveryProjection transport
@@ -213,7 +191,7 @@ let private execute
                                 return ReleaseEvaluate.finalizeFailure resolution.Render (ReleaseError.message error), 1
                             | Ok _digest ->
                                 return ReleaseEvaluate.finalizeRecovery resolution verifiedMetadataSha, 0
-                    | _ ->
+                    | None ->
                         return resolution, 1
                 | None ->
                     return ReleaseEvaluate.finalizeFailure resolution.Render "metadata-recovery-required but GITHUB_TOKEN is missing", 1
@@ -223,24 +201,12 @@ let private execute
                     | Some v -> v
                     | None -> candidate.ArchiveSha256
 
-                let verifiedManifestSha =
-                    match resolution.PublishedManifestSha256 with
-                    | Some v -> v
-                    | None -> candidate.ManifestSha256
-
-                let verifiedRevision =
-                    match resolution.PublishedRevision with
-                    | Some v -> v
-                    | None -> candidate.EmbeddedRevision
-
                 let! persistResult =
                     persistVerifiedProjection
                         resolution.Render.MetadataLocalPath
                         resolution.Render.ComponentId
                         resolution.Render.Version
                         verifiedArchiveSha
-                        verifiedManifestSha
-                        verifiedRevision
 
                 match persistResult with
                 | Error error -> return ReleaseEvaluate.finalizeFailure resolution.Render (ReleaseError.message error), 1

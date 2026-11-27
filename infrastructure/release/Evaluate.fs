@@ -170,13 +170,7 @@ module VerifiedCandidate =
                       MetadataLocalPath = metadataLocalPath
                       RepositoryOwner = repositoryOwner
                       RepositoryName = repositoryName }
-                let projection =
-                    ReleaseMetadata.makeProjection
-                        policy.ComponentId
-                        policy.Version
-                        archiveSha
-                        manifestSha
-                        manifest.Revision
+                let projection = ReleaseMetadata.makeProjection policy.ComponentId policy.Version archiveSha
                 VerifiedCandidate(archiveBytesCopy, manifestBytesCopy, observation, archiveSha, manifestSha, archiveSize, manifestSize, embeddedBytes, embeddedSha, manifest.Revision, dto, projection)
             let fieldChecks =
                 fieldCheck "policy.componentId" policy.ComponentId
@@ -290,13 +284,7 @@ module VerifiedCandidate =
                           MetadataLocalPath = metadataLocalPath
                           RepositoryOwner = repositoryOwner
                           RepositoryName = repositoryName }
-                    let projection =
-                        ReleaseMetadata.makeProjection
-                            policy.ComponentId
-                            policy.Version
-                            archiveSha
-                            manifestSha
-                            manifest.Revision
+                    let projection = ReleaseMetadata.makeProjection policy.ComponentId policy.Version archiveSha
                     VerifiedCandidate
                         (innerBytesCopy,
                          manifestBytesCopy,
@@ -594,23 +582,18 @@ let private classifyInternal
                                 render
                                 $"the {dto.Contract.ComponentId} release container does not exist; refusing to silently create one")
                 | Ok (MetadataObserved (sha256, parsed)) ->
-                    // Remote revision is checked against the remote embedded manifest, not the candidate HEAD.
+                    // The metadata asset is the pin of the published ZIP, so it must carry exactly that identity and digest.
+                    let expectedDigest = DistributionPin.digestFor publishedObs.ArchiveSha256
+
                     let mismatchedField : (string * string * string) option =
-                            if parsed.ComponentId <> dto.Contract.ComponentId then
-                                Some ("componentId", dto.Contract.ComponentId, parsed.ComponentId)
+                            if parsed.Id <> dto.Contract.ComponentId then
+                                Some ("id", dto.Contract.ComponentId, parsed.Id)
                             elif parsed.Version <> dto.Contract.Version then
                                 Some ("version", dto.Contract.Version, parsed.Version)
-                            elif parsed.ArchiveSha256 <> publishedObs.ArchiveSha256 then
-                                Some ("archiveSha256", publishedObs.ArchiveSha256, parsed.ArchiveSha256)
+                            elif parsed.Digest <> expectedDigest then
+                                Some ("digest", expectedDigest, parsed.Digest)
                             else
-                                match publishedObs.ManifestSha256 with
-                                | Some value when value <> parsed.ManifestSha256 ->
-                                    Some ("manifestSha256", value, parsed.ManifestSha256)
-                                | _ ->
-                                    match ReleaseCompare.parseEmbeddedManifestEntry publishedObs with
-                                    | Ok manifest when manifest.Revision <> parsed.PublishedRevision ->
-                                        Some ("publishedRevision", manifest.Revision, parsed.PublishedRevision)
-                                    | _ -> None
+                                None
 
                     match mismatchedField with
                     | Some (field, expected, actual) ->

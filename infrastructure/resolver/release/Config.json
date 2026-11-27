@@ -2,7 +2,6 @@
   "componentId": "resolver",
   "version": "2.0.0",
   "entryDll": "Resolver.dll",
-  "platform": "win-x64",
   "publishedFiles": [
     "FSharp.Core.dll",
     "Resolver.deps.json",

@@ -26,8 +26,8 @@ let private describe (names: string list) =
 let private entriesNamed (name: string) (archive: DistributionArchive.Archive) =
     archive.Entries |> List.filter (fun entry -> entry.Name = name)
 
+// The manifest is trusted only because the whole archive was authenticated against the pin digest first.
 let private verifiedManifest
-    (pin: DistributionPin.Pin)
     (archive: DistributionArchive.Archive)
     : Result<DistributionContract.DistributionManifest * byte[], ReleaseError> =
     match entriesNamed DistributionContract.manifestEntryName archive with
@@ -37,14 +37,9 @@ let private verifiedManifest
         match DistributionArchive.decompress entry with
         | Error error -> Error error
         | Ok manifestBytes ->
-            let actual = ResolverDigest.sha256 manifestBytes
-
-            if actual <> pin.ManifestSha256 then
-                Error(IdentityMismatch("manifestSha256", pin.ManifestSha256, actual))
-            else
-                match DistributionContract.parseBytes manifestBytes with
-                | Error error -> Error error
-                | Ok manifest -> Ok(manifest, manifestBytes)
+            match DistributionContract.parseBytes manifestBytes with
+            | Error error -> Error error
+            | Ok manifest -> Ok(manifest, manifestBytes)
     | _ ->
         Error(
             MalformedArtifact(
@@ -109,7 +104,7 @@ let private verifiedMembers
     | None -> Ok(List.ofSeq members)
 
 let private verifiedPayload (pin: DistributionPin.Pin) (archive: DistributionArchive.Archive) =
-    match verifiedManifest pin archive with
+    match verifiedManifest archive with
     | Error error -> Error error
     | Ok(manifest, manifestBytes) ->
         match ResolverIdentity.compare pin manifest with
@@ -124,10 +119,10 @@ let private verifiedPayload (pin: DistributionPin.Pin) (archive: DistributionArc
 
 // The retained archive makes this same verification reusable for a cached install.
 let verify (pin: DistributionPin.Pin) (archiveBytes: byte[]) : Result<Verified, ReleaseError> =
-    let actual = ResolverDigest.sha256 archiveBytes
+    let actual = DistributionPin.digestFor (ResolverDigest.sha256 archiveBytes)
 
-    if actual <> pin.ArchiveSha256 then
-        Error(IdentityMismatch("archiveSha256", pin.ArchiveSha256, actual))
+    if actual <> pin.Digest then
+        Error(IdentityMismatch("digest", pin.Digest, actual))
     else
         match DistributionArchive.parse pin.ArchiveName archiveBytes with
         | Error error -> Error error

@@ -59,7 +59,8 @@ Invariants enforced by `parse`/`validate`:
   root `global.json`, its `runtime` is derived from that pinned SDK (the
   `DefaultRuntimeFrameworkVersion` of its `Microsoft.NETCore.App` framework
   reference for the owned TFM, never authored in a producer config), and its
-  `platform` is the RID declared per component. At publication of a candidate the
+  `platform` is the RID the build host observed (never authored per component; the
+publisher asserts its one qualified platform in `Update.ps1 -Verify`). At publication of a candidate the
   declared `producer.runtime` must equal the manifest's byte-derived
   `runtime.version`; already published archives are observed without that check so a
   published version stays addressable.
@@ -98,33 +99,29 @@ of the manifest are byte-identical by construction.
 
 The canonical consumer pin, which is also the published
 `<component>-<version>-metadata.json` projection: one strict parser, one canonical
-renderer, and one whole-record comparison. Schema **v2** (this is the
-release-metadata schema, not the distribution schema).
+renderer, and one whole-record comparison.
 
 ```json
 {
-  "schemaVersion": 2,
-  "componentId": "dotnet",
+  "id": "dotnet",
   "version": "1.0.8",
-  "archiveSha256": "<64 lowercase hex>",
-  "manifestSha256": "<64 lowercase hex>",
-  "publishedRevision": "<40 lowercase hex>"
+  "digest": "sha256:<64 lowercase hex>"
 }
 ```
 
 - `consumer-pins.json` is exactly one unwrapped record, not an object keyed by
-  component ID. No keyed schema, compatibility alias, or dual reader exists.
-- The six fields are required and exclusive: any other field, including the
-  former `assetUri`, `archiveName`, and `producer*` fields, is malformed, and any
-  other schema version is rejected. A schema 1 document fails closed.
+  component ID. No schema field, keyed schema, compatibility alias, or legacy
+  reader exists.
+- The three fields are required and exclusive: any other field is malformed.
+  The digest is `sha256:` plus 64 lowercase hex characters of the complete ZIP.
 - The archive name and asset URI are derived members of the pin (see `Contract.fs`),
-  never serialized. Producer build provenance lives in the authenticated manifest.
-- `componentId` and `version` pass `validateIdentity`. Hashes and revisions use
-  the same exact lowercase length checks as the manifest.
-- `compare` participates every field in identity, so an existing remote asset or
-  an existing pin cannot be silently reused for a different artifact. A
-  revision-only no-op retains the **published** revision and hashes, never
-  candidate values.
+  never serialized. The source revision, launch descriptor, runtime and producer
+  provenance live in the manifest, which the Resolver trusts only after it has
+  authenticated the whole archive against `digest`.
+- `id` and `version` pass `validateIdentity`.
+- `compare` covers every field, so an existing remote asset or an existing pin
+  cannot be silently reused for a different artifact. Published revision and
+  manifest hash are internal release provenance, not part of the pin.
 
 ## Consumers of these contracts
 
