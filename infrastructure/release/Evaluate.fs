@@ -583,22 +583,12 @@ let private classifyInternal
                                 $"the {dto.Contract.ComponentId} release container does not exist; refusing to silently create one")
                 | Ok (MetadataObserved (sha256, parsed)) ->
                     // The metadata asset is the pin of the published ZIP, so it must carry exactly that identity and digest.
-                    let expectedDigest = DistributionPin.digestFor publishedObs.ArchiveSha256
+                    let expected =
+                        ReleaseMetadata.makeProjection dto.Contract.ComponentId dto.Contract.Version publishedObs.ArchiveSha256
 
-                    let mismatchedField : (string * string * string) option =
-                            if parsed.Id <> dto.Contract.ComponentId then
-                                Some ("id", dto.Contract.ComponentId, parsed.Id)
-                            elif parsed.Version <> dto.Contract.Version then
-                                Some ("version", dto.Contract.Version, parsed.Version)
-                            elif parsed.Digest <> expectedDigest then
-                                Some ("digest", expectedDigest, parsed.Digest)
-                            else
-                                None
-
-                    match mismatchedField with
-                    | Some (field, expected, actual) ->
-                        return Ok(finalizeFailure render (ReleaseError.message (IdentityMismatch(field, expected, actual))))
-                    | None ->
+                    match ReleaseMetadata.compare parsed expected with
+                    | Error error -> return Ok(finalizeFailure render (ReleaseError.message error))
+                    | Ok () ->
                         match publishedRevision publishedObs with
                         | Error error -> return Ok(finalizeFailure render (ReleaseError.message error))
                         | Ok rev ->
