@@ -8,8 +8,8 @@ do not build or run this source checkout at runtime.
 ## Consumer installation
 
 Installation, verification, and launch are owned by the shared resolver
-(`infrastructure/resolver/README.md`). The consumer declares this component's pin
-from `dotnet/dist/consumer-pins.json` and starts the MCP through that boundary;
+(`infrastructure/resolver/README.md`). The consumer takes this component's pin
+from verified published release metadata and starts the MCP through that boundary;
 it does not select an extraction root, verify release hashes, or compose the
 process itself.
 
@@ -93,5 +93,5 @@ included, sorted ordinally). Archive membership is exactly
 `files ∪ { "distribution.json" }`; there is no separate `archiveFiles` list.
 `path` is an exact slash-separated relative member path; paths are unique
 case-insensitively and each payload hash is lowercase SHA-256.
-`dotnet/dist/consumer-pins.json` is the single unwrapped consumer pin record for
-this component.
+The local `dotnet/dist/consumer-pins.json` is a build output, not a published
+release identity.
