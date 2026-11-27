@@ -36,8 +36,9 @@ CLI-only artifact: its manifest uses the `dotnet-cli` launch kind, with entrypoi
 producer, a consumer must verify the pin, archive and member digests before first
 executing it, and it is never obtained or verified by running the resolver. The
 resolver therefore refuses a `dotnet-cli` manifest as a launch target in both `run`
-and `resolve`, before it stages anything, so it cannot install itself. No Resolver
-release has been published or qualified yet.
+and `resolve`, before it stages anything, so it cannot install itself. Resolver 1.0.0
+is the previously published baseline; the revised three-field-pin Resolver release
+is not yet published or verified (see `docs/Distribution.md`).
 
 ## CLI
 
@@ -227,8 +228,10 @@ document as a claim beyond them.
   Windows x64 is the release platform selection. Qualification covers only the
   hosted Unix targets configured in `.github/workflows/unix.yml` (`linux-x64` on
   Ubuntu 24, `osx-arm64` on macOS 15, and `osx-x64` on macOS 15). It does not
-  establish support for all Linux architectures, musl, or other OS versions. No
-  published-release HTTP download was verified.
+  establish support for all Linux architectures, musl, or other OS versions.
+  The published 1.0.0 baseline was independently downloaded and verified
+  (see `docs/Distribution.md`); download verification for the final
+  three-field releases is pending publication.
 - **Unix coordination has bounded runtime evidence.** The guard's exclusivity
   acquisition probe runs at install time; its runtime evidence is bounded to the
   filesystems used by the hosted Unix qualification targets. On Unix, .NET

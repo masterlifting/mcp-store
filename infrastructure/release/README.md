@@ -54,7 +54,8 @@ Each participant publishes into its own release container and tag, and the `reso
 container must exist before its first publication. Store's guarantee is asset-level:
 an asset is never overwritten and a same-version byte change is rejected. The
 containers are not GitHub-immutable releases, because the publisher refuses to publish
-into an immutable one. No Resolver artifact has been qualified or published yet.
+into an immutable one. Resolver 1.0.0 is the previously published baseline; the revised release is not yet
+published or verified (see `docs/Distribution.md`).
 
 ## Toolchain owners
 

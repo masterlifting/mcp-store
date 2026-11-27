@@ -2,6 +2,7 @@
 # Pre-SDK reader for the enrollment roster; it mirrors the compiled `ReleaseEnrollment` acceptance rules so every gate rejects the same drift.
 # Only structural and participation policy is mirrored here; the per-component policy (versions, allowlists, URIs) stays in each producer's canonical `Config.json`, and the shared SDK, runtime and platform stay in their toolchain owners.
 
+# The release transaction supports exactly these participants; this set is an independent topology constraint, not a copy of the roster, so a roster edit alone can neither add nor drop one. `Enrollment.fs` `supportedComponentIds` must stay equal.
 $script:ReleaseSupportedComponentIds = @("dotnet", "workflow", "resolver")
 $script:ReleaseForbiddenRosterFields = @(
     "version"; "sdkVersion"; "runtimeVersion"; "platform"; "archiveName"; "assetUri"; "entryAllowlist"; "publishedFiles"; "entryDll"; "launchKind"; "launchArguments")
