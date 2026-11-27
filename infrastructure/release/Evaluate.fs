@@ -19,9 +19,6 @@ type CandidateDto =
       AssetUri: string
       MetadataAssetName: string
       MetadataLocalPath: string
-      ProducerSdk: string option
-      ProducerRuntime: string option
-      ProducerPlatform: string option
       RepositoryOwner: string
       RepositoryName: string }
 
@@ -53,9 +50,6 @@ type Render =
       CandidateManifestSha256: string
       EvaluatedHead: string
       CandidateRevision: string
-      ProducerSdk: string option
-      ProducerRuntime: string option
-      ProducerPlatform: string option
       BumpedVersion: string option }
 
 type Resolution =
@@ -174,23 +168,9 @@ module VerifiedCandidate =
                       AssetUri = policy.AssetUri
                       MetadataAssetName = metadataAssetName
                       MetadataLocalPath = metadataLocalPath
-                      ProducerSdk = Some policy.SdkVersion
-                      ProducerRuntime = Some policy.RuntimeVersion
-                      ProducerPlatform = Some policy.Platform
                       RepositoryOwner = repositoryOwner
                       RepositoryName = repositoryName }
-                let projection =
-                    ReleaseMetadata.makeProjection
-                        policy.ComponentId
-                        policy.Version
-                        policy.AssetUri
-                        archiveName
-                        archiveSha
-                        manifestSha
-                        manifest.Revision
-                        (Some policy.SdkVersion)
-                        (Some policy.RuntimeVersion)
-                        (Some policy.Platform)
+                let projection = ReleaseMetadata.makeProjection policy.ComponentId policy.Version archiveSha
                 VerifiedCandidate(archiveBytesCopy, manifestBytesCopy, observation, archiveSha, manifestSha, archiveSize, manifestSize, embeddedBytes, embeddedSha, manifest.Revision, dto, projection)
             let fieldChecks =
                 fieldCheck "policy.componentId" policy.ComponentId
@@ -302,23 +282,9 @@ module VerifiedCandidate =
                           AssetUri = policy.AssetUri
                           MetadataAssetName = metadataAssetName
                           MetadataLocalPath = metadataLocalPath
-                          ProducerSdk = Some policy.SdkVersion
-                          ProducerRuntime = Some policy.RuntimeVersion
-                          ProducerPlatform = Some policy.Platform
                           RepositoryOwner = repositoryOwner
                           RepositoryName = repositoryName }
-                    let projection =
-                        ReleaseMetadata.makeProjection
-                            policy.ComponentId
-                            policy.Version
-                            policy.AssetUri
-                            archiveName
-                            archiveSha
-                            manifestSha
-                            manifest.Revision
-                            (Some policy.SdkVersion)
-                            (Some policy.RuntimeVersion)
-                            (Some policy.Platform)
+                    let projection = ReleaseMetadata.makeProjection policy.ComponentId policy.Version archiveSha
                     VerifiedCandidate
                         (innerBytesCopy,
                          manifestBytesCopy,
@@ -488,14 +454,18 @@ let validateCanonicalAssetUri
     (dto: CandidateDto)
     (contract: ReleaseCompare.ComponentContract)
     : Result<unit, ReleaseError> =
-    let expected =
-        $"https://github.com/{dto.RepositoryOwner}/{dto.RepositoryName}/releases/download/{contract.ComponentId}/{contract.ArchiveName}"
+    let expected = DistributionContract.assetUriFor contract.ComponentId contract.Version
 
     if String.IsNullOrEmpty dto.AssetUri then
         Error(
             MalformedArtifact(
                 "contract",
                 "assetUri is missing from the canonical DTO; the runner never reconstructs it from environment"))
+    elif
+        not (String.Equals(dto.RepositoryOwner, DistributionContract.storeOwner, StringComparison.Ordinal))
+        || not (String.Equals(dto.RepositoryName, DistributionContract.storeName, StringComparison.Ordinal))
+    then
+        Error(MalformedArtifact("contract", "the repository owner and name do not match the trusted Store repository"))
     elif dto.AssetUri <> expected then
         Error(MalformedArtifact("contract", $"assetUri '{dto.AssetUri}' does not match the expected canonical URL '{expected}'"))
     else
@@ -513,9 +483,6 @@ let private renderFrom (candidate: VerifiedCandidate) : Render =
       CandidateManifestSha256 = candidate.ManifestSha256
       EvaluatedHead = dto.EvaluatedHead
       CandidateRevision = candidate.EmbeddedRevision
-      ProducerSdk = dto.ProducerSdk
-      ProducerRuntime = dto.ProducerRuntime
-      ProducerPlatform = dto.ProducerPlatform
       BumpedVersion = None }
 
 // One classification site; metadata errors fail closed; verified absence is the only signal that permits a metadata-only recovery.
@@ -615,41 +582,13 @@ let private classifyInternal
                                 render
                                 $"the {dto.Contract.ComponentId} release container does not exist; refusing to silently create one")
                 | Ok (MetadataObserved (sha256, parsed)) ->
-                    let optToString = function | Some v -> v | None -> "<absent>"
-                    // Remote revision is checked against the remote embedded manifest, not the candidate HEAD; toolchain values participate in identity.
-                    let mismatchedField : (string * string * string) option =
-                            if parsed.ComponentId <> dto.Contract.ComponentId then
-                                Some ("componentId", dto.Contract.ComponentId, parsed.ComponentId)
-                            elif parsed.Version <> dto.Contract.Version then
-                                Some ("version", dto.Contract.Version, parsed.Version)
-                            elif parsed.AssetUri <> dto.AssetUri then
-                                Some ("assetUri", dto.AssetUri, parsed.AssetUri)
-                            elif parsed.ArchiveName <> dto.Contract.ArchiveName then
-                                Some ("archiveName", dto.Contract.ArchiveName, parsed.ArchiveName)
-                            elif parsed.ArchiveSha256 <> publishedObs.ArchiveSha256 then
-                                Some ("archiveSha256", publishedObs.ArchiveSha256, parsed.ArchiveSha256)
-                            else
-                                match publishedObs.ManifestSha256 with
-                                | Some value when value <> parsed.ManifestSha256 ->
-                                    Some ("manifestSha256", value, parsed.ManifestSha256)
-                                | _ ->
-                                    match ReleaseCompare.parseEmbeddedManifestEntry publishedObs with
-                                    | Ok manifest when manifest.Revision <> parsed.PublishedRevision ->
-                                        Some ("publishedRevision", manifest.Revision, parsed.PublishedRevision)
-                                    | _ ->
-                                        if parsed.ProducerSdk <> dto.ProducerSdk then
-                                            Some ("producerSdk", optToString dto.ProducerSdk, optToString parsed.ProducerSdk)
-                                        elif parsed.ProducerRuntime <> dto.ProducerRuntime then
-                                            Some ("producerRuntime", optToString dto.ProducerRuntime, optToString parsed.ProducerRuntime)
-                                        elif parsed.ProducerPlatform <> dto.ProducerPlatform then
-                                            Some ("producerPlatform", optToString dto.ProducerPlatform, optToString parsed.ProducerPlatform)
-                                        else
-                                            None
+                    // The metadata asset is the pin of the published ZIP, so it must carry exactly that identity and digest.
+                    let expected =
+                        ReleaseMetadata.makeProjection dto.Contract.ComponentId dto.Contract.Version publishedObs.ArchiveSha256
 
-                    match mismatchedField with
-                    | Some (field, expected, actual) ->
-                        return Ok(finalizeFailure render (ReleaseError.message (IdentityMismatch(field, expected, actual))))
-                    | None ->
+                    match ReleaseMetadata.compare parsed expected with
+                    | Error error -> return Ok(finalizeFailure render (ReleaseError.message error))
+                    | Ok () ->
                         match publishedRevision publishedObs with
                         | Error error -> return Ok(finalizeFailure render (ReleaseError.message error))
                         | Ok rev ->

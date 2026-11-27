@@ -7,7 +7,7 @@ installation, entrypoint resolution, and process launch. Harnesses own their own
 registration, permissions, routing, and guidance, and never download, verify,
 install, cache, update, or garbage-collect a distribution themselves.
 
-The pin and manifest schemas are the shared ones: `DistributionPin` schema v1 and
+The pin and manifest schemas are the shared ones: the three-field `DistributionPin` (`id`, `version`, `digest`) and
 `DistributionContract` schema v2, both owned by `infrastructure/distribution`.
 This project adds no competing schema, no producer-ID branch, and no consumer
 adapter.
@@ -36,8 +36,9 @@ CLI-only artifact: its manifest uses the `dotnet-cli` launch kind, with entrypoi
 producer, a consumer must verify the pin, archive and member digests before first
 executing it, and it is never obtained or verified by running the resolver. The
 resolver therefore refuses a `dotnet-cli` manifest as a launch target in both `run`
-and `resolve`, before it stages anything, so it cannot install itself. No Resolver
-release has been published or qualified yet.
+and `resolve`, before it stages anything, so it cannot install itself. Resolver 1.0.0
+is the previously published baseline; the revised three-field-pin Resolver release
+is not yet published or verified (see `docs/Distribution.md`).
 
 ## CLI
 
@@ -48,7 +49,7 @@ release has been published or qualified yet.
 
 | Option | Required | Meaning |
 | --- | --- | --- |
-| `--pin <absolute file>` | both commands | The canonical trusted pin JSON (schema v1) for the exact revision to use. |
+| `--pin <absolute file>` | both commands | The canonical trusted pin JSON (`id`, `version`, `digest`) for the exact revision to use. |
 | `--root <absolute directory>` | no | Explicit install root. Default: the canonical platform user-local root. Reserved for tests and offline operator use. |
 | `--workspace <absolute directory>` | `run` | Existing directory used as the child's working directory. |
 | `--host <absolute file>` | `run` | The .NET host that runs the entrypoint. Supplied by the caller, never discovered. |
@@ -87,23 +88,20 @@ one command that writes a snapshot to stdout, because it launches no child.
 
 ## Resolution snapshot
 
-`resolve` prints one JSON object (schema **1**; a field change is a schema change).
+`resolve` prints one JSON object (schema **2**; a field change is a schema change).
 Its top-level key order is stable:
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "key": "<sha256 of the canonical pin>",
   "root": "<absolute install root>",
   "install": "<absolute installed revision directory>",
   "entrypoint": "<absolute entry file inside the install>",
-  "componentId": "dotnet",
-  "version": "1.0.5",
-  "publishedRevision": "<40 lowercase hex>",
-  "assetUri": "<https://github.com/masterlifting/mcp-store/releases/download/...>",
-  "archiveName": "v1.0.5.zip",
-  "archiveSha256": "<64 lowercase hex>",
-  "manifestSha256": "<64 lowercase hex>",
+  "id": "dotnet",
+  "version": "1.0.8",
+  "digest": "sha256:<64 lowercase hex>",
+  "revision": "<40 lowercase hex, from the authenticated manifest>",
   "kind": "dotnet-exec",
   "runtime": {
     "framework": "Microsoft.NETCore.App",
@@ -117,12 +115,13 @@ Its top-level key order is stable:
 ```
 
 `key` is the installation identity: the SHA-256 of the canonical pin bytes, so any
-pin field difference — including producer provenance — names a different
-installation. `runtime` is the prerequisite derived from the packaged, hashed
-`runtimeconfig.json`, and the manifest is rejected when it declares anything else.
-Producer build provenance (`producerSdk`, `producerRuntime`, `producerPlatform`)
-is deliberately absent: it is not a consumer requirement and not a supported
-platform claim.
+pin field difference names a different installation. `revision` is read from the
+manifest after the whole archive is authenticated against `digest`; the archive
+name and asset URI are derived and not reported. `runtime`
+is the prerequisite derived from the packaged, hashed `runtimeconfig.json`, and
+the manifest is rejected when it declares anything else. Producer build
+provenance is deliberately absent: it is not a consumer requirement and not a
+supported platform claim.
 
 The snapshot is produced while the shared lease is held and the lease is then
 released, because a `resolve` caller starts no child of its own.
@@ -171,10 +170,10 @@ silently skips, or a runtime with file locking disabled — installation fails
 closed with `CoordinationUnsupported` instead of proceeding on a lock that is not
 there.
 
-Every resolution re-verifies: the retained archive digest, the manifest digest,
-the full pin-versus-manifest identity, the exact archive membership, and the
-SHA-256 of every packaged file. It then compares the installed tree against that
-verified inventory. A cache that does not match the trusted pin is never
+Every resolution verifies the retained ZIP against the pin before trusting its
+embedded manifest. It checks the manifest identity, exact archive membership,
+and SHA-256 of every packaged file, then compares the installed tree against
+that verified inventory. A cache that does not match the trusted pin is never
 launched. Entry kind is decided before any open, read, hash, or delete, so a
 link, FIFO, socket, or device fails the operation closed; the same rule covers the
 pin file and every launch input.
@@ -229,8 +228,10 @@ document as a claim beyond them.
   Windows x64 is the release platform selection. Qualification covers only the
   hosted Unix targets configured in `.github/workflows/unix.yml` (`linux-x64` on
   Ubuntu 24, `osx-arm64` on macOS 15, and `osx-x64` on macOS 15). It does not
-  establish support for all Linux architectures, musl, or other OS versions. No
-  published-release HTTP download was verified.
+  establish support for all Linux architectures, musl, or other OS versions.
+  The published 1.0.0 baseline was independently downloaded and verified
+  (see `docs/Distribution.md`); download verification for the final
+  three-field releases is pending publication.
 - **Unix coordination has bounded runtime evidence.** The guard's exclusivity
   acquisition probe runs at install time; its runtime evidence is bounded to the
   filesystems used by the hosted Unix qualification targets. On Unix, .NET
@@ -281,14 +282,9 @@ document as a claim beyond them.
 
 ```json
 {
-  "schemaVersion": 1,
-  "componentId": "dotnet",
-  "version": "1.0.5",
-  "assetUri": "https://github.com/masterlifting/mcp-store/releases/download/dotnet/v1.0.5.zip",
-  "archiveName": "v1.0.5.zip",
-  "archiveSha256": "<64 lowercase hex>",
-  "manifestSha256": "<64 lowercase hex>",
-  "publishedRevision": "<40 lowercase hex>"
+  "id": "dotnet",
+  "version": "1.0.8",
+  "digest": "sha256:<64 lowercase hex>"
 }
 ```
 

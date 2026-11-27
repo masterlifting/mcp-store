@@ -54,21 +54,25 @@ let contractFromPolicy
     (policy: ReleasePolicy.PolicyProjection)
     (archiveName: string)
     : Result<ComponentContract, ReleaseError> =
-    sourceRepositoryFromAssetUri policy.AssetUri
-    |> Result.map (fun repository ->
-        { ComponentId = policy.ComponentId
-          Version = policy.Version
-          ArchiveName = archiveName
-          SourceRepository = repository
-          Producer =
-            { Sdk = policy.SdkVersion
-              Runtime = policy.RuntimeVersion
-              Platform = policy.Platform }
-          Launch =
-            { Kind = policy.LaunchKind
-              Entrypoint = policy.EntryDll
-              Arguments = policy.LaunchArguments }
-          EntryAllowlist = trustedArchiveMemberNames policy.PublishedFiles })
+    validateIdentity policy.ComponentId policy.Version
+    |> Result.bind (fun () ->
+        if archiveName <> archiveNameFor policy.Version then
+            Error(IdentityMismatch("archive", archiveNameFor policy.Version, archiveName))
+        else
+            Ok
+                { ComponentId = policy.ComponentId
+                  Version = policy.Version
+                  ArchiveName = archiveName
+                  SourceRepository = storeRepository
+                  Producer =
+                    { Sdk = policy.SdkVersion
+                      Runtime = policy.RuntimeVersion
+                      Platform = policy.Platform }
+                  Launch =
+                    { Kind = policy.LaunchKind
+                      Entrypoint = policy.EntryDll
+                      Arguments = policy.LaunchArguments }
+                  EntryAllowlist = trustedArchiveMemberNames policy.PublishedFiles })
 
 let private sha256Hex (bytes: byte[]) : string =
     SHA256.HashData bytes |> Convert.ToHexString |> fun value -> value.ToLowerInvariant()

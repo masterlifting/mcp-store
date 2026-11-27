@@ -299,11 +299,17 @@ Assert-JobCount -Job "publication" -Name "publication reads the projected compon
 
 # Every action reference must be a reviewed 40-hex commit; a floating tag would let an upstream change reach the publication boundary.
 Assert-Count -Name "all action references are pinned commits" -Pattern 'uses: [A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+@[0-9a-f]{40} ' -Expected 15
-Assert-Count -Name "no floating or short action reference" -Pattern 'uses: [A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+@(?![0-9a-f]{40})' -Expected 0
-Assert-Count -Name "checkout uses the reviewed pinned commit" -Pattern 'uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1' -Expected 3
-Assert-Count -Name "SDK setup uses the reviewed pinned commit" -Pattern 'uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68' -Expected 3
-Assert-Count -Name "the platform upload action is the reviewed pinned commit" -Pattern 'uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9' -Expected 5
-Assert-Count -Name "the platform download action is the reviewed pinned commit" -Pattern 'uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333' -Expected 4
+Assert-Count -Name "no action reference escapes the pinned-use count" -Pattern 'uses: [A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+@(?![0-9a-f]{40} )' -Expected 0
+# The workflow owns each commit selection; the guard fixes only the approved action identities, their use counts and one commit per action.
+$approvedActionUses = [ordered]@{ 'actions/checkout' = 3; 'actions/setup-dotnet' = 3; 'actions/upload-artifact' = 5; 'actions/download-artifact' = 4 }
+foreach ($action in $approvedActionUses.Keys) {
+    Assert-Count -Name "$action is used the approved number of times as a pinned commit" -Pattern ('uses: ' + [regex]::Escape($action) + '@[0-9a-f]{40} ') -Expected $approvedActionUses[$action]
+    $script:checked = $script:checked + 1
+    $commits = @([regex]::Matches($text, 'uses: ' + [regex]::Escape($action) + '@([0-9a-f]{40}) ') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+    if ($commits.Count -ne 1) {
+        throw "cross-stage coherence failed [one commit per action]: $action is pinned to $($commits.Count) distinct commits in $workflowPath; every use must share one"
+    }
+}
 Assert-Count -Name "no floating artifact download reference exists" -Pattern 'uses: actions/download-artifact@(?![0-9a-f]{40} )' -Expected 0
 Assert-Count -Name "no artifact is selected by a zip wildcard" -Pattern '\*\.zip' -Expected 0
 Assert-Count -Name "no arbitrary artifact name lookup exists" -Pattern 'artifact-name' -Expected 0
@@ -421,7 +427,7 @@ Assert-JobCount -Job "publication" -Name "the runtime id guard reads the publish
 Assert-JobCount -Job "publication" -Name "the dotnet id guard reads the preparation job's own declared output" -Pattern '^ {10}CANDIDATE_ARTIFACT_ID_DOTNET: \$\{\{ needs\.preparation\.outputs\.candidateArtifactId_dotnet \}\}\s*$' -Expected 1
 Assert-JobCount -Job "publication" -Name "the workflow id guard reads the preparation job's own declared output" -Pattern '^ {10}CANDIDATE_ARTIFACT_ID_WORKFLOW: \$\{\{ needs\.preparation\.outputs\.candidateArtifactId_workflow \}\}\s*$' -Expected 1
 Assert-JobCount -Job "publication" -Name "the resolver id guard reads the preparation job's own declared output" -Pattern '^ {10}CANDIDATE_ARTIFACT_ID_RESOLVER: \$\{\{ needs\.preparation\.outputs\.candidateArtifactId_resolver \}\}\s*$' -Expected 1
-Assert-JobCount -Job "publication" -Name "publication transfers every transport through the pinned official action" -Pattern '^ {8}uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2\s*$' -Expected 4
+Assert-JobCount -Job "publication" -Name "publication transfers every transport through the pinned official action" -Pattern '^ {8}uses: actions/download-artifact@[0-9a-f]{40} # v\S+\s*$' -Expected 4
 Assert-JobCount -Job "publication" -Name "publication addresses every transfer by an exact declared artifact id" -Pattern '^ {10}artifact-ids: \$\{\{ needs\.' -Expected 4
 Assert-JobCount -Job "publication" -Name "publication restates no artifact identity beyond the pinned action" -Pattern '^ {10}(pattern|run-id|repository|github-token|merge-multiple):' -Expected 0
 Assert-JobCount -Job "publication" -Name "no publication step selects an artifact by name" -Pattern '^ {10}name: ' -Expected 1

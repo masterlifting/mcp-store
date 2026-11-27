@@ -24,10 +24,10 @@ and archive before first executing it, and the Resolver does not install itself.
 
 `infrastructure/resolver/` owns the single harness-independent install,
 verification, and launch boundary for the owned distributions, and Dotnet and
-Workflow both resolve through it. A consumer declares the exact immutable pin
-published in `<producer>/dist/consumer-pins.json` and reaches the MCP through that
-boundary instead of downloading, verifying, installing, or composing the process
-itself:
+Workflow both resolve through it. A consumer supplies a standalone pin with
+`id`, `version`, and `digest` from verified release metadata. The local
+`<producer>/dist/consumer-pins.json` is a build output, not a published identity.
+The Resolver downloads, verifies, installs, and launches the MCP:
 
 ```text
 dotnet exec <absolute>/Resolver.dll resolve --pin <absolute pin file>

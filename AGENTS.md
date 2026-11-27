@@ -15,7 +15,7 @@ The official GitHub MCP is an external dependency and is not produced or install
 - Producer code, package metadata, manifests, release tooling, package gates, and producer documentation live here.
 - Consumer agents, orchestration, capability selection, launchers, and installed runtime layouts do not live here.
 - No migration/backward-compatibility aliases are maintained for retired Dotnet/Workflow product identities or persisted schemas.
-- Consumers own their integrations and consume published releases through `dotnet/dist/consumer-pins.json` and `workflow/dist/consumer-pins.json`.
+- Consumers own their integrations and take consumer pins from verified published release metadata. The local `dotnet/dist/consumer-pins.json` and `workflow/dist/consumer-pins.json` outputs are not published identities.
 
 ## Validation
 

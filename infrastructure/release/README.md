@@ -30,7 +30,9 @@ contract first — `infrastructure/distribution/Contract.fs` (manifest types, st
 parser/renderer, semantic validation, bounded root resolution) and
 `infrastructure/distribution/Pin.fs` (canonical consumer pin / release metadata) —
 then `Policy.fs`, which parses a producer's canonical `Config.json` and nothing
-else. `ReleaseCompare.contractFromPolicy` projects that policy into the trusted
+else; the archive name and asset URI derive there from the validated component id and
+version and the trusted Store repository, so `Config.json` declares neither.
+`ReleaseCompare.contractFromPolicy` projects that policy into the trusted
 `ComponentContract` so identity, member allowlist, source repository, launch
 descriptor, and build provenance are re-derived rather than re-implemented by each
 caller. See `infrastructure/distribution/README.md` for the schema and its
@@ -52,7 +54,8 @@ Each participant publishes into its own release container and tag, and the `reso
 container must exist before its first publication. Store's guarantee is asset-level:
 an asset is never overwritten and a same-version byte change is rejected. The
 containers are not GitHub-immutable releases, because the publisher refuses to publish
-into an immutable one. No Resolver artifact has been qualified or published yet.
+into an immutable one. Resolver 1.0.0 is the previously published baseline; the revised release is not yet
+published or verified (see `docs/Distribution.md`).
 
 ## Toolchain owners
 
@@ -64,10 +67,10 @@ One .NET toolchain version is authored: the SDK version in the root `global.json
 | SDK version | root `global.json` (`rollForward: disable`, `allowPrerelease: false`); the pre-SDK projection reads only what installation needs, and the SDK selected by the native resolver must equal it |
 | TFM, F# language version | root `Directory.Build.props`; `Release.fsproj` carries no copy of the TFM or language version |
 | runtime version | never authored; the evaluated SDK's `DefaultRuntimeFrameworkVersion` of the single `KnownFrameworkReference` for `Microsoft.NETCore.App` at the evaluated TFM |
-| `platform` | each component's `*/release/Config.json`: the RID the artifact is qualified for, not a version |
+| platform | never authored per component; the host-observed RID is the manifest provenance, and `Update.ps1 -Verify` holds the single publisher qualification (`win-x64`) |
 
 `*/release/Config.json` therefore remains the single source only for the per-component
-policy; it declares neither `sdkVersion` nor `runtimeVersion`, and either is rejected.
+policy; it declares none of `sdkVersion`, `runtimeVersion` or `platform`, and each is rejected.
 There is no second SDK, TFM or runtime reader: after SDK setup the values come from native
 MSBuild evaluation of `Release.fsproj` at the repository root, with no parsing of
 `dotnet --info` and no runtime computed from the TFM string. The one evaluator is
@@ -86,7 +89,7 @@ reference exists. It then checks that an installed `Microsoft.NETCore.App` is co
 with the derived runtime (same major.minor, patch at least the derived value; a
 prerelease never satisfies a stable value). Only after every check passes it writes the
 verified handoff to `GITHUB_ENV`: `MCP_RELEASE_VERIFIED_SDK`,
-`MCP_RELEASE_VERIFIED_RUNTIME`, `MCP_RELEASE_VERIFIED_TARGET_FRAMEWORK` and
+`MCP_RELEASE_VERIFIED_RUNTIME`, `MCP_RELEASE_VERIFIED_PLATFORM`, `MCP_RELEASE_VERIFIED_TARGET_FRAMEWORK` and
 `MCP_RELEASE_VERIFIED_LANGUAGE_VERSION`. `-Project` never writes this handoff.
 `publish` consumes the verified values, fails closed when they are missing or invalid,
 reads the on-disk owner independently and requires it to equal the verified SDK, and runs
@@ -105,7 +108,7 @@ derived from the packaged bytes; observation of already published archives is un
 
 The pre-SDK toolchain projection is plain PowerShell over `global.json` and each
 producer's canonical `Config.json`, so `-Project` evaluates no F# before an SDK exists.
-It emits the SDK version, platform and per-component values but **no runtime version**,
+It emits the SDK version and per-component values but **no runtime version**,
 because the runtime is a property of the SDK, which does not exist yet. Once the SDK is
 available, producer F# scripts reuse the compiled `ReleasePolicy` parser;
 PowerShell remains the minimal bootstrap projection because it must run before that

@@ -7,8 +7,9 @@ open System.Text.Json.Nodes
 open SharedFailure
 
 // The snapshot is a consumer contract, so a field change is a schema change.
-let schemaVersion = 1
+let schemaVersion = 2
 
+// The revision is read from the authenticated manifest, never asserted by the pin.
 let render (pin: DistributionPin.Pin) (resolution: ResolverInstall.Resolution) : string =
     let manifest = resolution.Manifest
     let node = JsonObject()
@@ -17,13 +18,10 @@ let render (pin: DistributionPin.Pin) (resolution: ResolverInstall.Resolution) :
     node["root"] <- JsonValue.Create resolution.Root
     node["install"] <- JsonValue.Create resolution.Install
     node["entrypoint"] <- JsonValue.Create resolution.Entrypoint
-    node["componentId"] <- JsonValue.Create pin.ComponentId
+    node["id"] <- JsonValue.Create pin.Id
     node["version"] <- JsonValue.Create pin.Version
-    node["publishedRevision"] <- JsonValue.Create pin.PublishedRevision
-    node["assetUri"] <- JsonValue.Create pin.AssetUri
-    node["archiveName"] <- JsonValue.Create pin.ArchiveName
-    node["archiveSha256"] <- JsonValue.Create pin.ArchiveSha256
-    node["manifestSha256"] <- JsonValue.Create pin.ManifestSha256
+    node["digest"] <- JsonValue.Create pin.Digest
+    node["revision"] <- JsonValue.Create manifest.Revision
     node["kind"] <- JsonValue.Create(DistributionContract.LaunchKind.wireName manifest.Launch.Kind)
 
     let runtime = JsonObject()

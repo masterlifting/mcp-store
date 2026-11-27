@@ -9,7 +9,7 @@ let configPath = Path.Combine(__SOURCE_DIRECTORY__, "Config.json")
 let dist = Path.Combine(root, "infrastructure", "resolver", "dist")
 let output = Path.Combine(dist, "consumer-pins.json")
 
-let run () : Async<Result<string * string * string * string, ReleaseError>> =
+let run () : Async<Result<DistributionPin.Pin, ReleaseError>> =
     // Only the canonical config path crosses this boundary: each FSI load chain compiles its own policy type.
     ReleasePins.writeConsumerPins
         root
@@ -19,14 +19,9 @@ let run () : Async<Result<string * string * string * string, ReleaseError>> =
         "run infrastructure/resolver/release/Build.fsx before preparing the resolver consumer pin"
 
 // Standalone entry bridge: the only synchronous wait in this script's flow.
-let archiveName, archiveSha256, manifestSha256, revision =
+let pin =
     match run () |> Async.RunSynchronously with
     | Ok value -> value
     | Error error -> failwith (ReleaseError.message error)
 
-printfn
-    "resolver asset=%s archiveSha256=%s manifestSha256=%s revision=%s"
-    archiveName
-    archiveSha256
-    manifestSha256
-    revision
+printfn "resolver pin id=%s version=%s digest=%s" pin.Id pin.Version pin.Digest

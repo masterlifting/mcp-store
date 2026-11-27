@@ -296,7 +296,10 @@ jobs:
           if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
             $PSNativeCommandUseErrorActionPreference = $false
           }
-          $runnerDirectory = Join-Path (Get-Location) "infrastructure/release/bin/Release/net11.0"
+          # The runner output directory is named by the framework `Update.ps1 -Verify` evaluated, never a literal moniker.
+          $targetFramework = $env:MCP_RELEASE_VERIFIED_TARGET_FRAMEWORK
+          if ($targetFramework -cnotmatch '\Anet[0-9]+\.[0-9]+\z') { throw "the verified TargetFramework '$targetFramework' is missing or not a plain netX.Y moniker" }
+          $runnerDirectory = Join-Path (Get-Location) "infrastructure/release/bin/Release/$targetFramework"
           $runner = Join-Path $runnerDirectory "ReleaseRunner.exe"
           if (-not (Test-Path -LiteralPath $runner -PathType Leaf)) { throw "compiled release runner not found at $runner" }
           $components = @(ConvertFrom-Json $env:RELEASE_COMPONENTS)
@@ -676,81 +679,22 @@ jobs:
                 $diagnostics += $locationFault
                 $unverified += $component
               } else {
-                $projection = $null
                 $projectionBytes = $null
-                $parsedProjection = $false
-                # The exact projection bytes are read once and are the only bytes this step parses, hashes and copies, so
+                # The exact projection bytes are read once and are the only bytes this step hashes and copies, so
                 # the evidence copy cannot differ from the bytes the trusted digest proves and no read/copy race exists.
-                try {
-                  $projectionBytes = [System.IO.File]::ReadAllBytes($expectedPath)
-                  $projection = ([System.Text.Encoding]::UTF8.GetString($projectionBytes) | ConvertFrom-Json -ErrorAction Stop)
-                  $parsedProjection = $true
-                } catch { $parsedProjection = $false }
-                if (-not $parsedProjection) {
-                  $diagnostics += "the verified projection at '$expectedPath' is not parseable JSON"
+                try { $projectionBytes = [System.IO.File]::ReadAllBytes($expectedPath) } catch { $projectionBytes = $null }
+                if ($null -eq $projectionBytes) {
+                  $diagnostics += "the verified projection at '$expectedPath' could not be read"
                   $unverified += $component
                 } else {
-                  # Every published hash, the published revision and the candidate/policy identity must match exactly;
-                  # mere presence is not evidence. The candidate archive hash is deliberately not the compared value,
-                  # because a revision-only-equivalent no-op legitimately publishes bytes whose hash differs from the
-                  # current candidate, and the published revision is the remote archive's revision, not the event SHA.
-                  # The projection's toolchain fields are informational for consumer pinning and are not compared.
-                  # Each field also declares the JSON type the verified projection must carry. ConvertFrom-Json
-                  # parses a JSON integer into Int32/Int64 and every other JSON type into its own CLR type, while
-                  # string interpolation would render the JSON number 1.0, the JSON array [1], the JSON string "1"
-                  # and the JSON boolean true as interchangeable text, so text equality alone is not proof of the
-                  # projection's JSON type. The parsed type is proven before any value is compared; a field that is
-                  # absent, JSON null or empty keeps the same "carries no" diagnostic as before.
-                  $expectedFields = [ordered]@{
-                    schemaVersion     = @{ JsonType = "integer"; Value = 1 }
-                    componentId       = @{ JsonType = "string"; Value = $component }
-                    version           = @{ JsonType = "string"; Value = $componentVersion }
-                    assetUri          = @{ JsonType = "string"; Value = "$($document.assetUri)" }
-                    archiveName       = @{ JsonType = "string"; Value = "$($document.archiveName)" }
-                    archiveSha256     = @{ JsonType = "string"; Value = $published.archiveSha256 }
-                    manifestSha256    = @{ JsonType = "string"; Value = $published.manifestSha256 }
-                    publishedRevision = @{ JsonType = "string"; Value = $published.revision }
-                  }
-                  $projectionFaults = @()
-                  foreach ($field in $expectedFields.Keys) {
-                    $expected = $expectedFields[$field]
-                    $expectedValue = "$($expected.Value)"
-                    $observed = $projection.$field
-                    $observedValue = if ($null -eq $observed) { "" } else { "$observed" }
-                    $observedIsInteger = $observed -is [int] -or $observed -is [long]
-                    $observedJsonType =
-                      if ($null -eq $observed) { "null" }
-                      elseif ($observed -is [string]) { "string" }
-                      elseif ($observedIsInteger) { "integer" }
-                      elseif ($observed -is [double] -or $observed -is [float] -or $observed -is [decimal]) { "number" }
-                      elseif ($observed -is [bool]) { "boolean" }
-                      elseif ($observed -is [System.Array]) { "array" }
-                      elseif ($observed -is [System.Management.Automation.PSCustomObject]) { "object" }
-                      else { "non-standard value" }
-                    if ([string]::IsNullOrWhiteSpace($expectedValue)) {
-                      $projectionFaults += "the verified publisher result carries no '$field' value to prove against the projection"
-                    } elseif ([string]::IsNullOrWhiteSpace($observedValue)) {
-                      $projectionFaults += "the verified projection at '$expectedPath' carries no '$field'"
-                    } elseif ($expected.JsonType -eq "integer" -and -not $observedIsInteger) {
-                      $projectionFaults += "the verified projection '$field' is a JSON $observedJsonType, not the JSON integer '$expectedValue'"
-                    } elseif ($expected.JsonType -eq "string" -and -not ($observed -is [string])) {
-                      $projectionFaults += "the verified projection '$field' is a JSON $observedJsonType, not the JSON string '$expectedValue'"
-                    } elseif ($expected.JsonType -eq "integer") {
-                      if ([long]$observed -ne [long]$expected.Value) {
-                        $projectionFaults += "the verified projection '$field' is '$observedValue', not the verified '$expectedValue'"
-                      }
-                    } elseif ($observed -cne $expectedValue) {
-                      $projectionFaults += "the verified projection '$field' is '$observedValue', not the verified '$expectedValue'"
-                    }
-                  }
-                  # The eight typed fields above prove the projection's declared content, not that these exact bytes are
-                  # the bytes the runner published: the runner's publishedMetadataSha256 is the remote-verified digest
-                  # of the published metadata asset, so it is the only trusted statement about those bytes and this
-                  # projection must hash to it. The bytes read once above are hashed as they are on disk; nothing is
+                  # The publisher verifies the metadata strictly against the expected published ZIP before it reports a
+                  # metadata digest, and that remote-verified digest is the only trusted statement about these bytes, so
+                  # the projection must hash to it. The bytes read once above are hashed as they are on disk; nothing is
                   # reserialized between this proof and the evidence write below, so changed, extra or stale local bytes
                   # are never recorded as verified evidence. The digest is required in the bare lowercase form the runner
                   # emits (Convert.ToHexString of the SHA-256, lower-cased), never a prefixed or upper-cased platform
                   # digest, so a non-canonical value is refused instead of normalized.
+                  $projectionFaults = @()
                   $trustedMetadataSha = $published.metadataSha256
                   if ([string]::IsNullOrWhiteSpace($trustedMetadataSha)) {
                     $projectionFaults += "the verified publisher result carries no 'publishedMetadataSha256' value to prove the verified projection bytes at '$expectedPath'"

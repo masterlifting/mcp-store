@@ -10,15 +10,18 @@ module ReleaseToolchain
 open System
 open System.Collections.Generic
 open System.IO
+open System.Runtime.InteropServices
 open System.Text.Json
 open System.Text.RegularExpressions
 open SharedFailure
 open BuildProvenance
 
 // The resolved toolchain every dependent reference derives from: the policy projection, the contract and the manifest.
+// The platform is the RID the host observed, never an authored value.
 type Toolchain =
     { SdkVersion: string
-      RuntimeVersion: string }
+      RuntimeVersion: string
+      Platform: string }
 
 // The values read from one native evaluation of the release project.
 type Evaluation =
@@ -33,6 +36,7 @@ let globalJsonName = "global.json"
 // Written only by the credential-free verification step after its checks; both are required for publication.
 let verifiedSdkVariable = "MCP_RELEASE_VERIFIED_SDK"
 let verifiedRuntimeVariable = "MCP_RELEASE_VERIFIED_RUNTIME"
+let verifiedPlatformVariable = "MCP_RELEASE_VERIFIED_PLATFORM"
 
 // The release project that native evaluation reads, relative to the trusted repository root.
 let evaluatedProjectPath = "infrastructure/release/Release.fsproj"
@@ -56,6 +60,10 @@ let private versionToken =
 let private stableVersion = Regex(@"\A[0-9]+\.[0-9]+\.[0-9]+\z", RegexOptions.CultureInvariant)
 let private frameworkToken = Regex(@"\Anet[0-9]+\.[0-9]+\z", RegexOptions.CultureInvariant)
 let private languageToken = Regex(@"\A[0-9]+\.[0-9]+\z", RegexOptions.CultureInvariant)
+let private platformToken = Regex(@"\A[a-z0-9]+([.-][a-z0-9]+)*\z", RegexOptions.CultureInvariant)
+
+// The RID the executing runtime reports; the manifest provenance and the publisher qualification both read it.
+let hostPlatform () : string = RuntimeInformation.RuntimeIdentifier
 
 let private malformed path detail = Error(MalformedArtifact(path, detail))
 
@@ -246,29 +254,39 @@ let toolchainFromEvaluation (ownerSdkVersion: string) (evaluation: Evaluation) :
     else
         Ok
             { SdkVersion = evaluation.EvaluatedSdkVersion
-              RuntimeVersion = evaluation.DefaultRuntimeFrameworkVersion }
+              RuntimeVersion = evaluation.DefaultRuntimeFrameworkVersion
+              Platform = hostPlatform () }
 
-let private readVerified (name: string) : Result<string option, ReleaseError> =
+let private readHandoff (isToken: string -> bool) (kind: string) (name: string) : Result<string option, ReleaseError> =
     match Environment.GetEnvironmentVariable name with
     | null -> Ok None
-    | value when not (isVersionToken value) -> Error(UsageRejected $"{name} must be a plain version token")
+    | value when not (isToken value) -> Error(UsageRejected $"{name} must be a plain {kind}")
     | value -> Ok(Some value)
+
+let private readVerified = readHandoff isVersionToken "version token"
+let private readVerifiedPlatform = readHandoff (fun value -> platformToken.IsMatch value) "platform identifier"
 
 // Publication resolution: the verified handoff only. A missing, partial or invalid handoff is an error and never a
 // fallback to evaluation, so no subprocess can run beside the publication credential. The owner SDK version is read from
 // the file and must equal the handed-over one.
 let resolvePublication (repositoryRoot: string) : Result<Toolchain, ReleaseError> =
-    match readVerified verifiedSdkVariable, readVerified verifiedRuntimeVariable with
-    | Error error, _
-    | _, Error error -> Error error
-    | Ok(Some sdk), Ok(Some runtime) ->
+    match readVerified verifiedSdkVariable, readVerified verifiedRuntimeVariable, readVerifiedPlatform verifiedPlatformVariable with
+    | Error error, _, _
+    | _, Error error, _
+    | _, _, Error error -> Error error
+    | Ok(Some sdk), Ok(Some runtime), Ok(Some platform) ->
         match readSdkVersion repositoryRoot with
         | Error error -> Error error
         | Ok owner when not (String.Equals(owner, sdk, StringComparison.Ordinal)) ->
             Error(IdentityMismatch(verifiedSdkVariable, owner, sdk))
-        | Ok _ -> Ok { SdkVersion = sdk; RuntimeVersion = runtime }
-    | Ok None, _ -> Error(UsageRejected $"{verifiedSdkVariable} is not set; the verification step must hand over the verified toolchain")
-    | _, Ok None -> Error(UsageRejected $"{verifiedRuntimeVariable} is not set; the verification step must hand over the verified toolchain")
+        | Ok _ ->
+            Ok
+                { SdkVersion = sdk
+                  RuntimeVersion = runtime
+                  Platform = platform }
+    | Ok None, _, _ -> Error(UsageRejected $"{verifiedSdkVariable} is not set; the verification step must hand over the verified toolchain")
+    | _, Ok None, _ -> Error(UsageRejected $"{verifiedRuntimeVariable} is not set; the verification step must hand over the verified toolchain")
+    | _, _, Ok None -> Error(UsageRejected $"{verifiedPlatformVariable} is not set; the verification step must hand over the verified toolchain")
 
 // Runs the native evaluation of the release project from the trusted repository root, with no build target.
 let evaluate (repositoryRoot: string) : Async<Result<Evaluation, ReleaseError>> =
@@ -310,10 +328,11 @@ let verifyLocal (repositoryRoot: string) : Async<Result<Verified, ReleaseError>>
 // complete and agree with the evaluation.
 let resolveLocal (repositoryRoot: string) : Async<Result<Toolchain, ReleaseError>> =
     async {
-        match readVerified verifiedSdkVariable, readVerified verifiedRuntimeVariable with
-        | Error error, _
-        | _, Error error -> return Error error
-        | Ok handoffSdk, Ok handoffRuntime ->
+        match readVerified verifiedSdkVariable, readVerified verifiedRuntimeVariable, readVerifiedPlatform verifiedPlatformVariable with
+        | Error error, _, _
+        | _, Error error, _
+        | _, _, Error error -> return Error error
+        | Ok handoffSdk, Ok handoffRuntime, Ok handoffPlatform ->
             match handoffSdk, handoffRuntime with
             | Some _, None -> return Error(UsageRejected $"{verifiedRuntimeVariable} is not set while {verifiedSdkVariable} is")
             | None, Some _ -> return Error(UsageRejected $"{verifiedSdkVariable} is not set while {verifiedRuntimeVariable} is")
@@ -323,10 +342,12 @@ let resolveLocal (repositoryRoot: string) : Async<Result<Toolchain, ReleaseError
                 | Ok verified ->
                     let toolchain = verified.Toolchain
 
-                    match handoffSdk, handoffRuntime with
-                    | Some sdk, _ when not (String.Equals(sdk, toolchain.SdkVersion, StringComparison.Ordinal)) ->
+                    match handoffSdk, handoffRuntime, handoffPlatform with
+                    | Some sdk, _, _ when not (String.Equals(sdk, toolchain.SdkVersion, StringComparison.Ordinal)) ->
                         return Error(IdentityMismatch(verifiedSdkVariable, toolchain.SdkVersion, sdk))
-                    | _, Some runtime when not (String.Equals(runtime, toolchain.RuntimeVersion, StringComparison.Ordinal)) ->
+                    | _, Some runtime, _ when not (String.Equals(runtime, toolchain.RuntimeVersion, StringComparison.Ordinal)) ->
                         return Error(IdentityMismatch(verifiedRuntimeVariable, toolchain.RuntimeVersion, runtime))
+                    | _, _, Some platform when not (String.Equals(platform, toolchain.Platform, StringComparison.Ordinal)) ->
+                        return Error(IdentityMismatch(verifiedPlatformVariable, toolchain.Platform, platform))
                     | _ -> return Ok toolchain
     }

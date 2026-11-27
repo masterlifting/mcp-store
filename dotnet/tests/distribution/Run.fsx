@@ -33,7 +33,6 @@ async {
           Platform = config.Platform
           EntryDll = config.EntryDll
           ArchiveName = config.ArchiveName
-          AssetUri = config.AssetUri
           PublishedFiles = config.PublishedFiles
           LaunchKind = DistributionContract.LaunchKind.wireName config.LaunchKind }
 

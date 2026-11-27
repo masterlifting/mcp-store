@@ -30,7 +30,6 @@ type Producer =
       Platform: string
       EntryDll: string
       ArchiveName: string
-      AssetUri: string
       PublishedFiles: string list
       LaunchKind: string }
 
@@ -264,30 +263,15 @@ let assertDistributionContract (producer: Producer) (layout: Layout) : Async<uni
 
         archive.Dispose()
 
-        // The consumer pin and the published release-metadata projection share one
-        // unwrapped canonical schema; no keyed five-field inner record exists.
+        // The consumer pin and the published release metadata share one canonical record; the archive
+        // name, asset location and revision derive from it and the authenticated archive.
         let! pinsText = File.ReadAllTextAsync layout.PinsPath |> Async.AwaitTask
         let pin = JsonNode.Parse(pinsText).AsObject()
 
-        // The producer emitter writes the three optional provenance fields, so the generated pin carries all eleven keys.
-        assertExactKeys
-            "pin declares exactly the canonical release-metadata fields"
-            [ "schemaVersion"; "componentId"; "version"; "assetUri"; "archiveName"; "archiveSha256"; "manifestSha256"; "publishedRevision"; "producerSdk"; "producerRuntime"; "producerPlatform" ]
-            (keysOf pin)
-
-        assertEqual "pin schemaVersion" 1 (pin["schemaVersion"].GetValue<int>())
-        assertString "pin componentId" producer.ComponentId pin["componentId"]
+        assertExactKeys "pin declares exactly the canonical fields" [ "id"; "version"; "digest" ] (keysOf pin)
+        assertString "pin id" producer.ComponentId pin["id"]
         assertString "pin version" producer.Version pin["version"]
-        assertString "pin assetUri" producer.AssetUri pin["assetUri"]
-        assertString "pin archiveName" producer.ArchiveName pin["archiveName"]
 
         let! archiveSha256 = sha256Async layout.ArchivePath
-        let! manifestSha256 = sha256Async layout.ManifestPath
-        assertEqual "pin archiveSha256" archiveSha256 (pin["archiveSha256"].GetValue<string>())
-        assertEqual "pin manifestSha256" manifestSha256 (pin["manifestSha256"].GetValue<string>())
-        assertEqual "pin publishedRevision equals the validated manifest revision" manifestRevision (pin["publishedRevision"].GetValue<string>())
-        assertEqual "pin publishedRevision equals the committed HEAD" headRevision (pin["publishedRevision"].GetValue<string>())
-        assertString "pin producerSdk" producer.SdkVersion pin["producerSdk"]
-        assertString "pin producerRuntime" producer.RuntimeVersion pin["producerRuntime"]
-        assertString "pin producerPlatform" producer.Platform pin["producerPlatform"]
+        assertEqual "pin digest" $"sha256:{archiveSha256}" (pin["digest"].GetValue<string>())
     }

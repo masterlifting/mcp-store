@@ -29,10 +29,10 @@ $rosterPath = Join-Path $Root "infrastructure/release/Participants.json"
 
 # The exact policy field set the compiled reader also accepts; a drift here fails before any SDK install.
 $script:PolicyFields = @(
-    "componentId"; "version"; "entryDll"; "platform"; "archiveName"; "assetUri"; "publishedFiles"; "launchKind"; "launchArguments")
-# The only toolchain-related field left in a component policy is the platform label: a RID the artifact is qualified for,
-# not a version and not byte-derivable. The SDK and runtime versions are not policy and are rejected as unknown fields.
-$script:ToolchainFields = @("platform")
+    "componentId"; "version"; "entryDll"; "publishedFiles"; "launchKind"; "launchArguments")
+# No toolchain fact is policy: the SDK, runtime and platform are rejected as unknown fields.
+# The one publisher qualification: the platform the release is produced and verified on.
+$script:QualifiedPlatform = "win-x64"
 # The launch descriptors are authored policy with the same closed shape the compiled reader accepts: an ordered
 # non-empty list of flag/input/type triples, a closed input-type set, and unique flags and input names.
 $script:LaunchArgumentFields = @("flag"; "input"; "type")
@@ -62,8 +62,17 @@ function Read-Policy {
     $unknown = @($names | Where-Object { $script:PolicyFields -notcontains $_ })
     if ($unknown.Count -gt 0) { throw "policy '$ConfigPath' declares unknown field(s): $($unknown -join ', ')" }
 
-    foreach ($name in @("componentId", "version", "entryDll") + $script:ToolchainFields) {
+    foreach ($name in @("componentId", "version", "entryDll")) {
         if ([string]::IsNullOrWhiteSpace("$($document.$name)")) { throw "policy '$ConfigPath' has an empty '$name'" }
+    }
+    # Same bounded ASCII identity grammar as the compiled contract, checked before the values reach any projection or output file.
+    $componentIdValue = $document.componentId
+    if ($componentIdValue -isnot [string] -or $componentIdValue.Length -gt 32 -or $componentIdValue -cnotmatch '\A[a-z](?:[a-z0-9-]*[a-z0-9])?\z') {
+        throw "policy '$ConfigPath' componentId is not a bounded lowercase portable identifier"
+    }
+    $versionValue = $document.version
+    if ($versionValue -isnot [string] -or $versionValue.Length -gt 32 -or $versionValue.Contains("..") -or $versionValue -cnotmatch '\A[0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?\z') {
+        throw "policy '$ConfigPath' version is not a bounded portable version"
     }
     $publishedFiles = @($document.publishedFiles)
     if ($publishedFiles.Count -eq 0 -or @($publishedFiles | Where-Object { [string]::IsNullOrWhiteSpace("$_") }).Count -gt 0) {
@@ -130,16 +139,7 @@ function Get-Projection {
         $result[$entry.componentId] = @{
             version        = "$($document.version)"
             entryDll       = "$($document.entryDll)"
-            platform       = "$($document.platform)"
         }
-    }
-
-    foreach ($name in $script:ToolchainFields) {
-        $distinct = @($Participants | ForEach-Object { $result[$_.componentId][$name] } | Sort-Object -Unique)
-        if ($distinct.Count -ne 1) {
-            throw "participants disagree on canonical '$name': $($distinct -join ', ')"
-        }
-        $result[$name] = $distinct[0]
     }
 
     return $result
@@ -175,12 +175,10 @@ $componentIds = @($roster | ForEach-Object { $_.componentId })
 $projection = Get-Projection -Participants $roster
 # The one authored SDK version, read by the same strict rules as the compiled reader before any SDK exists.
 $sdk = Get-OwnedSdkVersion -Root $Root
-$platform = $projection["platform"]
 
 # `$summary` is shared by both modes; the verified toolchain values belong to -Verify alone.
 $summary = [ordered]@{
-    "RELEASE_SDK"      = $sdk
-    "RELEASE_PLATFORM" = $platform
+    "RELEASE_SDK" = $sdk
 }
 foreach ($componentId in $componentIds) {
     $fields = $projection[$componentId]
@@ -195,7 +193,6 @@ if ($Project) {
     $componentsJson = ConvertTo-Json -Compress -InputObject $componentIds
     if ($env:GITHUB_OUTPUT) {
         Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "sdk=$sdk"
-        Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "platform=$platform"
         Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "components=$componentsJson"
     } else {
         Write-Host "GITHUB_OUTPUT is not set; projecting to stdout only (local validation mode)"
@@ -287,9 +284,9 @@ if (-not (Test-RuntimeCompatible -Derived $runtime -Installed $observedRuntimes)
     throw "no installed runtime is compatible with 'Microsoft.NETCore.App $runtime' (same major.minor, patch at least the derived value, never a prerelease for a stable value); observed [$($observedRuntimes -join ', ')]"
 }
 
-$runningPlatform = [System.Runtime.InteropServices.RuntimeInformation]::RuntimeIdentifier
-if ($runningPlatform -ne $platform) {
-    throw "this host runs '$runningPlatform' where the canonical platform is '$platform'"
+$platform = [System.Runtime.InteropServices.RuntimeInformation]::RuntimeIdentifier
+if ($platform -cne $script:QualifiedPlatform) {
+    throw "this host runs '$platform' where the publisher is qualified for '$($script:QualifiedPlatform)'"
 }
 
 Write-Host "verified executing toolchain sdk=$sdk runtime=$runtime platform=$platform for $componentLabel"
@@ -298,6 +295,7 @@ Write-Host "verified executing toolchain sdk=$sdk runtime=$runtime platform=$pla
 $verified = [ordered]@{
     "MCP_RELEASE_VERIFIED_SDK"              = $sdk
     "MCP_RELEASE_VERIFIED_RUNTIME"          = $runtime
+    "MCP_RELEASE_VERIFIED_PLATFORM"         = $platform
     "MCP_RELEASE_VERIFIED_TARGET_FRAMEWORK" = $targetFramework
     "MCP_RELEASE_VERIFIED_LANGUAGE_VERSION" = $languageVersion
 }

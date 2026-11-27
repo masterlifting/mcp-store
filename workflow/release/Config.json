@@ -1,10 +1,7 @@
 {
   "componentId": "workflow",
-  "version": "3.0.1",
+  "version": "3.0.2",
   "entryDll": "Mcp.Workflow.dll",
-  "platform": "win-x64",
-  "archiveName": "v3.0.1.zip",
-  "assetUri": "https://github.com/masterlifting/mcp-store/releases/download/workflow/v3.0.1.zip",
   "publishedFiles": [
     "FSharp.Core.dll",
     "Mcp.Workflow.deps.json",

@@ -1,10 +1,7 @@
 {
   "componentId": "resolver",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "entryDll": "Resolver.dll",
-  "platform": "win-x64",
-  "archiveName": "v1.0.0.zip",
-  "assetUri": "https://github.com/masterlifting/mcp-store/releases/download/resolver/v1.0.0.zip",
   "publishedFiles": [
     "FSharp.Core.dll",
     "Resolver.deps.json",

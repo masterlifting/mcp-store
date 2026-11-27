@@ -12,9 +12,6 @@ open System.Text
 open SharedFailure
 open BuildProvenance
 
-// The canonical pin/release-metadata schema version (owned by the shared contract).
-let metadataSchemaVersion = DistributionPin.schemaVersion
-
 // The published release-metadata projection is the canonical pin record.
 type ProducerMetadataProjection = DistributionPin.Pin
 
@@ -72,26 +69,7 @@ let writeToFileAsync (path: string) (projection: ProducerMetadataProjection) : A
         | :? UnauthorizedAccessException as error -> return Error(FileFailure("write", path, error.Message))
     }
 
-let makeProjection
-    (componentId: string)
-    (version: string)
-    (assetUri: string)
-    (archiveName: string)
-    (archiveSha256: string)
-    (manifestSha256: string)
-    (publishedRevision: string)
-    (producerSdk: string option)
-    (producerRuntime: string option)
-    (producerPlatform: string option)
-    : ProducerMetadataProjection =
-    { SchemaVersion = metadataSchemaVersion
-      ComponentId = componentId
+let makeProjection (componentId: string) (version: string) (archiveSha256: string) : ProducerMetadataProjection =
+    { Id = componentId
       Version = version
-      AssetUri = assetUri
-      ArchiveName = archiveName
-      ArchiveSha256 = archiveSha256
-      ManifestSha256 = manifestSha256
-      PublishedRevision = publishedRevision
-      ProducerSdk = producerSdk
-      ProducerRuntime = producerRuntime
-      ProducerPlatform = producerPlatform }
+      Digest = DistributionPin.digestFor archiveSha256 }

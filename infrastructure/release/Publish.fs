@@ -641,12 +641,12 @@ let uploadMetadataBytes
                 Error(
                     FileFailure(
                         "upload-metadata",
-                        projection.ComponentId,
-                        $"W3 dev mode: refusing to upload a pre-verified metadata projection for {projection.ComponentId} {projection.Version}; set MCP_RELEASE_DO_UPLOAD=true for the production release path"))
+                        projection.Id,
+                        $"W3 dev mode: refusing to upload a pre-verified metadata projection for {projection.Id} {projection.Version}; set MCP_RELEASE_DO_UPLOAD=true for the production release path"))
         elif String.IsNullOrEmpty auth.Token then
-            return Error(FileFailure("upload-metadata", projection.ArchiveName, "the auth token is empty"))
+            return Error(FileFailure("upload-metadata", projection.Id, "the auth token is empty"))
         else
-            let assetName = ReleaseMetadata.metadataAssetName projection.ComponentId projection.Version
+            let assetName = ReleaseMetadata.metadataAssetName projection.Id projection.Version
             let bytes = Encoding.UTF8.GetBytes(ReleaseMetadata.render projection)
             let expectedDigest = sha256Hex bytes
 
